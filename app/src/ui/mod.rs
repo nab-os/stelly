@@ -9,12 +9,14 @@ pub mod generate;
 pub mod library;
 pub mod pipeline;
 pub mod player;
+pub mod queue;
 
 pub use crawler::Crawler;
 pub use generate::{GeneratePanel, Generator};
 pub use library::{open_initial, Library, LibraryPanel};
 pub use pipeline::{Pipeline, PipelineView};
 pub use player::{use_transport, Player, PlayerBar};
+pub use queue::QueueView;
 
 use dioxus::prelude::*;
 use crate::api::BlockedArtist;

@@ -21,6 +21,9 @@ pub struct Player {
     /// `<audio>` element, which survives a src swap.
     pub volume: Signal<f64>,
     pub muted: Signal<bool>,
+    /// Whether the queue drawer is showing. Lives here rather than in the
+    /// shell so the player bar's toggle and the drawer share one switch.
+    pub queue_open: Signal<bool>,
 }
 
 impl Player {
@@ -119,6 +122,55 @@ pub fn play_next(mut player: Player, tracks: Vec<RemoteTrack>) {
     }
 }
 
+/// Drop one entry, keeping `index` on whatever is playing.
+///
+/// Removing the playing track hands over to whatever slides into its place.
+/// When nothing does, it was last, playback stops and `index` stays on the
+/// track before it, which is where reaching the end of a queue leaves it too.
+pub fn remove_at(mut player: Player, at: usize) {
+    let length = player.queue.peek().len();
+    if at >= length {
+        return;
+    }
+
+    let current = *player.index.peek();
+    player.queue.write().remove(at);
+
+    if at < current {
+        // Everything below it shifted up by one, the playing track included.
+        player.index.set(current - 1);
+    } else if at == current {
+        if at < length - 1 {
+            spawn(async move { play_at(player, at).await });
+        } else {
+            player.index.set(at.saturating_sub(1));
+            player.position.set((0.0, 0.0));
+            player.playing.set(false);
+            transport("twoKhzStop");
+        }
+    }
+}
+
+/// Shift one entry by `delta` places, following it with `index` if it was the
+/// one playing. Out-of-range moves are ignored, so the ends simply do nothing.
+pub fn move_by(mut player: Player, at: usize, delta: i64) {
+    let length = player.queue.peek().len();
+    let target = at as i64 + delta;
+    if at >= length || target < 0 || target as usize >= length {
+        return;
+    }
+    let target = target as usize;
+
+    player.queue.write().swap(at, target);
+
+    let current = *player.index.peek();
+    if current == at {
+        player.index.set(target);
+    } else if current == target {
+        player.index.set(at);
+    }
+}
+
 pub async fn play_at(mut player: Player, index: usize) {
     // Scoped so the read guard is gone before the first await.
     let track = {
@@ -212,6 +264,7 @@ pub fn PlayerBar() -> Element {
     let quality = *player.quality.read();
     let volume = *player.volume.read();
     let muted = *player.muted.read();
+    let mut queue_open = player.queue_open;
 
     // The audio element's own duration is authoritative once it has loaded;
     // Qobuz's metadata fills the gap before that.
@@ -289,7 +342,15 @@ pub fn PlayerBar() -> Element {
 
             div { class: "player-meta",
                 if queue_length > 0 {
-                    span { class: "muted", "{index + 1}/{queue_length}" }
+                    button {
+                        class: if queue_open() { "chip active" } else { "chip" },
+                        title: "show the queue",
+                        onclick: move |_| {
+                            let next = !queue_open();
+                            queue_open.set(next);
+                        },
+                        "{index + 1}/{queue_length}"
+                    }
                 }
 
                 div { class: "volume",

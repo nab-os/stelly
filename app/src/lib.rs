@@ -242,6 +242,15 @@ impl ServerConfig {
         std::fs::write(path, serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
+
+    /// Forget the pairing, so the next start falls back to the local half.
+    /// Absent is the goal, so a file that was not there is success.
+    pub fn clear() -> Result<()> {
+        match std::fs::remove_file(Self::path()) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.into()),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Wiring {

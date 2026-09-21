@@ -7,9 +7,9 @@ use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
     Blocklist, Crawler, GeneratePanel, Generator, Library, LibraryPanel, LocalIds, Pipeline,
-    PipelineView, Player, PlayerBar, Selection,
+    PipelineView, Player, PlayerBar, QueueView, Selection,
 };
-use crate::{engine, map, Wiring};
+use crate::{engine, map, ServerConfig, Wiring};
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
 use std::collections::HashMap;
@@ -208,6 +208,124 @@ fn Setup(ready: Signal<bool>) -> Element {
     }
 }
 
+/// Where the server address and token can be changed after the first run.
+///
+/// Saves and asks for a restart rather than reconnecting in place:
+/// `backend::init` fills a `OnceLock`, so a second call is silently ignored
+/// once this process has a backend. Swapping one live would mean handing every
+/// caller something other than the `&'static Backend` they hold across awaits,
+/// which is a much larger change than this screen is worth.
+#[component]
+fn Settings(open: Signal<bool>) -> Element {
+    let stored = use_signal(ServerConfig::load);
+    let mut address = use_signal(|| {
+        stored
+            .peek()
+            .as_ref()
+            .map(|c| c.base.clone())
+            .unwrap_or_else(|| "http://".into())
+    });
+    let mut token = use_signal(|| {
+        stored
+            .peek()
+            .as_ref()
+            .map(|c| c.token.clone())
+            .unwrap_or_default()
+    });
+    let mut status = use_signal(|| None::<String>);
+
+    let remote = backend::is_remote();
+
+    let save = move |_| {
+        let base = address.peek().trim().trim_end_matches('/').to_string();
+        let secret = token.peek().trim().to_string();
+        if base.is_empty() || secret.is_empty() {
+            status.set(Some("Both the address and the token are needed.".into()));
+            return;
+        }
+
+        match (ServerConfig { base, token: secret }).save() {
+            Ok(()) => status.set(Some(
+                "Saved. Restart 2kHz to connect to it, the running process keeps the \
+                 server it started with."
+                    .into(),
+            )),
+            Err(err) => status.set(Some(format!("could not save: {err:#}"))),
+        }
+    };
+
+    let forget = move |_| {
+        match ServerConfig::clear() {
+            Ok(()) => {
+                address.set("http://".into());
+                token.set(String::new());
+                status.set(Some(
+                    "Pairing forgotten. Restart 2kHz to fall back to this machine's own \
+                     catalogue."
+                        .into(),
+                ));
+            }
+            Err(err) => status.set(Some(format!("could not clear the pairing: {err:#}"))),
+        }
+    };
+
+    rsx! {
+        div {
+            class: "modal-backdrop",
+            // Only a click that started and ended on the backdrop closes it,
+            // which a click landing on the panel does not.
+            onclick: move |_| open.set(false),
+
+            div {
+                class: "panel setup modal",
+                onclick: move |event| event.stop_propagation(),
+
+                h1 { "Settings" }
+                p { class: "muted",
+                    if remote {
+                        "Playing through a server. The space itself is navigated on this device."
+                    } else {
+                        "Running on this machine's own catalogue and data directory. Fill these \
+                         in to play through a server instead."
+                    }
+                }
+
+                label { "Server address" }
+                input {
+                    class: "search",
+                    placeholder: "http://nas.tailnet.ts.net:7700",
+                    value: "{address}",
+                    oninput: move |event| address.set(event.value()),
+                }
+
+                label { "Device token" }
+                input {
+                    class: "search",
+                    placeholder: "what `pair` printed",
+                    value: "{token}",
+                    oninput: move |event| token.set(event.value()),
+                }
+                p { class: "muted",
+                    "Pair a device on the server with "
+                    code { "two-khz-server pair --name phone --scope play" }
+                    "."
+                }
+
+                div { class: "actions",
+                    button { class: "primary", onclick: save, "save" }
+                    button { onclick: forget, "forget pairing" }
+                    span { class: "spacer" }
+                    button { onclick: move |_| open.set(false), "close" }
+                }
+
+                if let Some(message) = status.read().clone() {
+                    pre { class: "log", "{message}" }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn Shell() -> Element {
     let mut query = use_signal(String::new);
@@ -226,6 +344,7 @@ fn Shell() -> Element {
         status: Signal::new(None),
         volume: Signal::new(1.0),
         muted: Signal::new(false),
+        queue_open: Signal::new(false),
     });
 
     let library = use_context_provider(Library::new);
@@ -242,6 +361,10 @@ fn Shell() -> Element {
     // Explore is the map and space tools; Pipeline builds the corpus. One
     // window because they share the player and the database.
     let mut explore = use_signal(|| true);
+
+    // Overlaid rather than a third view: changing a server address is a thing
+    // you do once, not a place you work.
+    let mut settings = use_signal(|| false);
 
     // Which of the three Explore panes a narrow screen shows; ignored above
     // the breakpoint. Opens on the Qobuz library, since a blank map reads as
@@ -564,6 +687,16 @@ fn Shell() -> Element {
                 }
                 span { class: "spacer" }
                 span { class: "muted", "{selected_label}" }
+                button {
+                    class: "chip",
+                    title: "server address and token",
+                    onclick: move |_| settings.set(true),
+                    "settings"
+                }
+            }
+
+            if settings() {
+                Settings { open: settings }
             }
 
             // Narrow screens show one pane at a time. Here rather than a
@@ -704,6 +837,7 @@ fn Shell() -> Element {
                 PipelineView {}
             }
 
+            QueueView {}
             PlayerBar {}
         }
     }
