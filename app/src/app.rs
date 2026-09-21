@@ -234,8 +234,6 @@ fn Settings(open: Signal<bool>) -> Element {
     });
     let mut status = use_signal(|| None::<String>);
 
-    let remote = backend::is_remote();
-
     let save = move |_| {
         let base = address.peek().trim().trim_end_matches('/').to_string();
         let secret = token.peek().trim().to_string();
@@ -264,8 +262,7 @@ fn Settings(open: Signal<bool>) -> Element {
                 address.set("http://".into());
                 token.set(String::new());
                 status.set(Some(
-                    "Pairing forgotten. Restart 2kHz to fall back to this machine's own \
-                     catalogue."
+                    "Pairing forgotten. Restart 2kHz to pair with a server again."
                         .into(),
                 ));
             }
@@ -286,12 +283,7 @@ fn Settings(open: Signal<bool>) -> Element {
 
                 h1 { "Settings" }
                 p { class: "muted",
-                    if remote {
-                        "Playing through a server. The space itself is navigated on this device."
-                    } else {
-                        "Running on this machine's own catalogue and data directory. Fill these \
-                         in to play through a server instead."
-                    }
+                    "Playing through a server. The space itself is navigated on this device."
                 }
 
                 label { "Server address" }

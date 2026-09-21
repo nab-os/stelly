@@ -20,6 +20,9 @@ pub struct TrackMeta {
     pub album_id: String,
     pub bpm: Option<f32>,
     pub seed_distance: i32,
+    /// Names the recording rather than the release; see
+    /// `qobuz::RemoteTrack::identity`.
+    pub isrc: Option<String>,
     /// UMAP coordinates for the map, if the layout step has been run.
     pub x: Option<f32>,
     pub y: Option<f32>,
@@ -94,6 +97,7 @@ struct Row {
     descriptors: Option<String>,
     x: Option<f64>,
     y: Option<f64>,
+    isrc: Option<String>,
 }
 
 impl From<Row> for TrackMeta {
@@ -117,6 +121,7 @@ impl From<Row> for TrackMeta {
             bpm,
             x: row.x.map(|v| v as f32),
             y: row.y.map(|v| v as f32),
+            isrc: row.isrc,
         }
     }
 }
@@ -144,6 +149,7 @@ impl Catalog {
                 features::descriptors_json.nullable(),
                 layout::x.nullable(),
                 layout::y.nullable(),
+                tracks::isrc,
             ))
             .load(conn)?;
         let mut by_id: HashMap<i64, TrackMeta> = rows

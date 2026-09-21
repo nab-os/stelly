@@ -33,6 +33,34 @@ pub struct RemoteTrack {
     /// The album's cover; a track has no art of its own. See `image`.
     #[serde(default)]
     pub image: Option<String>,
+    /// The recording, as opposed to this particular catalogue entry. One
+    /// song reached through a single, an album and a deluxe reissue is three
+    /// track ids but one ISRC, which is what `identity` dedupes on.
+    #[serde(default)]
+    pub isrc: Option<String>,
+}
+
+impl RemoteTrack {
+    /// What makes two queue entries "the same music".
+    ///
+    /// The ISRC when Qobuz reports one, since that names the recording rather
+    /// than the release. Falling back to the track id means an untagged track
+    /// is only ever a duplicate of itself, which is the safe direction: a
+    /// missed duplicate is a nuisance, a wrongly dropped track is a bug.
+    pub fn identity(&self) -> TrackIdentity {
+        match self.isrc.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(isrc) => TrackIdentity::Recording(isrc.to_ascii_uppercase()),
+            None => TrackIdentity::Entry(self.id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TrackIdentity {
+    /// An ISRC, upper-cased, Qobuz is not consistent about the case.
+    Recording(String),
+    /// A Qobuz track id, for the tracks that carry no ISRC.
+    Entry(i64),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -199,6 +227,7 @@ impl RemoteTrack {
             // A track carries no art; the cover comes from whichever album
             // description reached it, nested or passed down.
             image: image(&album).or_else(|| context.and_then(|parent| parent.image.clone())),
+            isrc: text(value, "isrc"),
             hires: value
                 .get("hires_streamable")
                 .or_else(|| value.get("hires"))
@@ -283,4 +312,75 @@ pub struct SearchResults {
     pub tracks: Vec<RemoteTrack>,
     pub albums: Vec<RemoteAlbum>,
     pub artists: Vec<RemoteArtist>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: i64, isrc: Option<&str>) -> RemoteTrack {
+        RemoteTrack {
+            id,
+            isrc: isrc.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_recording_across_two_releases_is_one_identity() {
+        // The point of the whole exercise: a single and a deluxe reissue are
+        // different catalogue entries carrying the same recording.
+        assert_eq!(
+            track(111, Some("GBAAA9100123")).identity(),
+            track(222, Some("GBAAA9100123")).identity()
+        );
+    }
+
+    #[test]
+    fn isrc_case_does_not_make_a_second_identity() {
+        assert_eq!(
+            track(111, Some("gbaaa9100123")).identity(),
+            track(222, Some("GBAAA9100123")).identity()
+        );
+    }
+
+    #[test]
+    fn an_untagged_track_is_only_ever_a_duplicate_of_itself() {
+        // The safe direction: a missed duplicate is a nuisance, a wrongly
+        // dropped track is a bug.
+        assert_eq!(track(111, None).identity(), track(111, None).identity());
+        assert_ne!(track(111, None).identity(), track(222, None).identity());
+    }
+
+    #[test]
+    fn a_blank_isrc_counts_as_absent() {
+        // Qobuz sends "" rather than null often enough to matter; taking it at
+        // face value would collapse every untagged track into one.
+        assert_eq!(track(111, Some("   ")).identity(), TrackIdentity::Entry(111));
+        assert_ne!(
+            track(111, Some("")).identity(),
+            track(222, Some("")).identity()
+        );
+    }
+
+    #[test]
+    fn a_tagged_and_an_untagged_track_never_collide() {
+        assert_ne!(
+            track(111, Some("GBAAA9100123")).identity(),
+            track(111, None).identity()
+        );
+    }
+
+    #[test]
+    fn cover_url_follows_the_two_by_two_tail_convention() {
+        // Qobuz nests covers under the last two characters of the id, then the
+        // two before those.
+        assert_eq!(
+            cover_url("3610159663848").as_deref(),
+            Some("https://static.qobuz.com/images/covers/48/38/3610159663848_230.jpg")
+        );
+        // Too short to split, so there is nothing to guess from.
+        assert_eq!(cover_url("12"), None);
+        assert_eq!(cover_url(""), None);
+    }
 }

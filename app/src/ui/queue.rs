@@ -4,7 +4,7 @@
 //! an autoscroll to be usable, and neither survives contact with a touch
 //! screen. Two buttons work identically everywhere.
 
-use super::player::{move_by, play_at, remove_at, Player};
+use super::player::{clear_queue, move_by, play_at, remove_at, Player};
 use super::Cover;
 use crate::engine;
 use crate::qobuz::RemoteTrack;
@@ -45,8 +45,8 @@ fn sort_queue(mut player: Player) {
     }
 
     // Consume by id rather than index: `ordered` drops what the space does not
-    // hold, and `position` takes one copy at a time so a track queued twice
-    // stays queued twice.
+    // hold. `position` takes one entry at a time, so this stays correct even
+    // though the queue's own dedupe means there should be nothing to repeat.
     let mut remaining: Vec<RemoteTrack> = upcoming.to_vec();
     let mut sorted: Vec<RemoteTrack> = Vec::with_capacity(remaining.len());
     for id in ordered {
@@ -89,6 +89,13 @@ pub fn QueueView() -> Element {
                         disabled: total < current + 3,
                         onclick: move |_| sort_queue(player),
                         "sort by distance"
+                    }
+                    button {
+                        class: "chip danger",
+                        title: "empty the queue and stop",
+                        disabled: total == 0,
+                        onclick: move |_| clear_queue(player),
+                        "clear"
                     }
                     button {
                         class: "chip",

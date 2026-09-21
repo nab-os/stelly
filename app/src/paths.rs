@@ -683,13 +683,16 @@ mod tests {
     }
 
     #[test]
-    fn keeps_both_copies_of_a_repeated_track() {
+    fn returns_every_placeable_input_even_when_repeated() {
+        // A queue cannot hold the same recording twice, so this should not
+        // come up, but ordering is a pure reshuffle and must not be the
+        // thing that silently drops a track if it ever does.
         let nav = fixture();
         let ordered = nav.shortest_path_order(&[14, 12, 14, 11], Some(10));
 
         let mut seen = ordered.clone();
         seen.sort();
-        assert_eq!(seen, vec![11, 12, 14, 14], "queued twice, played twice");
+        assert_eq!(seen, vec![11, 12, 14, 14], "nothing in, nothing lost");
 
         // Two copies sit at zero distance, so nothing can come between them.
         let first = ordered.iter().position(|&id| id == 14).unwrap();

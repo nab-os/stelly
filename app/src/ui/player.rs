@@ -6,7 +6,10 @@
 use super::Cover;
 use dioxus::prelude::*;
 use crate::backend::backend;
-use crate::qobuz::{RemoteTrack, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
+use crate::qobuz::{
+    RemoteTrack, TrackIdentity, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320,
+};
+use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
 pub struct Player {
@@ -78,16 +81,50 @@ fn transport(command: &str) {
     document::eval(&format!("window.{command} && window.{command}();"));
 }
 
+/// Drop tracks already spoken for, keeping the first of each.
+///
+/// A queue never holds the same recording twice, so every path into it comes
+/// through here. `seen` carries whatever the queue already holds, so a list
+/// being appended is filtered both against the queue and against itself.
+fn unduplicated(tracks: Vec<RemoteTrack>, seen: &mut HashSet<TrackIdentity>) -> Vec<RemoteTrack> {
+    tracks
+        .into_iter()
+        .filter(|track| seen.insert(track.identity()))
+        .collect()
+}
+
+/// The identities a queue currently holds.
+fn identities(tracks: &[RemoteTrack]) -> HashSet<TrackIdentity> {
+    tracks.iter().map(|track| track.identity()).collect()
+}
+
 /// Replace the queue and start at `index`.
+///
+/// `index` refers to the caller's list, which may lose entries on the way in;
+/// the track it pointed at is looked up again afterwards so that clicking the
+/// third row still plays the third row, not whatever slid into its place.
 pub fn play_list(mut player: Player, queue: Vec<RemoteTrack>, index: usize) {
+    let wanted = queue.get(index).map(|track| track.identity());
+    let queue = unduplicated(queue, &mut HashSet::new());
+
+    let start = wanted
+        .and_then(|id| queue.iter().position(|track| track.identity() == id))
+        .unwrap_or(0);
+
     player.queue.set(queue);
-    spawn(async move { play_at(player, index).await });
+    spawn(async move { play_at(player, start).await });
 }
 
 /// Append to the queue, starting playback if nothing is going.
 pub fn enqueue(mut player: Player, tracks: Vec<RemoteTrack>) {
     let was_empty = player.queue.peek().is_empty();
     let start = player.queue.peek().len();
+
+    let tracks = unduplicated(tracks, &mut identities(&player.queue.peek()));
+    if tracks.is_empty() {
+        return;
+    }
+
     player.queue.write().extend(tracks);
     if was_empty {
         spawn(async move { play_at(player, start).await });
@@ -97,6 +134,7 @@ pub fn enqueue(mut player: Player, tracks: Vec<RemoteTrack>) {
 /// Insert directly after whatever is playing, so these come next and the rest
 /// of the queue still follows. With nothing playing this is `enqueue`.
 pub fn play_next(mut player: Player, tracks: Vec<RemoteTrack>) {
+    let tracks = unduplicated(tracks, &mut identities(&player.queue.peek()));
     if tracks.is_empty() {
         return;
     }
@@ -120,6 +158,16 @@ pub fn play_next(mut player: Player, tracks: Vec<RemoteTrack>) {
     if length == 0 {
         spawn(async move { play_at(player, 0).await });
     }
+}
+
+/// Empty the queue and stop. Here rather than in the drawer that offers it,
+/// because `transport` is private to this module.
+pub fn clear_queue(mut player: Player) {
+    player.queue.set(Vec::new());
+    player.index.set(0);
+    player.position.set((0.0, 0.0));
+    player.playing.set(false);
+    transport("twoKhzStop");
 }
 
 /// Drop one entry, keeping `index` on whatever is playing.
@@ -341,18 +389,6 @@ pub fn PlayerBar() -> Element {
             }
 
             div { class: "player-meta",
-                if queue_length > 0 {
-                    button {
-                        class: if queue_open() { "chip active" } else { "chip" },
-                        title: "show the queue",
-                        onclick: move |_| {
-                            let next = !queue_open();
-                            queue_open.set(next);
-                        },
-                        "{index + 1}/{queue_length}"
-                    }
-                }
-
                 div { class: "volume",
                     button {
                         class: "chip",
@@ -400,15 +436,21 @@ pub fn PlayerBar() -> Element {
                         }
                     }
                 }
+                // Last on the line, and the way into the drawer that holds
+                // everything else the queue can do, clearing included.
                 button {
+                    class: if queue_open() { "chip active" } else { "chip" },
+                    title: "show the tracklist",
                     disabled: queue_length == 0,
                     onclick: move |_| {
-                        player.queue.set(Vec::new());
-                        player.index.set(0);
-                        player.position.set((0.0, 0.0));
-                        transport("twoKhzStop");
+                        let next = !queue_open();
+                        queue_open.set(next);
                     },
-                    "clear"
+                    if queue_length > 0 {
+                        "{index + 1}/{queue_length}"
+                    } else {
+                        "queue"
+                    }
                 }
             }
 
