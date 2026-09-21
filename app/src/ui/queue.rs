@@ -4,7 +4,8 @@
 //! an autoscroll to be usable, and neither survives contact with a touch
 //! screen. Two buttons work identically everywhere.
 
-use super::player::{clear_queue, move_by, play_at, remove_at, Player};
+use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
+use super::player::{clear_queue, move_by, play_at, Player};
 use super::Cover;
 use crate::engine;
 use crate::qobuz::RemoteTrack;
@@ -71,6 +72,7 @@ fn sort_queue(mut player: Player) {
 pub fn QueueView() -> Element {
     let player = use_context::<Player>();
     let mut queue_open = player.queue_open;
+    let mut menu = use_context::<ContextMenu>().0;
 
     let queue = player.queue.read().clone();
     let current = *player.index.read();
@@ -115,9 +117,17 @@ pub fn QueueView() -> Element {
                                 onclick: move |_| {
                                     spawn(async move { play_at(player, index).await });
                                 },
+                                oncontextmenu: move |event: Event<MouseData>| {
+                                    event.prevent_default();
+                                    open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));
+                                },
                                 Cover { url: track.image.clone(), class: "thumb" }
                                 span { class: "artist", "{track.artist}" }
                                 span { class: "title", "{track.title}" }
+                                // Reordering keeps its arrows: it is the one
+                                // action you repeat, and a menu round trip per
+                                // place moved would be miserable. Everything
+                                // else this row can do lives in the menu.
                                 button {
                                     class: "chip",
                                     title: "move up",
@@ -138,16 +148,8 @@ pub fn QueueView() -> Element {
                                     },
                                     "↓"
                                 }
-                                button {
-                                    class: "chip danger",
-                                    title: "remove from the queue",
-                                    onclick: move |event| {
-                                        event.stop_propagation();
-                                        remove_at(player, index);
-                                    },
-                                    "×"
-                                }
                                 span { class: "muted", "{track.duration_label()}" }
+                                {menu_button(menu, MenuTarget::QueueEntry(index))}
                             }
                         }
                     }

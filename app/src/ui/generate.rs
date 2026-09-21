@@ -7,6 +7,7 @@
 //!   - **path**: A to B, shortest route or evenly paced.
 //!   - **drift**: away from a track, towards a phrase.
 
+use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{play_list, Player};
 use super::Selection;
 use dioxus::prelude::*;
@@ -194,7 +195,7 @@ impl Default for Generator {
 }
 
 /// Present a space track to the player, which speaks in Qobuz terms.
-fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
+pub(crate) fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
     RemoteTrack {
         id: meta.track_id,
         title: meta.title.clone(),
@@ -222,6 +223,7 @@ pub fn GeneratePanel() -> Element {
     let player = use_context::<Player>();
     let selection = use_context::<Selection>();
     let mut selected = selection.0;
+    let mut menu = use_context::<ContextMenu>().0;
 
     let mode = *generator.mode.read();
     let result = generator.result.read().clone();
@@ -435,11 +437,19 @@ pub fn GeneratePanel() -> Element {
                             let id = step.track.track_id;
                             move |_| selected.set(Some(id))
                         },
+                        oncontextmenu: {
+                            let id = step.track.track_id;
+                            move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                            }
+                        },
                         span { class: "artist", "{step.track.artist}" }
                         span { class: "title", "{step.track.title}" }
                         span { class: "muted",
                             {step.similarity.map(|s| format!("{s:.3}")).unwrap_or_default()}
                         }
+                        {menu_button(menu, MenuTarget::SpaceTrack(step.track.track_id))}
                     }
                 }
             }

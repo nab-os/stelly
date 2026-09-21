@@ -3,8 +3,9 @@
 //! Navigation is explicit rather than reactive: every move sets the view and
 //! spawns its own load. One `Shelf` holds whatever the view returned.
 
+use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
-use super::{Blocklist, Cover, LocalIds, Selection, LIST_CAP, SEARCH_LIMIT};
+use super::{Blocklist, Cover, LocalIds, LIST_CAP, SEARCH_LIMIT};
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
@@ -94,7 +95,7 @@ impl Library {
     }
 
     /// Navigate, remembering where we came from.
-    fn go(mut self, target: View) {
+    pub(crate) fn go(mut self, target: View) {
         let previous = self.view.peek().clone();
         if previous != target {
             self.history.write().push(previous);
@@ -188,7 +189,7 @@ async fn load(view: View) -> anyhow::Result<Shelf> {
 /// Fetch an artist or album into the catalogue, here and now. An album's
 /// tracklist lands immediately and a discography is queued; only feature
 /// extraction still belongs to the pipeline.
-fn request_analysis(library: Library, kind: &str, id: &str, label: &str) {
+pub(crate) fn request_analysis(library: Library, kind: &str, id: &str, label: &str) {
     let mut library = library;
     let (kind, id, label) = (kind.to_string(), id.to_string(), label.to_string());
 
@@ -462,9 +463,9 @@ impl Shelf {
 fn TrackRows() -> Element {
     let library = use_context::<Library>();
     let player = use_context::<Player>();
-    let mut selection = use_context::<Selection>();
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
 
     let tracks = library.shelf.read().visible_tracks(&blocklist);
     let now_playing = player.current().map(|t| t.id);
@@ -484,81 +485,24 @@ fn TrackRows() -> Element {
                         let queue = library.shelf.peek().visible_tracks(&blocklist);
                         play_list(player, queue, index);
                     },
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
+                    },
                     Cover { url: track.image.clone(), class: "thumb" }
                     span { class: "artist", "{track.artist}" }
                     span { class: "title", "{track.title}" }
                     if !track.streamable {
                         span { class: "muted tag", "-" }
                     }
-                    if let Some(artist_id) = track.artist_id {
-                        button {
-                            class: "chip danger",
-                            title: "hide this artist everywhere",
-                            onclick: move |event| {
-                                event.stop_propagation();
-                                let name = library
-                                    .shelf
-                                    .peek()
-                                    .tracks
-                                    .iter()
-                                    .find(|t| t.artist_id == Some(artist_id))
-                                    .map(|t| t.artist.clone())
-                                    .unwrap_or_default();
-
-                                blocklist.block.call((artist_id, name));
-                            },
-                            "hide"
-                        }
-                    }
-                    // Read back out of the shelf by index rather than captured:
-                    // one owned `track` cannot move into two closures, and the
-                    // visible list is the one the index refers to.
-                    button {
-                        class: "chip",
-                        title: "play after the current track",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let found = library
-                                .shelf
-                                .peek()
-                                .visible_tracks(&blocklist)
-                                .get(index)
-                                .cloned();
-                            if let Some(track) = found {
-                                play_next(player, vec![track]);
-                            }
-                        },
-                        "next"
-                    }
-                    button {
-                        class: "chip",
-                        title: "add to the end of the queue",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let found = library
-                                .shelf
-                                .peek()
-                                .visible_tracks(&blocklist)
-                                .get(index)
-                                .cloned();
-                            if let Some(track) = found {
-                                enqueue(player, vec![track]);
-                            }
-                        },
-                        "last"
-                    }
                     if local.0.read().contains(&track.id) {
-                        // Analysed: this one exists as a point on the map.
-                        button {
-                            class: "chip",
-                            onclick: move |event| {
-                                event.stop_propagation();
-                                selection.0.set(Some(track.id));
-                            },
-                            "in space"
-                        }
+                        // A mark, not a button: that this track is a point on
+                        // the map is something to know while scanning the
+                        // list, and the menu is where you act on it.
+                        span { class: "in-space-dot", title: "analysed, on the map", "•" }
                     }
                     span { class: "muted", "{track.duration_label()}" }
+                    {menu_button(menu, MenuTarget::ShelfTrack(index))}
                 }
             }
         }
@@ -568,9 +512,8 @@ fn TrackRows() -> Element {
 #[component]
 fn AlbumRows() -> Element {
     let library = use_context::<Library>();
-    let player = use_context::<Player>();
-
     let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
     let albums = library.shelf.read().visible_albums(&blocklist);
 
     rsx! {
@@ -594,47 +537,15 @@ fn AlbumRows() -> Element {
                             library.go(target);
                         }
                     },
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
+                    },
                     Cover { url: album.image.clone(), class: "thumb" }
                     span { class: "artist", "{album.artist}" }
                     span { class: "title", "{album.title}" }
                     span { class: "muted", "{album.year()}" }
-                    button {
-                        class: "chip",
-                        title: "play this album",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let id = library
-                                .shelf
-                                .peek()
-                                .visible_albums(&blocklist)
-                                .get(index)
-                                .map(|a| a.id.clone());
-                            let Some(id) = id else { return };
-                            spawn(async move {
-                                if let Ok(tracks) = backend().album_tracks(&id).await {
-                                    play_list(player, tracks, 0);
-                                }
-                            });
-                        },
-                        "▶"
-                    }
-                    button {
-                        class: "chip",
-                        title: "fetch this tracklist into the catalogue",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let found = library
-                                .shelf
-                                .peek()
-                                .visible_albums(&blocklist)
-                                .get(index)
-                                .map(|a| (a.id.clone(), a.title.clone()));
-                            if let Some((id, title)) = found {
-                                request_analysis(library, "album", &id, &title);
-                            }
-                        },
-                        "fetch"
-                    }
+                    {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                 }
             }
         }
@@ -644,8 +555,8 @@ fn AlbumRows() -> Element {
 #[component]
 fn ArtistRows(heading: String, similar: bool) -> Element {
     let library = use_context::<Library>();
-
     let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
     let artists = library.shelf.read().visible_artists(&blocklist, similar);
 
     rsx! {
@@ -669,37 +580,16 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                             library.go(target);
                         }
                     },
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar });
+                    },
                     Cover { url: artist.image.clone(), class: "thumb round" }
                     span { class: "title", "{artist.name}" }
                     if let Some(count) = artist.albums_count {
                         span { class: "muted", "{count} albums" }
                     }
-                    button {
-                        class: "chip",
-                        title: "fetch this discography into the catalogue",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let found = library
-                                .shelf
-                                .peek()
-                                .visible_artists(&blocklist, similar)
-                                .get(index)
-                                .map(|a| (a.id, a.name.clone()));
-                            if let Some((id, name)) = found {
-                                request_analysis(library, "artist", &id.to_string(), &name);
-                            }
-                        },
-                        "fetch"
-                    }
-                    button {
-                        class: "chip danger",
-                        title: "hide this artist everywhere",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            blocklist.block.call((artist.id, artist.name.clone()));
-                        },
-                        "hide"
-                    }
+                    {menu_button(menu, MenuTarget::ShelfArtist { index, similar })}
                 }
             }
         }

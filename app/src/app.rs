@@ -6,8 +6,8 @@
 use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
-    Blocklist, Crawler, GeneratePanel, Generator, Library, LibraryPanel, LocalIds, Pipeline,
-    PipelineView, Player, PlayerBar, QueueView, Selection,
+    Blocklist, ContextMenu, ContextMenuView, Crawler, GeneratePanel, Generator, Library,
+    LibraryPanel, LocalIds, Pipeline, PipelineView, Player, PlayerBar, QueueView, Selection,
 };
 use crate::{engine, map, ServerConfig, Wiring};
 use crate::platform::wry::http::Response;
@@ -361,6 +361,10 @@ fn Shell() -> Element {
     // Overlaid rather than a third view: changing a server address is a thing
     // you do once, not a place you work.
     let mut settings = use_signal(|| false);
+
+    // One menu for every row in the window. Rows open it; it performs the
+    // action itself, so no row has to carry a popup or a set of callbacks.
+    use_context_provider(|| ContextMenu(Signal::new(None)));
 
     // Which of the three Explore panes a narrow screen shows; ignored above
     // the breakpoint. Opens on the Qobuz library, since a blank map reads as
@@ -835,6 +839,9 @@ fn Shell() -> Element {
 
             QueueView {}
             PlayerBar {}
+
+            // Last, so it paints over everything it can be opened from.
+            ContextMenuView {}
         }
     }
 }
