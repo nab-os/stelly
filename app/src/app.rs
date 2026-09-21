@@ -244,7 +244,11 @@ fn Settings(open: Signal<bool>) -> Element {
             return;
         }
 
-        match (ServerConfig { base, token: secret }).save() {
+        let config = ServerConfig {
+            base,
+            token: secret,
+        };
+        match config.save() {
             Ok(()) => status.set(Some(
                 "Saved. Restart 2kHz to connect to it, the running process keeps the \
                  server it started with."
