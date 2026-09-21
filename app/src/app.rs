@@ -390,8 +390,12 @@ fn Shell() -> Element {
     use_future(move || async move {
         let mut handle = document::eval(include_str!("../assets/map.js"));
         while let Ok(message) = handle.recv::<serde_json::Value>().await {
-            if let Some(id) = message.get("track_id").and_then(|v| v.as_f64()) {
-                selected.set(Some(id as i64));
+            // An explicit null is the map saying the background was clicked.
+            // Matched on the key being present rather than on the value
+            // parsing, so a future message without one cannot clear the
+            // selection by accident.
+            if let Some(value) = message.get("track_id") {
+                selected.set(value.as_f64().map(|id| id as i64));
             }
         }
     });

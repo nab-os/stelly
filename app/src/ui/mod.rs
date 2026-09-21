@@ -69,3 +69,28 @@ impl Blocklist {
         track.artist_id.is_some_and(|id| self.contains(id))
     }
 }
+
+// -------------------------------------------------------------------- covers
+
+/// Artwork, as a background rather than an `<img>`.
+///
+/// Deliberate: a URL that 404s, and `qobuz::cover_url` guesses some of them,
+/// leaves the placeholder showing instead of a broken-image glyph, with no
+/// `onerror` handler to install. Sizing is the caller's, via `class`.
+#[component]
+pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
+    // Single quotes and parens would break out of `url('…')`. Qobuz sends
+    // neither, so a URL containing one is corrupt rather than merely unusual.
+    let art = url.filter(|u| !u.contains(['\'', '(', ')']));
+    let class = class.unwrap_or_default();
+
+    rsx! {
+        div {
+            class: "cover {class}",
+            style: match art {
+                Some(url) => format!("background-image:url('{url}')"),
+                None => String::new(),
+            },
+        }
+    }
+}

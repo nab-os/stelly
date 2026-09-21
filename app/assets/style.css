@@ -141,6 +141,23 @@ code {
 .row.playing { color: var(--accent); }
 .row.playing .title { font-weight: 600; }
 
+/* ------------------------------------------------------------------ covers */
+
+/* Artwork is a background rather than an <img>, so a URL that 404s, and
+   `qobuz::cover_url` guesses some of them, leaves the placeholder tint
+   instead of a broken-image glyph. */
+.cover {
+  flex: none;
+  /* Rows align on the baseline, which a box holding no text does not have. */
+  align-self: center;
+  background: var(--row-hover) center / cover no-repeat;
+  border-radius: 4px;
+}
+
+.thumb { width: 28px; height: 28px; }
+.round { border-radius: 50%; }
+.now-art { width: 48px; height: 48px; border-radius: 6px; }
+
 .map-wrap {
   flex: 1;
   background: var(--panel);

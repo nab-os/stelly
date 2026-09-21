@@ -30,6 +30,9 @@ pub struct RemoteTrack {
     /// round trip that would fail with a confusing signature error.
     pub streamable: bool,
     pub hires: bool,
+    /// The album's cover; a track has no art of its own. See `image`.
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -41,6 +44,8 @@ pub struct RemoteAlbum {
     pub released: Option<String>,
     pub genre: Option<String>,
     pub tracks_count: Option<i64>,
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -48,6 +53,8 @@ pub struct RemoteArtist {
     pub id: i64,
     pub name: String,
     pub albums_count: Option<i64>,
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -74,6 +81,59 @@ fn as_i64(value: &Value, key: &str) -> Option<i64> {
         Some(Value::String(s)) => s.parse().ok(),
         _ => None,
     }
+}
+
+/// Sizes to accept from an image bag, smallest usable first. A row thumbnail
+/// and the player's cover are both served by `small` (230px for an album);
+/// `thumbnail` is 50px and only worth having when nothing else is offered.
+const IMAGE_SIZES: [&str; 6] = ["small", "medium", "large", "thumbnail", "extralarge", "mega"];
+
+/// A cover or portrait URL. Qobuz nests these under `image` as a bag of named
+/// sizes, and the names differ between albums (thumbnail/small/large) and
+/// artists (small/medium/large/extralarge/mega). Newer artist payloads drop
+/// `image` for an `images.portrait` hash, which has to be assembled by hand.
+///
+/// Everything returned points at `static.qobuz.com`, which serves unsigned,
+/// so these go straight into an `<img>` with no proxy and no credentials.
+fn image(value: &Value) -> Option<String> {
+    match value.get("image") {
+        Some(Value::String(url)) if !url.is_empty() => return Some(url.clone()),
+        Some(bag @ Value::Object(_)) => {
+            for size in IMAGE_SIZES {
+                if let Some(url) = text(bag, size) {
+                    return Some(url);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let hash = text(value.get("images")?.get("portrait")?, "hash")?;
+    Some(format!(
+        "https://static.qobuz.com/images/artists/covers/medium/{hash}.jpg"
+    ))
+}
+
+/// The cover for an album id, assembled rather than looked up.
+///
+/// Qobuz files covers under a path derived from the id: the last two
+/// characters, then the two before those, then the id. Worth the guess because
+/// a track that came out of the space carries only an album id, generated
+/// sequences would otherwise be the one list in the app with no art at all.
+/// `Cover` hides an image that fails to load, so guessing wrong costs nothing.
+pub fn cover_url(album_id: &str) -> Option<String> {
+    let id: String = album_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if id.len() < 4 {
+        return None;
+    }
+    let tail = &id[id.len() - 2..];
+    let mid = &id[id.len() - 4..id.len() - 2];
+    Some(format!(
+        "https://static.qobuz.com/images/covers/{tail}/{mid}/{id}_230.jpg"
+    ))
 }
 
 fn as_id_string(value: &Value, key: &str) -> Option<String> {
@@ -136,6 +196,9 @@ impl RemoteTrack {
             album_id,
             duration: as_i64(value, "duration"),
             streamable,
+            // A track carries no art; the cover comes from whichever album
+            // description reached it, nested or passed down.
+            image: image(&album).or_else(|| context.and_then(|parent| parent.image.clone())),
             hires: value
                 .get("hires_streamable")
                 .or_else(|| value.get("hires"))
@@ -174,6 +237,7 @@ impl RemoteAlbum {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             tracks_count: as_i64(value, "tracks_count"),
+            image: image(value),
         })
     }
 
@@ -193,6 +257,7 @@ impl RemoteArtist {
             id: as_i64(value, "id")?,
             name: text(value, "name").unwrap_or_else(|| "Unknown Artist".into()),
             albums_count: as_i64(value, "albums_count"),
+            image: image(value),
         })
     }
 }

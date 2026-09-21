@@ -3,8 +3,8 @@
 //! Navigation is explicit rather than reactive: every move sets the view and
 //! spawns its own load. One `Shelf` holds whatever the view returned.
 
-use super::player::{enqueue, play_list, Player};
-use super::{Blocklist, LocalIds, Selection, LIST_CAP, SEARCH_LIMIT};
+use super::player::{enqueue, play_list, play_next, Player};
+use super::{Blocklist, Cover, LocalIds, Selection, LIST_CAP, SEARCH_LIMIT};
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
@@ -326,6 +326,14 @@ pub fn LibraryPanel() -> Element {
                         class: "chip",
                         onclick: move |_| {
                             let queue = library.shelf.peek().visible_tracks(&blocklist);
+                            play_next(player, queue);
+                        },
+                        "next"
+                    }
+                    button {
+                        class: "chip",
+                        onclick: move |_| {
+                            let queue = library.shelf.peek().visible_tracks(&blocklist);
                             enqueue(player, queue);
                         },
                         "queue"
@@ -476,6 +484,7 @@ fn TrackRows() -> Element {
                         let queue = library.shelf.peek().visible_tracks(&blocklist);
                         play_list(player, queue, index);
                     },
+                    Cover { url: track.image.clone(), class: "thumb" }
                     span { class: "artist", "{track.artist}" }
                     span { class: "title", "{track.title}" }
                     if !track.streamable {
@@ -500,6 +509,43 @@ fn TrackRows() -> Element {
                             },
                             "hide"
                         }
+                    }
+                    // Read back out of the shelf by index rather than captured:
+                    // one owned `track` cannot move into two closures, and the
+                    // visible list is the one the index refers to.
+                    button {
+                        class: "chip",
+                        title: "play after the current track",
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            let found = library
+                                .shelf
+                                .peek()
+                                .visible_tracks(&blocklist)
+                                .get(index)
+                                .cloned();
+                            if let Some(track) = found {
+                                play_next(player, vec![track]);
+                            }
+                        },
+                        "next"
+                    }
+                    button {
+                        class: "chip",
+                        title: "add to the end of the queue",
+                        onclick: move |event| {
+                            event.stop_propagation();
+                            let found = library
+                                .shelf
+                                .peek()
+                                .visible_tracks(&blocklist)
+                                .get(index)
+                                .cloned();
+                            if let Some(track) = found {
+                                enqueue(player, vec![track]);
+                            }
+                        },
+                        "last"
                     }
                     if local.0.read().contains(&track.id) {
                         // Analysed: this one exists as a point on the map.
@@ -548,6 +594,7 @@ fn AlbumRows() -> Element {
                             library.go(target);
                         }
                     },
+                    Cover { url: album.image.clone(), class: "thumb" }
                     span { class: "artist", "{album.artist}" }
                     span { class: "title", "{album.title}" }
                     span { class: "muted", "{album.year()}" }
@@ -622,6 +669,7 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                             library.go(target);
                         }
                     },
+                    Cover { url: artist.image.clone(), class: "thumb round" }
                     span { class: "title", "{artist.name}" }
                     if let Some(count) = artist.albums_count {
                         span { class: "muted", "{count} albums" }

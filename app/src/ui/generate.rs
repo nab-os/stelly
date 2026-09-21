@@ -205,6 +205,8 @@ fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
         duration: None,
         streamable: true,
         hires: false,
+        // The space stores no art, so the cover is derived from the album id.
+        image: crate::qobuz::cover_url(&meta.album_id),
     }
 }
 

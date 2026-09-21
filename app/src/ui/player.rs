@@ -3,6 +3,7 @@
 //! The `<audio>` element owns playback; see `assets/player.js`. Rust hands it
 //! a URL and gets track-boundary events back.
 
+use super::Cover;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::{RemoteTrack, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
@@ -87,6 +88,34 @@ pub fn enqueue(mut player: Player, tracks: Vec<RemoteTrack>) {
     player.queue.write().extend(tracks);
     if was_empty {
         spawn(async move { play_at(player, start).await });
+    }
+}
+
+/// Insert directly after whatever is playing, so these come next and the rest
+/// of the queue still follows. With nothing playing this is `enqueue`.
+pub fn play_next(mut player: Player, tracks: Vec<RemoteTrack>) {
+    if tracks.is_empty() {
+        return;
+    }
+
+    // Both reads finish before the write guard is taken; holding it across a
+    // `peek` of the same signal would deadlock.
+    let length = player.queue.peek().len();
+    let at = if length == 0 {
+        0
+    } else {
+        (*player.index.peek() + 1).min(length)
+    };
+
+    {
+        let mut queue = player.queue.write();
+        for (offset, track) in tracks.into_iter().enumerate() {
+            queue.insert(at + offset, track);
+        }
+    }
+
+    if length == 0 {
+        spawn(async move { play_at(player, 0).await });
     }
 }
 
@@ -202,6 +231,11 @@ pub fn PlayerBar() -> Element {
             // Hidden: the transport below drives it, and the native controls
             // would duplicate every button.
             audio { id: "player" }
+
+            Cover {
+                url: current.as_ref().and_then(|track| track.image.clone()),
+                class: "now-art",
+            }
 
             div { class: "transport",
                 button {

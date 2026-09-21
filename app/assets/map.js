@@ -631,6 +631,13 @@
       schedule();
       // Small message: exactly what eval is for.
       dioxus.send({ type: "select", track_id: ids[found] });
+    } else if (selected >= 0) {
+      // Clicking the background clears the selection, the way clicking beside
+      // a list clears that. Guarded on there being one, so an idle click on
+      // empty space does not wake every effect watching the selection.
+      selected = -1;
+      schedule();
+      dioxus.send({ type: "select", track_id: null });
     }
   });
 
@@ -753,6 +760,11 @@
       hover = found;
       schedule();
       dioxus.send({ type: "select", track_id: ids[found] });
+    } else if (selected >= 0) {
+      selected = -1;
+      hover = -1;
+      schedule();
+      dioxus.send({ type: "select", track_id: null });
     }
   }, { passive: true });
 
