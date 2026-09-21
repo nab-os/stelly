@@ -199,6 +199,45 @@ pub fn remove_at(mut player: Player, at: usize) {
     }
 }
 
+/// Where the entry at `index` ends up once the one at `from` is taken out and
+/// put back at `to`.
+///
+/// Pure, and separate from `move_to`, because this is the whole of what a
+/// reorder can get wrong: the queue is only a `Vec`, but `index` has to keep
+/// pointing at the track that is actually playing.
+fn index_after_move(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        // The moved entry itself.
+        to
+    } else if from < index && to >= index {
+        // Removed from above it and put back at or below it: it rises one.
+        index - 1
+    } else if from > index && to <= index {
+        // Removed from below it and put back at or above it: it sinks one.
+        index + 1
+    } else {
+        // The move happened entirely on one side of it.
+        index
+    }
+}
+
+/// Move one entry to another position, following it with `index` if it was the
+/// one playing. This is what a drag reports; see `queue-drag.js`.
+pub fn move_to(mut player: Player, from: usize, to: usize) {
+    let length = player.queue.peek().len();
+    if from >= length || to >= length || from == to {
+        return;
+    }
+
+    let current = *player.index.peek();
+    {
+        let mut queue = player.queue.write();
+        let track = queue.remove(from);
+        queue.insert(to, track);
+    }
+    player.index.set(index_after_move(current, from, to));
+}
+
 /// Shift one entry by `delta` places, following it with `index` if it was the
 /// one playing. Out-of-range moves are ignored, so the ends simply do nothing.
 pub fn move_by(mut player: Player, at: usize, delta: i64) {
@@ -508,4 +547,57 @@ pub fn use_transport(player: Player) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_after_move;
+
+    /// The oracle: actually reorder a list and look up where the marked entry
+    /// went. `index_after_move` has to agree with this for every move, and
+    /// checking against a real `Vec` beats restating the arithmetic.
+    fn reorder_and_find(length: usize, index: usize, from: usize, to: usize) -> usize {
+        let mut queue: Vec<usize> = (0..length).collect();
+        let moved = queue.remove(from);
+        queue.insert(to, moved);
+        queue.iter().position(|&entry| entry == index).unwrap()
+    }
+
+    #[test]
+    fn agrees_with_an_actual_reorder_for_every_move() {
+        const LENGTH: usize = 7;
+        for index in 0..LENGTH {
+            for from in 0..LENGTH {
+                for to in 0..LENGTH {
+                    assert_eq!(
+                        index_after_move(index, from, to),
+                        reorder_and_find(LENGTH, index, from, to),
+                        "index {index} after moving {from} -> {to}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dragged_entry_lands_where_it_was_dropped() {
+        assert_eq!(index_after_move(3, 3, 0), 0);
+        assert_eq!(index_after_move(3, 3, 6), 6);
+    }
+
+    #[test]
+    fn a_move_on_one_side_leaves_the_playing_track_alone() {
+        // Both ends below it.
+        assert_eq!(index_after_move(5, 1, 3), 5);
+        // Both ends above it.
+        assert_eq!(index_after_move(5, 7, 9), 5);
+    }
+
+    #[test]
+    fn dragging_past_the_playing_track_shifts_it_by_one() {
+        // From above it to below it: it rises.
+        assert_eq!(index_after_move(5, 2, 8), 4);
+        // From below it to above it: it sinks.
+        assert_eq!(index_after_move(5, 8, 2), 6);
+    }
 }

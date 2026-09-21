@@ -375,6 +375,38 @@ button:disabled { opacity: 0.4; cursor: default; }
 .queue-drawer h2 { gap: 8px; }
 .queue-list { max-height: 34vh; }
 
+/* The drag handle. `touch-action: none` is what makes a drag here reorder
+   instead of scrolling, and why it is on the grip alone, so dragging
+   anywhere else on the row still scrolls the list. */
+.queue-grip {
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  padding: 0 4px;
+  color: var(--muted);
+  opacity: 0.45;
+  line-height: 1;
+}
+.row:hover .queue-grip { opacity: 1; }
+@media (hover: none) {
+  .queue-grip { opacity: 0.8; }
+}
+
+/* Lifted out of the list while it is being dragged, and above the rows it is
+   sliding past. `position: relative` is what gives it a z-index to use. */
+.queue-list li.dragging {
+  position: relative;
+  z-index: 2;
+  cursor: grabbing;
+  background: var(--row-hover);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* Rows animate into the gap; the dragged one follows the pointer and must
+   not lag behind it. */
+.queue-list li { transition: transform 120ms ease; }
+.queue-list li.dragging { transition: none; }
+
 /* ------------------------------------------------------------- player bar */
 
 .player {

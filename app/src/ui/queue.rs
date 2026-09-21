@@ -5,7 +5,7 @@
 //! screen. Two buttons work identically everywhere.
 
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
-use super::player::{clear_queue, move_by, play_at, Player};
+use super::player::{clear_queue, move_to, play_at, Player};
 use super::Cover;
 use crate::engine;
 use crate::qobuz::RemoteTrack;
@@ -74,6 +74,19 @@ pub fn QueueView() -> Element {
     let mut queue_open = player.queue_open;
     let mut menu = use_context::<ContextMenu>().0;
 
+    // Long-lived: this component stays mounted whether or not the drawer is
+    // open, so the channel outlives any one drag. The script delegates from
+    // the document, so it does not care that the list comes and goes.
+    use_future(move || async move {
+        let mut handle = document::eval(include_str!("../../assets/queue-drag.js"));
+        while let Ok(message) = handle.recv::<serde_json::Value>().await {
+            let at = |key| message.get(key).and_then(|v| v.as_u64()).map(|v| v as usize);
+            if let (Some(from), Some(to)) = (at("from"), at("to")) {
+                move_to(player, from, to);
+            }
+        }
+    });
+
     let queue = player.queue.read().clone();
     let current = *player.index.read();
     let total = queue.len();
@@ -124,31 +137,17 @@ pub fn QueueView() -> Element {
                                 Cover { url: track.image.clone(), class: "thumb" }
                                 span { class: "artist", "{track.artist}" }
                                 span { class: "title", "{track.title}" }
-                                // Reordering keeps its arrows: it is the one
-                                // action you repeat, and a menu round trip per
-                                // place moved would be miserable. Everything
-                                // else this row can do lives in the menu.
-                                button {
-                                    class: "chip",
-                                    title: "move up",
-                                    disabled: index == 0,
-                                    onclick: move |event| {
-                                        event.stop_propagation();
-                                        move_by(player, index, -1);
-                                    },
-                                    "↑"
-                                }
-                                button {
-                                    class: "chip",
-                                    title: "move down",
-                                    disabled: index + 1 == total,
-                                    onclick: move |event| {
-                                        event.stop_propagation();
-                                        move_by(player, index, 1);
-                                    },
-                                    "↓"
-                                }
                                 span { class: "muted", "{track.duration_label()}" }
+                                // The drag handle. Only this has
+                                // `touch-action: none`, so a drag anywhere
+                                // else on the row still scrolls the list.
+                                // Precise moves stay in the menu.
+                                span {
+                                    class: "queue-grip",
+                                    title: "drag to reorder",
+                                    onclick: move |event| event.stop_propagation(),
+                                    "⠿"
+                                }
                                 {menu_button(menu, MenuTarget::QueueEntry(index))}
                             }
                         }
