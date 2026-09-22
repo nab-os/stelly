@@ -5,6 +5,7 @@
 //! space is the exception, always answered in-process.
 
 pub mod crawler;
+pub mod detail;
 pub mod generate;
 pub mod library;
 pub mod menu;
@@ -15,6 +16,7 @@ pub mod queue;
 pub use crawler::Crawler;
 pub use generate::{GeneratePanel, Generator};
 pub use library::{open_initial, Library, LibraryPanel};
+pub use detail::DetailPane;
 pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
 pub use pipeline::{Pipeline, PipelineView};
 pub use player::{use_transport, Player, PlayerBar};

@@ -6,9 +6,9 @@
 use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
-    Blocklist, ContextMenu, ContextMenuView, Crawler, GeneratePanel, Generator, Library,
-    LibraryPanel, LocalIds, MapView, Pipeline, PipelineView, Player, PlayerBar, QueueView, Search,
-    Selection, SpaceMatches, SpaceRow,
+    Blocklist, ContextMenu, ContextMenuView, Crawler, DetailPane, GeneratePanel, Generator,
+    Library, LibraryPanel, LocalIds, MapView, Pipeline, PipelineView, Player, PlayerBar, QueueView,
+    Search, Selection, SpaceMatches, SpaceRow,
 };
 use crate::{engine, map, ServerConfig, Wiring};
 use crate::platform::wry::http::Response;
@@ -991,7 +991,11 @@ fn Shell() -> Element {
                     // The space's own tracks used to be listed here, opposite
                     // the Qobuz column, which made "where a track came from"
                     // into a place on screen rather than a fact about the
-                    // track. They are one list now; see `LibraryPanel`.
+                    // track. They are one list now; see `LibraryPanel`. What
+                    // stands here instead is the one track you picked.
+
+                    // ------------------------------------------------ detail
+                    DetailPane {}
 
                     // ---------------------------------------------- generate
                     GeneratePanel {}

@@ -297,6 +297,38 @@ code {
 .side .panel { flex: none; }
 .side .list { max-height: 260px; }
 
+/* ----------------------------------------------------------------- detail
+   Where the selection landed once selecting stopped generating. The cover is
+   the largest thing in the window on purpose: it is the one place artwork is
+   the subject rather than a label. */
+.detail { gap: 10px; }
+
+.detail-art {
+  width: 100%;
+  max-width: 240px;
+  aspect-ratio: 1;
+  align-self: center;
+  border-radius: 8px;
+}
+
+.detail-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.detail-title { font-size: 15px; font-weight: 600; }
+.detail-badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+
+/* Two rows: what to do with the track, then where to go from it. Wrapping
+   rather than scrolling, because a hidden verb is a verb nobody uses. */
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+.detail-actions button { flex: 1 1 auto; white-space: nowrap; }
+
+/* Keeps its height with nothing selected, so picking a track does not shove
+   the column's contents down the page. */
+.detail-empty { min-height: 120px; justify-content: center; }
+
 .search {
   background: var(--row);
   border: 1px solid transparent;
