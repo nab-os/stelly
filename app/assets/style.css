@@ -178,17 +178,78 @@ code {
 /* Artwork is a background rather than an <img>, so a URL that 404s, and
    `qobuz::cover_url` guesses some of them, leaves the placeholder tint
    instead of a broken-image glyph. */
+/* Size-agnostic: `.cover` is the artwork itself, and the variants below place
+   it. It used to carry the row-specific placement, which a tile cannot use. */
 .cover {
-  flex: none;
-  /* Rows align on the baseline, which a box holding no text does not have. */
-  align-self: center;
   background: var(--row-hover) center / cover no-repeat;
   border-radius: 4px;
 }
 
-.thumb { width: 28px; height: 28px; }
+/* In a row. Rows align on the baseline, which a box holding no text does not
+   have, hence the explicit centring. */
+.thumb {
+  flex: none;
+  align-self: center;
+  width: 44px;
+  height: 44px;
+}
 .round { border-radius: 50%; }
-.now-art { width: 48px; height: 48px; border-radius: 6px; }
+.now-art { flex: none; align-self: center; width: 48px; height: 48px; border-radius: 6px; }
+
+/* ------------------------------------------------------------------ tiles
+   Art goes where art is the identity: albums and artists are recognised by
+   their covers, so those sections are grids. Tracks stay rows, fifty
+   identical covers down one tracklist tells you nothing a title would not,
+   and costs the whole column's width to say it. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px 10px;
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  position: relative;
+  min-width: 0;
+}
+
+/* Fixed box, always: a cover that arrives late must not reflow the grid it
+   landed in. `aspect-ratio` alone would not do it, the width has to be
+   settled before the image exists. */
+.tile .cover {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+}
+.tile .round { border-radius: 50%; }
+
+.tile .title, .tile .artist {
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile .title { flex: none; }
+.tile .artist { min-width: 0; }
+
+/* The tile's own menu button, over the art rather than beside the text. */
+.tile .more {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tile .chip { visibility: hidden; }
+  .tile:hover .chip { visibility: visible; }
+  .tile:hover .cover { outline: 2px solid var(--accent); outline-offset: 1px; }
+}
 
 /* An overlay over the body rather than a column in it.
 
@@ -823,6 +884,11 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
 
   /* An artist name and a title on one 393px line leaves room for neither. */
   .artist { min-width: 30%; }
+
+  /* Three across a 393px screen rather than two and a gap. */
+  .tiles { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px 8px; }
+  /* No hover on a touch screen, so the tile's menu button has to stay put. */
+  .tile .chip { visibility: visible; }
 }
 
 /* Phones in portrait. The browse column's desktop minimum would overflow a

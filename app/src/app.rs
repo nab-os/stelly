@@ -595,6 +595,14 @@ fn Shell() -> Element {
         crate::ui::open_initial(library);
     });
 
+    // Lazy cover loading, installed once and delegated from the document, so
+    // it covers every list in the window including ones not yet rendered.
+    use_future(move || async move {
+        let mut handle = document::eval(include_str!("../assets/covers.js"));
+        // Never resolves; keeps the observers alive for the session.
+        let _ = handle.recv::<serde_json::Value>().await;
+    });
+
     // The remote half of the search box. The local filter above runs on every
     // keystroke because it is a scan of memory; Qobuz is a network round trip
     // and must not, so this waits for the text to stop moving before asking.

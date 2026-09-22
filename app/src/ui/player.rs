@@ -372,9 +372,11 @@ pub fn PlayerBar() -> Element {
             // would duplicate every button.
             audio { id: "player" }
 
+            // Eager: the player bar is always on screen, and there is exactly
+            // one of these. Waiting for an intersection would only delay it.
             Cover {
                 url: current.as_ref().and_then(|track| track.image.clone()),
-                class: "now-art",
+                class: "now-art eager",
             }
 
             div { class: "transport",

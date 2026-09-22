@@ -165,12 +165,31 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
     let art = url.filter(|u| !u.contains(['\'', '(', ')']));
     let class = class.unwrap_or_default();
 
+    // The URL rides as a data attribute and `covers.js` promotes it to a
+    // background when the box nears the viewport. Setting it inline here
+    // fetched every cover the moment it painted, which for a 500-row shelf is
+    // 500 requests at once, and asking WebKitGTK for that is how scrolling
+    // stops being smooth.
+    //
+    // An `<img loading="lazy">` would get the laziness for free but not the
+    // failure behaviour: `cover_url` *guesses* the album art path, so a 404 is
+    // expected, and a background leaves the placeholder tint where an `<img>`
+    // shows a broken glyph. Recovering that would need an `onerror` hook per
+    // cover, thousands per shelf.
+    //
+    // `eager` opts out, for the few covers that are always on screen.
+    let eager = class.split_whitespace().any(|c| c == "eager");
+
     rsx! {
         div {
             class: "cover {class}",
-            style: match art {
-                Some(url) => format!("background-image:url('{url}')"),
-                None => String::new(),
+            "data-cover": match (&art, eager) {
+                (Some(url), false) => url.clone(),
+                _ => String::new(),
+            },
+            style: match (&art, eager) {
+                (Some(url), true) => format!("background-image:url('{url}')"),
+                _ => String::new(),
             },
         }
     }

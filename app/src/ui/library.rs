@@ -6,13 +6,13 @@
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
 use super::{Blocklist, Cover, LocalIds, Search, Selection, SpaceMatches, LIST_CAP, SEARCH_LIMIT};
+use dioxus::prelude::*;
+use crate::backend::backend;
+use crate::qobuz::RemoteTrack;
 
 /// How many space rows the list opens with. Enough to fill the column on any
 /// screen; "show more" triples it.
 const FIRST_SHOWN: usize = 80;
-use dioxus::prelude::*;
-use crate::backend::backend;
-use crate::qobuz::RemoteTrack;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
@@ -518,6 +518,10 @@ fn SpaceRows() -> Element {
                             open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
                         }
                     },
+                    // The space stores no art, so this is derived from the
+                    // album id. A guess that misses leaves the placeholder
+                    // tint, which is why it is worth guessing at all.
+                    Cover { url: crate::qobuz::cover_url(&row.album_id), class: "thumb" }
                     span { class: "artist", "{row.artist}" }
                     span { class: "title", "{row.title}" }
                     {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
@@ -689,11 +693,11 @@ fn AlbumRows() -> Element {
 
     rsx! {
         h3 { class: "shelf-head", "Albums" }
-        ul { class: "list",
+        ul { class: "tiles",
             for (index, album) in albums.into_iter().enumerate() {
                 li {
                     key: "{index}-{album.id}",
-                    class: "row",
+                    class: "tile",
                     onclick: move |_| {
                         let target = library
                             .shelf
@@ -712,10 +716,9 @@ fn AlbumRows() -> Element {
                         event.prevent_default();
                         open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
                     },
-                    Cover { url: album.image.clone(), class: "thumb" }
-                    span { class: "artist", "{album.artist}" }
+                    Cover { url: album.image.clone() }
                     span { class: "title", "{album.title}" }
-                    span { class: "muted", "{album.year()}" }
+                    span { class: "artist", "{album.artist}" }
                     {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                 }
             }
@@ -732,11 +735,11 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
-        ul { class: "list",
+        ul { class: "tiles",
             for (index, artist) in artists.into_iter().enumerate() {
                 li {
                     key: "{index}-{artist.id}",
-                    class: "row",
+                    class: "tile",
                     onclick: move |_| {
                         let target = library
                             .shelf
@@ -755,10 +758,10 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                         event.prevent_default();
                         open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar });
                     },
-                    Cover { url: artist.image.clone(), class: "thumb round" }
+                    Cover { url: artist.image.clone(), class: "round" }
                     span { class: "title", "{artist.name}" }
                     if let Some(count) = artist.albums_count {
-                        span { class: "muted", "{count} albums" }
+                        span { class: "artist", "{count} albums" }
                     }
                     {menu_button(menu, MenuTarget::ShelfArtist { index, similar })}
                 }
