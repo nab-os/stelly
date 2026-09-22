@@ -80,6 +80,31 @@ impl Default for Search {
     }
 }
 
+/// The map overlay's state, so anything that wants to show something on the
+/// map can open it without the shell threading callbacks down to it.
+#[derive(Clone, Copy)]
+pub struct MapView {
+    pub map_open: Signal<bool>,
+    /// Showing a route, and therefore dimming everything that is not on it.
+    pub map_route: Signal<bool>,
+}
+
+impl MapView {
+    /// Open the map to look around. Nothing is dimmed: there is no route in
+    /// question, and a corpus at 18% is not a thing you can browse.
+    pub fn browse(mut self) {
+        self.map_route.set(false);
+        self.map_open.set(true);
+    }
+
+    /// Open the map to show a produced sequence, dimming the rest so the line
+    /// through it can be read.
+    pub fn show_route(mut self) {
+        self.map_route.set(true);
+        self.map_open.set(true);
+    }
+}
+
 /// A track in the analysed space, reduced to what a row needs. Carries
 /// `album_id` because a space track has no stored art and its cover is
 /// derived from that id.

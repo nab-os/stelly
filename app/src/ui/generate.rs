@@ -9,7 +9,7 @@
 
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{play_list, Player};
-use super::Selection;
+use super::{MapView, Selection};
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::paths::{Constraints, Step};
@@ -366,6 +366,7 @@ pub fn GeneratePanel() -> Element {
     let selection = use_context::<Selection>();
     let mut selected = selection.0;
     let mut menu = use_context::<ContextMenu>().0;
+    let map = use_context::<MapView>();
 
     let mode = *generator.mode.read();
     let result = generator.result.read().clone();
@@ -573,6 +574,14 @@ pub fn GeneratePanel() -> Element {
                 div { class: "shelf-head result-head",
                     span { class: "ellipsis", "{describe(&recipe, label_for)}" }
                     span { class: "spacer" }
+                    // The one action that dims the map: here the route is the
+                    // point, so everything not on it drops back.
+                    button {
+                        class: "chip",
+                        title: "trace this on the map",
+                        onclick: move |_| map.show_route(),
+                        "on the map"
+                    }
                     if *generator.stale.read() {
                         button {
                             class: "chip notice",

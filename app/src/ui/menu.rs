@@ -14,7 +14,7 @@
 use super::generate::{Generator, Mode, PathEnd};
 use super::library::{request_analysis, Library, View};
 use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
-use super::{Blocklist, LocalIds, Selection};
+use super::{Blocklist, LocalIds, MapView, Selection};
 use crate::backend::backend;
 use crate::engine;
 use crate::qobuz::RemoteTrack;
@@ -153,6 +153,7 @@ fn ShelfTrackItems(index: usize) -> Element {
     let local = use_context::<LocalIds>();
     let selection = use_context::<Selection>().0;
     let menu = use_context::<ContextMenu>().0;
+    let map = use_context::<MapView>();
 
     let track = library
         .shelf
@@ -212,6 +213,9 @@ fn ShelfTrackItems(index: usize) -> Element {
                 class: "menu-item",
                 onclick: move |_| {
                     selection.set(Some(track.id));
+                    // Browse, not route: this is one track, so nothing is
+                    // dimmed and the rest of the space stays legible.
+                    map.browse();
                     menu.set(None);
                 },
                 "Show on the map"
@@ -572,6 +576,7 @@ fn SpaceTrackItems(track_id: i64) -> Element {
     let player = use_context::<Player>();
     let selection = use_context::<Selection>().0;
     let menu = use_context::<ContextMenu>().0;
+    let map = use_context::<MapView>();
 
     let Some(track) = space_track(track_id) else {
         return rsx! {};
@@ -589,6 +594,7 @@ fn SpaceTrackItems(track_id: i64) -> Element {
             class: "menu-item",
             onclick: move |_| {
                 selection.set(Some(track_id));
+                map.browse();
                 menu.set(None);
             },
             "Show on the map"

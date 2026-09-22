@@ -70,8 +70,9 @@ code {
 
 .spacer { flex: 1; }
 
-/* Qobuz on the left, the map in the middle, space tools on the right. */
-.body { display: flex; gap: 12px; flex: 1; min-height: 0; }
+/* One browse column and the space tools beside it. `relative` because the map
+   overlays this box rather than sitting in it. */
+.body { display: flex; gap: 12px; flex: 1; min-height: 0; position: relative; }
 
 /* The browse column is now the primary surface, one list holding both what
    the space has and what Qobuz will sell you, so it takes the room the map
@@ -189,15 +190,35 @@ code {
 .round { border-radius: 50%; }
 .now-art { width: 48px; height: 48px; border-radius: 6px; }
 
+/* An overlay over the body rather than a column in it.
+
+   The background must stay opaque and must stay `--panel`: map.js reads
+   `getComputedStyle(canvas.parentElement).backgroundColor` and premultiplies
+   the rasterised point cloud against it. A translucent backdrop, the
+   obvious thing to reach for on an overlay, would tint 28k points wrong.
+   For the same reason, and because this is Cairo, no backdrop-filter and no
+   large shadows. */
 .map-wrap {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 20;
   background: var(--panel);
   border-radius: 8px;
   overflow: hidden;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-#map { width: 100%; height: 100%; display: block; cursor: grab; }
+.map-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  flex: none;
+}
+
+#map { width: 100%; flex: 1; min-height: 0; display: block; cursor: grab; }
 
 /* Each panel takes its natural height and the column scrolls as a whole.
    A fixed grid squeezed the lists into a sliver once the weights panel grew
@@ -671,10 +692,10 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   }
   .panes .tab { flex: 1; padding: 9px 4px; }
 
-  /* One pane at a time. */
+  /* One pane at a time. The map is not one of them, it overlays whichever
+     pane is showing, at every width, so it is left out of this entirely. */
   .body { flex-direction: column; gap: 0; }
   .body > .library,
-  .body > .map-wrap,
   .body > .side {
     display: none;
     width: auto;
@@ -682,7 +703,6 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
     min-height: 0;
   }
   .body.pane-library > .library { display: flex; }
-  .body.pane-map > .map-wrap { display: block; }
   .body.pane-tools > .side { display: flex; }
 
   /* ------------------------------------------------- one scroller per pane
@@ -805,10 +825,10 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   .artist { min-width: 30%; }
 }
 
-/* Phones in portrait, where the map needs to be worth switching to. */
+/* Phones in portrait. The browse column's desktop minimum would overflow a
+   393px screen. */
 @media (max-width: 560px) {
-  .body.pane-map > .map-wrap { min-height: 60vh; }
-
+  .library { min-width: 0; }
 }
 
 /* --------------------------------------------------------------- search

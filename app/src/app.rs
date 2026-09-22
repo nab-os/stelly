@@ -7,7 +7,7 @@ use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
     Blocklist, ContextMenu, ContextMenuView, Crawler, GeneratePanel, Generator, Library,
-    LibraryPanel, LocalIds, Pipeline, PipelineView, Player, PlayerBar, QueueView, Search,
+    LibraryPanel, LocalIds, MapView, Pipeline, PipelineView, Player, PlayerBar, QueueView, Search,
     Selection, SpaceMatches, SpaceRow,
 };
 use crate::{engine, map, ServerConfig, Wiring};
@@ -80,31 +80,32 @@ pub async fn sync_and_load() -> anyhow::Result<()> {
     crate::init_engine(&data_dir, &db_path)
 }
 
-/// One of the three Explore panes. Only meaningful on a screen too narrow to
-/// hold all three.
+/// One of the two Explore panes. Only meaningful on a screen too narrow to
+/// hold both.
+///
+/// The map used to be the third. It is an overlay now, on every screen size,
+/// so a phone no longer has to spend a third of its switcher on a view that
+/// reads as blank until you know what it is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Pane {
     Library,
-    Map,
     Tools,
 }
 
 impl Pane {
-    const ALL: [Pane; 3] = [Pane::Library, Pane::Map, Pane::Tools];
+    const ALL: [Pane; 2] = [Pane::Library, Pane::Tools];
 
     /// Matches the `.pane-*` class the stylesheet keys off.
     fn slug(self) -> &'static str {
         match self {
             Pane::Library => "library",
-            Pane::Map => "map",
             Pane::Tools => "tools",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Pane::Library => "qobuz",
-            Pane::Map => "map",
+            Pane::Library => "browse",
             Pane::Tools => "tools",
         }
     }
@@ -439,10 +440,20 @@ fn Shell() -> Element {
     // action itself, so no row has to carry a popup or a set of callbacks.
     use_context_provider(|| ContextMenu(Signal::new(None)));
 
-    // Which of the three Explore panes a narrow screen shows; ignored above
-    // the breakpoint. Opens on the Qobuz library, since a blank map reads as
-    // broken.
+    // Which Explore pane a narrow screen shows; ignored above the breakpoint.
     let mut pane = use_signal(|| Pane::Library);
+
+    // The map, opened on purpose rather than occupying the middle of the
+    // window. Most of the time you know what you are looking for and type it;
+    // the map is for the times you do not.
+    let mut map_open = use_signal(|| false);
+
+    // Whether the map is showing a route, which is also what decides the
+    // dimming. Opened from the toolbar it is a place to browse and every
+    // point stays lit; opened *by* a result it is there to show that result's
+    // shape, and everything else drops back so the line can be followed.
+    let mut map_route = use_signal(|| false);
+    use_context_provider(|| MapView { map_open, map_route });
 
     // A rebuilt space means the loaded one is stale. Remotely the bytes have
     // to come down first; `sync_space` is a no-op locally, so this stays one
@@ -674,12 +685,21 @@ fn Shell() -> Element {
     // Push the generated route to the map. Ids only, which is what eval is
     // sized for.
     use_effect(move || {
-        let ids: Vec<i64> = generator
-            .result
-            .read()
-            .iter()
-            .map(|s| s.track.track_id)
-            .collect();
+        // A route dims every point that is not on it, which was fine while a
+        // result lasted only until the next click. Now that results persist,
+        // pushing one unconditionally would leave the map dimmed for good,
+        // so the route exists on the map only while the map is being used to
+        // look at that route.
+        let ids: Vec<i64> = if map_route() {
+            generator
+                .result
+                .read()
+                .iter()
+                .map(|s| s.track.track_id)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let script = format!(
             "window.twoKhzSetRoute && window.twoKhzSetRoute({});",
             serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into())
@@ -835,6 +855,19 @@ fn Shell() -> Element {
                 // what made it look like that panel's private filter.
                 if explore() {
                     SearchBox {}
+                    button {
+                        class: if map_open() { "chip active" } else { "chip" },
+                        title: "browse the space as a map",
+                        onclick: move |_| {
+                            if map_open() {
+                                map_open.set(false);
+                            } else {
+                                map_route.set(false);
+                                map_open.set(true);
+                            }
+                        },
+                        "map"
+                    }
                 }
                 span { class: "spacer" }
                 span { class: "muted", "{selected_label}" }
@@ -872,7 +905,34 @@ fn Shell() -> Element {
             div { class: "{body_class}",
                 LibraryPanel {}
 
-                div { class: "map-wrap",
+                // Hidden, never unmounted, and never moved in this tree.
+                // map.js caches the canvas node, its 2d context, its
+                // listeners and a ResizeObserver at eval time and has no
+                // re-init path: a conditional render would leave it drawing
+                // into a detached node, and re-mounting would install a
+                // second copy of the whole script over the first. The class
+                // switch is the same one the pane switcher already uses, and
+                // map.js's ResizeObserver already handles the 0x0 -> full
+                // transition it produces.
+                div { class: if map_open() { "map-wrap" } else { "map-wrap hidden" },
+                    div { class: "map-bar",
+                        span { class: "muted", "the space" }
+                        span { class: "spacer" }
+                        if map_route() {
+                            button {
+                                class: "chip active",
+                                title: "stop isolating the result",
+                                onclick: move |_| map_route.set(false),
+                                "showing a route"
+                            }
+                        }
+                        button {
+                            class: "chip",
+                            title: "close the map",
+                            onclick: move |_| map_open.set(false),
+                            "×"
+                        }
+                    }
                     canvas { id: "map" }
                 }
 
