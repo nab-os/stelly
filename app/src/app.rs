@@ -16,6 +16,23 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
+/// A track's searchable text, lowercased once. Fields stay separate rather
+/// than being joined: terms are split on whitespace, so no term can span a
+/// field boundary, which makes "matches any field" and "matches the joined
+/// string" the same test, without the join's allocation.
+#[derive(PartialEq)]
+struct Haystack {
+    artist: String,
+    title: String,
+    album: String,
+}
+
+impl Haystack {
+    fn contains(&self, term: &str) -> bool {
+        self.artist.contains(term) || self.title.contains(term) || self.album.contains(term)
+    }
+}
+
 /// Where the engine loads the space from: the synced copy. Fixed by
 /// `bootstrap`, or by the setup screen on a first pairing.
 static DATA_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
@@ -479,6 +496,31 @@ fn Shell() -> Element {
     });
     use_context_provider(|| LocalIds(local_ids));
 
+    // One lowercased copy of every track's searchable text, built when the
+    // space is loaded rather than on every keystroke. The filter below used to
+    // `format!` a fresh haystack per track per character typed; at ~28k tracks
+    // that is an allocation storm where a scan would do.
+    //
+    // Indexed by catalog row, so `catalog.visible()` indexes straight into it.
+    // Deliberately not filtered by the block list, that changes far more
+    // often than the space does, and the filter applies it anyway.
+    let haystacks = use_memo(move || {
+        pipeline.generation.read();
+        let guard = engine().lock().unwrap();
+        let catalog = &guard.navigator.catalog;
+        let rows: Vec<Haystack> = (0..catalog.len())
+            .map(|i| {
+                let track = catalog.get(i);
+                Haystack {
+                    artist: track.artist.to_lowercase(),
+                    title: track.title.to_lowercase(),
+                    album: track.album.to_lowercase(),
+                }
+            })
+            .collect();
+        Rc::new(rows)
+    });
+
     crate::ui::use_transport(player);
 
     // Open on the user's own library, which is also what the crawl seeds from.
@@ -584,9 +626,18 @@ fn Shell() -> Element {
         .map(str::to_string)
         .collect();
 
-    let (matches, match_total) = {
+    // Kept out of the render body: this runs on every keystroke, and inside
+    // the body it also re-ran for every unrelated signal the shell touches.
+    let filtered = use_memo(move || {
         // Subscribe, so hiding an artist empties them out of this list too.
         blocked.read();
+        let terms: Vec<String> = query()
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+
+        let haystacks = haystacks.read();
         let guard = engine().lock().unwrap();
         let catalog = &guard.navigator.catalog;
 
@@ -600,27 +651,29 @@ fn Shell() -> Element {
             let total = catalog.visible().count();
             (rows, total)
         } else {
-            let first = &terms[0];
+            let first = terms[0].as_str();
             let mut found: Vec<(u8, i64, String, String)> = Vec::new();
 
             for i in catalog.visible() {
-                let t = catalog.get(i);
-                let artist = t.artist.to_lowercase();
-                let title = t.title.to_lowercase();
-                let haystack = format!("{artist} {title} {}", t.album.to_lowercase());
-                if !terms.iter().all(|term| haystack.contains(term.as_str())) {
+                let Some(haystack) = haystacks.get(i) else {
+                    // The space was rebuilt under us; the memo is about to
+                    // run again with matching rows.
+                    continue;
+                };
+                if !terms.iter().all(|term| haystack.contains(term)) {
                     continue;
                 }
                 // Something starting with what was typed is far likelier to
                 // be the thing meant than something merely containing it.
-                let rank = if artist.starts_with(first.as_str())
-                    || title.starts_with(first.as_str())
+                let rank = if haystack.artist.starts_with(first)
+                    || haystack.title.starts_with(first)
                 {
                     0
                 } else {
                     1
                 };
-                found.push((rank, t.track_id, t.artist.clone(), t.title.clone()));
+                let track = catalog.get(i);
+                found.push((rank, track.track_id, track.artist.clone(), track.title.clone()));
             }
 
             let total = found.len();
@@ -632,7 +685,9 @@ fn Shell() -> Element {
                 .collect();
             (rows, total)
         }
-    };
+    });
+
+    let (matches, match_total) = filtered();
 
     let selected_label = selected()
         .and_then(|id| {
@@ -843,5 +898,63 @@ fn Shell() -> Element {
             // Last, so it paints over everything it can be opened from.
             ContextMenuView {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Haystack;
+
+    fn haystack(artist: &str, title: &str, album: &str) -> Haystack {
+        Haystack {
+            artist: artist.to_lowercase(),
+            title: title.to_lowercase(),
+            album: album.to_lowercase(),
+        }
+    }
+
+    /// The filter used to test terms against `format!("{artist} {title} {album}")`.
+    /// Testing each field separately is the same predicate only because terms
+    /// are split on whitespace and so can never span the joins, if that ever
+    /// stops being true, this test is where it shows up.
+    #[test]
+    fn per_field_matches_the_joined_string() {
+        let cases = [
+            ("Aphex Twin", "Xtal", "Selected Ambient Works"),
+            ("Burial", "Near Dark", "Untrue"),
+            ("", "Untitled", ""),
+        ];
+
+        for (artist, title, album) in cases {
+            let subject = haystack(artist, title, album);
+            let joined = format!(
+                "{} {} {}",
+                artist.to_lowercase(),
+                title.to_lowercase(),
+                album.to_lowercase()
+            );
+
+            for term in ["aph", "xtal", "works", "near", "untrue", "zzz", "twin"] {
+                assert_eq!(
+                    subject.contains(term),
+                    joined.contains(term),
+                    "{term:?} against {artist:?}/{title:?}/{album:?}"
+                );
+            }
+        }
+    }
+
+    /// The one case where the two differ, and why splitting on whitespace
+    /// before matching keeps the difference unreachable.
+    #[test]
+    fn a_term_spanning_two_fields_cannot_be_produced_by_splitting() {
+        let subject = haystack("Aphex Twin", "Xtal", "Ambient");
+        // The joined string contains "twin xtal"; no single field does.
+        assert!(!subject.contains("twin xtal"));
+        assert!("aphex twin xtal ambient".contains("twin xtal"));
+        // But a query is split first, so "twin xtal" is never one term.
+        let terms: Vec<&str> = "twin xtal".split_whitespace().collect();
+        assert_eq!(terms, ["twin", "xtal"]);
+        assert!(terms.iter().all(|term| subject.contains(term)));
     }
 }
