@@ -138,6 +138,17 @@ code {
 .shelf .list { overflow-y: visible; flex: none; }
 
 .notice { color: var(--accent); }
+
+/* The result's heading names what produced it. A sentence, not a section
+   label, so it drops `shelf-head`'s uppercasing and tracking. */
+.result-head {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  gap: 8px;
+}
+.result-head .ellipsis { min-width: 0; }
+.result-head .chip { flex: none; }
 .tag { flex: none; }
 
 .row.playing { color: var(--accent); }

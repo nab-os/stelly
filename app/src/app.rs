@@ -907,7 +907,7 @@ fn Shell() -> Element {
                                     let defaults = engine().lock().unwrap().space.default_weights();
                                     weights.set(defaults.clone());
                                     let _ = engine().lock().unwrap().set_weights(&defaults);
-                                    generator.clear();
+                                    generator.invalidate();
                                 },
                                 "reset"
                             }
@@ -932,7 +932,7 @@ fn Shell() -> Element {
                                                 w.insert(name.clone(), v);
                                                 weights.set(w.clone());
                                                 let _ = engine().lock().unwrap().set_weights(&w);
-                                                generator.clear();
+                                                generator.invalidate();
                                             }
                                         }
                                     },

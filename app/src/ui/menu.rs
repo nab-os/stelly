@@ -11,6 +11,7 @@
 //! re-reads that list when the item is chosen, and does nothing if the row has
 //! since gone.
 
+use super::generate::{Generator, Mode, PathEnd};
 use super::library::{request_analysis, Library, View};
 use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
 use super::{Blocklist, LocalIds, Selection};
@@ -203,6 +204,8 @@ fn ShelfTrackItems(index: usize) -> Element {
             "Add to queue"
         }
 
+        // Only for tracks the space actually holds. The rest of Qobuz has no
+        // coordinates, so there is nothing to walk away from.
         if in_space {
             div { class: "menu-rule" }
             button {
@@ -213,6 +216,7 @@ fn ShelfTrackItems(index: usize) -> Element {
                 },
                 "Show on the map"
             }
+            GenerationItems { track_id: track.id }
         }
 
         if let Some((artist_id, name)) = artist {
@@ -488,6 +492,81 @@ fn QueueItems(index: usize) -> Element {
     }
 }
 
+/// The four ways to walk the space from a track, as things you ask for.
+///
+/// A component rather than a helper because it reads three contexts, and a
+/// plain function calling `use_context` inside a conditional branch of another
+/// component's render would move that component's hook ordering.
+#[component]
+fn GenerationItems(track_id: i64) -> Element {
+    let generator = use_context::<Generator>();
+    let mut selection = use_context::<Selection>().0;
+    let mut menu = use_context::<ContextMenu>().0;
+
+    // Path's second end is only worth offering once a first one exists, and
+    // naming A twice is how you get a path from a track to itself.
+    let from = *generator.from.read();
+    let to = *generator.to.read();
+
+    rsx! {
+        button {
+            class: "menu-item",
+            onclick: move |_| {
+                selection.set(Some(track_id));
+                generator.request(Mode::Neighbours, track_id);
+                menu.set(None);
+            },
+            "Find neighbours"
+        }
+        button {
+            class: "menu-item",
+            onclick: move |_| {
+                selection.set(Some(track_id));
+                generator.request(Mode::Radio, track_id);
+                menu.set(None);
+            },
+            "Start radio here"
+        }
+        button {
+            class: "menu-item",
+            disabled: from == Some(track_id),
+            onclick: move |_| {
+                generator.set_path_end(PathEnd::A, track_id);
+                menu.set(None);
+            },
+            if to.is_some() && from != Some(track_id) {
+                "Set as path A, and go"
+            } else {
+                "Set as path A"
+            }
+        }
+        button {
+            class: "menu-item",
+            disabled: to == Some(track_id),
+            onclick: move |_| {
+                generator.set_path_end(PathEnd::B, track_id);
+                menu.set(None);
+            },
+            if from.is_some() && to != Some(track_id) {
+                "Set as path B, and go"
+            } else {
+                "Set as path B"
+            }
+        }
+        button {
+            class: "menu-item",
+            onclick: move |_| {
+                // Deliberately does not run: drift still needs a phrase, and
+                // inventing one would be inventing the intent.
+                selection.set(Some(track_id));
+                generator.aim_drift();
+                menu.set(None);
+            },
+            "Drift from here…"
+        }
+    }
+}
+
 #[component]
 fn SpaceTrackItems(track_id: i64) -> Element {
     let player = use_context::<Player>();
@@ -534,5 +613,11 @@ fn SpaceTrackItems(track_id: i64) -> Element {
             },
             "Add to queue"
         }
+
+        // The navigation verbs. These used to fire on their own the moment
+        // anything was selected, which is why they are spelled out here:
+        // asking for a walk through the space should look like asking.
+        div { class: "menu-rule" }
+        GenerationItems { track_id }
     }
 }
