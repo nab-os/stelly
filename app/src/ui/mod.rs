@@ -80,6 +80,26 @@ impl Default for Search {
     }
 }
 
+/// A track in the analysed space, reduced to what a row needs. Carries
+/// `album_id` because a space track has no stored art and its cover is
+/// derived from that id.
+#[derive(Clone, PartialEq)]
+pub struct SpaceRow {
+    pub track_id: i64,
+    pub artist: String,
+    pub title: String,
+    pub album_id: String,
+}
+
+/// Tracks in the space matching the search box, and how many matched in all.
+///
+/// A context rather than a prop: the shell owns the scan, but the column that
+/// draws the results is `LibraryPanel`, and threading a list through every
+/// intervening component to get there is how the two lists ended up in two
+/// different columns in the first place.
+#[derive(Clone, Copy)]
+pub struct SpaceMatches(pub Memo<(Vec<SpaceRow>, usize)>);
+
 /// Artists the user has hidden, and the actions that change that. A signal
 /// rather than a per-render read: the engine's copy sits behind a mutex the UI
 /// cannot subscribe to.

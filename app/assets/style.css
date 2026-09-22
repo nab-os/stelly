@@ -73,10 +73,28 @@ code {
 /* Qobuz on the left, the map in the middle, space tools on the right. */
 .body { display: flex; gap: 12px; flex: 1; min-height: 0; }
 
+/* The browse column is now the primary surface, one list holding both what
+   the space has and what Qobuz will sell you, so it takes the room the map
+   used to. */
 .library {
-  width: 360px;
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 380px;
   min-height: 0;
+}
+
+/* Source headings. Louder than a plain shelf heading, because they are what
+   tells you why a row is where it is. */
+.source-head {
+  color: var(--text);
+  border-bottom: 1px solid var(--row);
+  padding-bottom: 4px;
+  margin-top: 14px;
+}
+.source-head:first-child { margin-top: 0; }
+
+.more-rows {
+  align-self: flex-start;
+  margin: 6px 0 2px 7px;
 }
 
 .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -682,7 +700,7 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
 
   .shelf,
   .shelf .list,
-  .side .list:not(.in-space),
+  .side .list,
   .hidden-artists,
   .hidden-artists .list {
     overflow: visible;
@@ -790,17 +808,12 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
 /* Phones in portrait, where the map needs to be worth switching to. */
 @media (max-width: 560px) {
   .body.pane-map > .map-wrap { min-height: 60vh; }
-  .list.in-space { height: 38vh; }
+
 }
 
-/* ------------------------------------------------------- in-space search
+/* --------------------------------------------------------------- search
    A clear button inside the field, so emptying a long query does not mean
-   selecting the text first.
-
-   The list keeps one height rather than growing and shrinking with the
-   result count. It sits above Generate and Weights in a shared column, so a
-   list that resized on every keystroke dragged both panels up and down the
-   page while you were still typing. */
+   selecting the text first. */
 .search-wrap { position: relative; display: flex; flex-direction: column; }
 .search-wrap .search { padding-right: 30px; }
 
@@ -833,18 +846,6 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
    "this is interactive" rather than the text caret a bare canvas gets. */
 #map { cursor: crosshair; }
 #map:active { cursor: grabbing; }
-
-.list.in-space {
-  height: 258px;
-  max-height: none;
-  overflow-y: auto;
-  flex: none;
-}
-.list.in-space .empty {
-  color: var(--muted);
-  padding: 6px 7px;
-  cursor: default;
-}
 
 /* ---------------------------------------------------------------- volume
    Independent of the device's own level, so the phone's hardware keys still

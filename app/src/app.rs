@@ -8,7 +8,7 @@ use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
     Blocklist, ContextMenu, ContextMenuView, Crawler, GeneratePanel, Generator, Library,
     LibraryPanel, LocalIds, Pipeline, PipelineView, Player, PlayerBar, QueueView, Search,
-    Selection,
+    Selection, SpaceMatches, SpaceRow,
 };
 use crate::{engine, map, ServerConfig, Wiring};
 use crate::platform::wry::http::Response;
@@ -705,16 +705,9 @@ fn Shell() -> Element {
         (visible, catalog.len() - visible)
     };
 
-    /// How many rows the in-space list will render at once.
-    const SHOWN: usize = 80;
-
-    // Every term must appear somewhere in artist, title or album, one
-    // substring over one field could not find "aphex window".
-    let terms: Vec<String> = query()
-        .to_lowercase()
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
+    /// The most rows the scan will hand over. The list shows fewer to begin
+    /// with and grows on request; this is the ceiling on what is kept ready.
+    const SHOWN: usize = 720;
 
     // Kept out of the render body: this runs on every keystroke, and inside
     // the body it also re-ran for every unrelated signal the shell touches.
@@ -731,18 +724,25 @@ fn Shell() -> Element {
         let guard = engine().lock().unwrap();
         let catalog = &guard.navigator.catalog;
 
+        let row = |t: &crate::db::TrackMeta| SpaceRow {
+            track_id: t.track_id,
+            artist: t.artist.clone(),
+            title: t.title.clone(),
+            album_id: t.album_id.clone(),
+        };
+
         if terms.is_empty() {
-            let rows: Vec<(i64, String, String)> = catalog
+            let rows: Vec<SpaceRow> = catalog
                 .visible()
                 .map(|i| catalog.get(i))
                 .take(SHOWN)
-                .map(|t| (t.track_id, t.artist.clone(), t.title.clone()))
+                .map(row)
                 .collect();
             let total = catalog.visible().count();
             (rows, total)
         } else {
             let first = terms[0].as_str();
-            let mut found: Vec<(u8, i64, String, String)> = Vec::new();
+            let mut found: Vec<(u8, SpaceRow)> = Vec::new();
 
             for i in catalog.visible() {
                 let Some(haystack) = haystacks.get(i) else {
@@ -762,22 +762,21 @@ fn Shell() -> Element {
                 } else {
                     1
                 };
-                let track = catalog.get(i);
-                found.push((rank, track.track_id, track.artist.clone(), track.title.clone()));
+                found.push((rank, row(catalog.get(i))));
             }
 
             let total = found.len();
-            found.sort_by_key(|row| row.0);
+            found.sort_by_key(|entry| entry.0);
             let rows = found
                 .into_iter()
                 .take(SHOWN)
-                .map(|(_, id, artist, title)| (id, artist, title))
+                .map(|(_, row)| row)
                 .collect();
             (rows, total)
         }
     });
 
-    let (matches, match_total) = filtered();
+    use_context_provider(|| SpaceMatches(filtered));
 
     let selected_label = selected()
         .and_then(|id| {
@@ -878,41 +877,10 @@ fn Shell() -> Element {
                 }
 
                 aside { class: "side",
-                    // ------------------------------------------------ browse
-                    section { class: "panel",
-                        h2 {
-                            "In the space"
-                            span { class: "spacer" }
-                            span { class: "muted",
-                                if terms.is_empty() {
-                                    "{match_total}"
-                                } else if match_total > matches.len() {
-                                    "{matches.len()} of {match_total}"
-                                } else {
-                                    "{match_total} found"
-                                }
-                            }
-                        }
-                        // Inside the list rather than beside it: an element
-                        // appearing above Generate would reintroduce the shift
-                        // the fixed height prevents.
-                        ul { class: "list in-space",
-                            if !terms.is_empty() && match_total == 0 {
-                                li { class: "row empty",
-                                    "Nothing matches. Every word has to appear somewhere."
-                                }
-                            }
-                            for (id, artist, title) in matches {
-                                li {
-                                    key: "{id}",
-                                    class: if selected() == Some(id) { "row selected" } else { "row" },
-                                    onclick: move |_| selected.set(Some(id)),
-                                    span { class: "artist", "{artist}" }
-                                    span { class: "title", "{title}" }
-                                }
-                            }
-                        }
-                    }
+                    // The space's own tracks used to be listed here, opposite
+                    // the Qobuz column, which made "where a track came from"
+                    // into a place on screen rather than a fact about the
+                    // track. They are one list now; see `LibraryPanel`.
 
                     // ---------------------------------------------- generate
                     GeneratePanel {}

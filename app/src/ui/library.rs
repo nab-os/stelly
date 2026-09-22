@@ -5,7 +5,11 @@
 
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
-use super::{Blocklist, Cover, LocalIds, Search, LIST_CAP, SEARCH_LIMIT};
+use super::{Blocklist, Cover, LocalIds, Search, Selection, SpaceMatches, LIST_CAP, SEARCH_LIMIT};
+
+/// How many space rows the list opens with. Enough to fill the column on any
+/// screen; "show more" triples it.
+const FIRST_SHOWN: usize = 80;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
@@ -274,15 +278,24 @@ pub fn LibraryPanel() -> Element {
 
     // Every emptiness test below asks about what is *visible*: no heading over
     // nothing, and the bulk actions must not reach past the filter.
-    let tracks = shelf.visible_tracks(&blocklist);
+    // Tracks the space section is already showing do not count towards the
+    // Qobuz section being non-empty, or its heading would stand over nothing.
+    let space = use_context::<SpaceMatches>();
+    // The whole shelf, for the bulk actions: "play all" means the view's
+    // tracks, including ones the space section happens to be showing.
+    let shelf_tracks = shelf.visible_tracks(&blocklist);
+    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&space));
     let albums = shelf.visible_albums(&blocklist);
     let artists = shelf.visible_artists(&blocklist, false);
     let similar = shelf.visible_artists(&blocklist, true);
-    let nothing_visible = tracks.is_empty()
+    let nothing_from_qobuz = tracks.is_empty()
         && albums.is_empty()
         && artists.is_empty()
         && similar.is_empty()
         && shelf.playlists.is_empty();
+    // "Nothing here" belongs to the whole list, not to the Qobuz half of it:
+    // with matches in the space above, the list is plainly not empty.
+    let nothing_visible = nothing_from_qobuz && space.0.read().1 == 0;
     let has_history = !library.history.read().is_empty();
 
     // Drives every navigation. Deliberately here rather than in `show`: see
@@ -291,7 +304,11 @@ pub fn LibraryPanel() -> Element {
 
     rsx! {
         aside { class: "panel library",
-            h2 { "Qobuz" }
+            // Named for what you are looking at, not for where the rows came
+            // from. "Qobuz" as a column heading was half of what made this
+            // feel like two rival lists; it survives below as a section badge,
+            // which is the honest scope for it.
+            h2 { class: "ellipsis", "{view.label()}" }
 
             div { class: "tabs",
                 button {
@@ -338,9 +355,8 @@ pub fn LibraryPanel() -> Element {
                 if has_history {
                     button { class: "chip", onclick: move |_| library.back(), "‹ back" }
                 }
-                span { class: "muted", "{view.label()}" }
                 span { class: "spacer" }
-                if !tracks.is_empty() {
+                if !shelf_tracks.is_empty() {
                     button {
                         class: "chip",
                         onclick: move |_| {
@@ -378,6 +394,21 @@ pub fn LibraryPanel() -> Element {
                 p { class: "muted error", "{message}" }
             } else {
                 div { class: "shelf",
+                    // What you already have, first: it needs no round trip,
+                    // it is what the space can actually navigate, and it is
+                    // usually what you were looking for.
+                    SpaceRows {}
+
+                    if !nothing_from_qobuz {
+                        h3 { class: "shelf-head source-head",
+                            "On Qobuz"
+                            span { class: "spacer" }
+                            if tracks.len() >= SEARCH_LIMIT {
+                                span { class: "muted", "first {SEARCH_LIMIT}" }
+                            }
+                        }
+                    }
+
                     if !artists.is_empty() {
                         ArtistRows { heading: "Artists".to_string(), similar: false }
                     }
@@ -400,6 +431,109 @@ pub fn LibraryPanel() -> Element {
             }
 
             HiddenArtists {}
+        }
+    }
+}
+
+/// Track ids already listed under "In your space".
+fn space_ids(matches: &SpaceMatches) -> std::collections::HashSet<i64> {
+    matches.0.read().0.iter().map(|row| row.track_id).collect()
+}
+
+/// Shelf tracks that the space section is not already showing, each paired
+/// with its index into `visible_tracks`.
+///
+/// The index is the row's address: `menu.rs` re-reads `visible_tracks` when an
+/// item is chosen, so it must survive the filter. Enumerating before filtering
+/// is what keeps it correct, renumbering after would point every menu at a
+/// different track, which is the bug `visible_tracks` itself was introduced to
+/// fix.
+fn qobuz_only(
+    tracks: Vec<RemoteTrack>,
+    in_space: &std::collections::HashSet<i64>,
+) -> Vec<(usize, RemoteTrack)> {
+    tracks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, track)| !in_space.contains(&track.id))
+        .collect()
+}
+
+/// Tracks the space already holds, as the first section of the one list.
+///
+/// Addressed by track id, not by position: these rows come from the space's
+/// own scan rather than from `Shelf`, so they must not share the shelf's
+/// index space. That separation is the point, one list to read, two
+/// independently addressed sections underneath, so the menu cannot act on a
+/// neighbour of the row you opened it on.
+#[component]
+fn SpaceRows() -> Element {
+    let matches = use_context::<SpaceMatches>().0;
+    let mut selection = use_context::<Selection>().0;
+    let mut menu = use_context::<ContextMenu>().0;
+    let search = use_context::<Search>();
+
+    // Grows on request rather than rendering 720 rows nobody scrolled to.
+    let mut shown = use_signal(|| FIRST_SHOWN);
+
+    let (rows, total) = matches();
+    let searching = !search.text.read().trim().is_empty();
+    let visible = shown().min(rows.len());
+
+    if total == 0 {
+        return rsx! {
+            if searching {
+                h3 { class: "shelf-head source-head", "In your space" }
+                p { class: "muted", "Nothing matches. Every word has to appear somewhere." }
+            }
+        };
+    }
+
+    rsx! {
+        h3 { class: "shelf-head source-head",
+            "In your space"
+            span { class: "spacer" }
+            span { class: "muted",
+                if visible < total { "{visible} of {total}" } else { "{total}" }
+            }
+        }
+
+        ul { class: "list",
+            for row in rows.iter().take(visible) {
+                li {
+                    key: "{row.track_id}",
+                    class: if selection.read().as_ref() == Some(&row.track_id) {
+                        "row selected"
+                    } else {
+                        "row"
+                    },
+                    onclick: {
+                        let id = row.track_id;
+                        move |_| selection.set(Some(id))
+                    },
+                    oncontextmenu: {
+                        let id = row.track_id;
+                        move |event: Event<MouseData>| {
+                            event.prevent_default();
+                            open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                        }
+                    },
+                    span { class: "artist", "{row.artist}" }
+                    span { class: "title", "{row.title}" }
+                    {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
+                }
+            }
+        }
+
+        if visible < total {
+            button {
+                class: "chip more-rows",
+                onclick: move |_| {
+                    let next = shown() * 3;
+                    shown.set(next);
+                },
+                "show more"
+            }
         }
     }
 }
@@ -493,13 +627,24 @@ fn TrackRows() -> Element {
     let blocklist = use_context::<Blocklist>();
     let mut menu = use_context::<ContextMenu>().0;
 
+    let matches = use_context::<SpaceMatches>();
+
+    // Matched on the Qobuz track id: that is the same recording *and* the
+    // same release, so suppressing it hides nothing you could not already
+    // reach. A different release of the same song stays, because fetching
+    // that one is a real thing to want.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
+    let tracks = qobuz_only(tracks, &space_ids(&matches));
     let now_playing = player.current().map(|t| t.id);
+
+    if tracks.is_empty() {
+        return rsx! {};
+    }
 
     rsx! {
         h3 { class: "shelf-head", "Tracks" }
         ul { class: "list",
-            for (index, track) in tracks.into_iter().enumerate() {
+            for (index, track) in tracks {
                 li {
                     key: "{index}-{track.id}",
                     class: if now_playing == Some(track.id) { "row playing" } else { "row" },
