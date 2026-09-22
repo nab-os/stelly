@@ -48,6 +48,38 @@ pub struct LocalIds(pub Memo<Rc<HashSet<i64>>>);
 #[derive(Clone, Copy)]
 pub struct Selection(pub Signal<Option<i64>>);
 
+/// The one search box. There used to be two, one filtering the analysed
+/// space as you typed, one asking Qobuz on Enter, which made "where do I
+/// type the name of a song" a question with two answers.
+///
+/// They stay two *queries*, because they are genuinely different: the local
+/// one is a scan of memory and can run per keystroke, the remote one is a
+/// network round trip and must not. What they no longer are is two inputs.
+#[derive(Clone, Copy)]
+pub struct Search {
+    /// What is in the box. The local filter reads this directly.
+    pub text: Signal<String>,
+    /// What the remote has actually been asked for. Compared against `text`
+    /// to decide whether a round trip is owed; also what stops the debounce
+    /// from re-firing a query it has already run.
+    pub submitted: Signal<String>,
+}
+
+impl Search {
+    pub fn new() -> Self {
+        Self {
+            text: Signal::new(String::new()),
+            submitted: Signal::new(String::new()),
+        }
+    }
+}
+
+impl Default for Search {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Artists the user has hidden, and the actions that change that. A signal
 /// rather than a per-render read: the engine's copy sits behind a mutex the UI
 /// cannot subscribe to.

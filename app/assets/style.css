@@ -29,7 +29,9 @@ body {
 
 header {
   display: flex;
-  align-items: baseline;
+  /* Centred, not baseline: the header now holds an input, and a text baseline
+     shared with a bordered box sits the box visibly low. */
+  align-items: center;
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -701,6 +703,10 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   .search-wrap .search { padding-right: 40px; }
   .clear-search { height: 42px; width: 38px; font-size: 20px; }
 
+  /* The search box gets its own line rather than fighting the title and the
+     view tabs for a 393px row. */
+  .header-search { flex: 1 1 100%; max-width: none; order: 1; }
+
   /* Sliders are the fiddliest thing on a touch screen; give the thumb room. */
   .slider { grid-template-columns: 64px 1fr 32px; }
   .slider input { height: 28px; }
@@ -781,6 +787,16 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
    page while you were still typing. */
 .search-wrap { position: relative; display: flex; flex-direction: column; }
 .search-wrap .search { padding-right: 30px; }
+
+/* The one search box, in the header because it drives both columns. Wide
+   enough to be the obvious place to start typing, capped so it does not push
+   the selected-track label off the end of the bar. */
+.header-search {
+  flex: 1 1 320px;
+  max-width: 420px;
+  min-width: 180px;
+}
+.header-search .search { margin-bottom: 0; }
 
 .clear-search {
   position: absolute;

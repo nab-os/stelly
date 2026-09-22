@@ -5,7 +5,7 @@
 
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
-use super::{Blocklist, Cover, LocalIds, LIST_CAP, SEARCH_LIMIT};
+use super::{Blocklist, Cover, LocalIds, Search, LIST_CAP, SEARCH_LIMIT};
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
@@ -72,7 +72,6 @@ pub struct Library {
     pub shelf: Signal<Shelf>,
     pub loading: Signal<bool>,
     pub error: Signal<Option<String>>,
-    pub query: Signal<String>,
     /// Views visited on the way here, for the back button.
     pub history: Signal<Vec<View>>,
     /// A view asked for but not yet fetched. See `show`.
@@ -94,7 +93,6 @@ impl Library {
             shelf: Signal::new(Shelf::default()),
             loading: Signal::new(true),
             error: Signal::new(None),
-            query: Signal::new(String::new()),
             history: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
@@ -115,6 +113,33 @@ impl Library {
         let previous = self.history.write().pop();
         if let Some(view) = previous {
             self.show(view);
+        }
+    }
+
+    /// Navigate to a search result, refining in place.
+    ///
+    /// The first search from an album or artist pushes that view, so back
+    /// returns to what you were reading. Every refinement after it replaces:
+    /// a query that fires as you type would otherwise leave one history entry
+    /// per character, and "back" would walk you through your own spelling.
+    pub(crate) fn search_to(self, query: String) {
+        if matches!(&*self.view.peek(), View::Search(_)) {
+            self.show(View::Search(query));
+        } else {
+            self.go(View::Search(query));
+        }
+    }
+
+    /// Emptying the box should put back whatever the search covered up,
+    /// rather than leaving an empty shelf with no way out but the tabs.
+    pub(crate) fn leave_search(self) {
+        if !matches!(&*self.view.peek(), View::Search(_)) {
+            return;
+        }
+        if self.history.peek().is_empty() {
+            self.show(View::FavouriteTracks);
+        } else {
+            self.back();
         }
     }
 
@@ -238,8 +263,9 @@ async fn fetch_into_catalog(kind: &str, id: &str) -> anyhow::Result<usize> {
 
 #[component]
 pub fn LibraryPanel() -> Element {
-    let mut library = use_context::<Library>();
+    let library = use_context::<Library>();
     let player = use_context::<Player>();
+    let search = use_context::<Search>();
 
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
@@ -263,13 +289,6 @@ pub fn LibraryPanel() -> Element {
     // the comment there.
     use_effect(move || library.drive());
 
-    let submit = move || {
-        let text = library.query.peek().trim().to_string();
-        if !text.is_empty() {
-            library.go(View::Search(text));
-        }
-    };
-
     rsx! {
         aside { class: "panel library",
             h2 { "Qobuz" }
@@ -278,8 +297,8 @@ pub fn LibraryPanel() -> Element {
                 button {
                     class: if tab == Tab::Search { "tab active" } else { "tab" },
                     onclick: move |_| {
-                        let text = library.query.peek().trim().to_string();
-                        library.go(View::Search(text));
+                        let text = search.text.peek().trim().to_string();
+                        library.search_to(text);
                     },
                     "search"
                 }
@@ -293,18 +312,6 @@ pub fn LibraryPanel() -> Element {
                     onclick: move |_| library.go(View::Playlists),
                     "playlists"
                 }
-            }
-
-            input {
-                class: "search",
-                placeholder: "search the Qobuz catalogue",
-                value: "{library.query}",
-                oninput: move |event| library.query.set(event.value()),
-                onkeydown: move |event| {
-                    if event.key() == Key::Enter {
-                        submit();
-                    }
-                },
             }
 
             if tab == Tab::Library {

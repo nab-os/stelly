@@ -7,7 +7,8 @@ use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
     Blocklist, ContextMenu, ContextMenuView, Crawler, GeneratePanel, Generator, Library,
-    LibraryPanel, LocalIds, Pipeline, PipelineView, Player, PlayerBar, QueueView, Selection,
+    LibraryPanel, LocalIds, Pipeline, PipelineView, Player, PlayerBar, QueueView, Search,
+    Selection,
 };
 use crate::{engine, map, ServerConfig, Wiring};
 use crate::platform::wry::http::Response;
@@ -341,7 +342,8 @@ fn Settings(open: Signal<bool>) -> Element {
 
 #[component]
 fn Shell() -> Element {
-    let mut query = use_signal(String::new);
+    let search = use_context_provider(Search::new);
+    let mut query = search.text;
     let mut weights = use_signal(|| engine().lock().unwrap().space.default_weights());
 
     // Shared with the Qobuz panel, which can select a track it recognises.
@@ -526,6 +528,40 @@ fn Shell() -> Element {
     // Open on the user's own library, which is also what the crawl seeds from.
     use_future(move || async move {
         crate::ui::open_initial(library);
+    });
+
+    // The remote half of the search box. The local filter above runs on every
+    // keystroke because it is a scan of memory; Qobuz is a network round trip
+    // and must not, so this waits for the text to stop moving before asking.
+    //
+    // A polling loop rather than a cancellable timer task: the app already
+    // keeps one of these for crawl and pipeline status, and the cancellation
+    // semantics of a respawned Dioxus task are subtler than the 200ms of
+    // latency this costs. Enter bypasses it entirely.
+    use_future(move || async move {
+        let mut search = search;
+        let mut previous = String::new();
+
+        loop {
+            tokio::time::sleep(crate::ui::POLL).await;
+            let current = search.text.peek().trim().to_string();
+
+            // Stable for two ticks, i.e. the user has stopped typing.
+            if current == previous {
+                if current.is_empty() {
+                    // Emptying the box is a navigation, not a query.
+                    if !search.submitted.peek().is_empty() {
+                        search.submitted.set(String::new());
+                        library.leave_search();
+                    }
+                } else if current.chars().count() >= 2 && current != *search.submitted.peek() {
+                    search.submitted.set(current.clone());
+                    library.search_to(current.clone());
+                }
+            }
+
+            previous = current;
+        }
     });
 
     // Bulk point data crosses as binary here, never through eval.
@@ -740,6 +776,44 @@ fn Shell() -> Element {
                         "pipeline"
                     }
                 }
+                // One box, above both columns, because it drives both: the
+                // analysed space filters as you type, Qobuz is asked once you
+                // stop. Not inside either panel, sitting in one of them is
+                // what made it look like that panel's private filter.
+                if explore() {
+                    div { class: "search-wrap header-search",
+                        input {
+                            class: "search",
+                            placeholder: "artist, title or album, any order",
+                            value: "{query}",
+                            oninput: move |e| query.set(e.value()),
+                            // Enter skips the debounce. The local list has
+                            // already filtered; this is impatience with the
+                            // round trip, and answering it late would be
+                            // worse than not offering it at all.
+                            onkeydown: move |event| {
+                                if event.key() != Key::Enter {
+                                    return;
+                                }
+                                let mut search = search;
+                                let text = search.text.peek().trim().to_string();
+                                if text.is_empty() || text == *search.submitted.peek() {
+                                    return;
+                                }
+                                search.submitted.set(text.clone());
+                                library.search_to(text);
+                            },
+                        }
+                        if !query().is_empty() {
+                            button {
+                                class: "clear-search",
+                                title: "clear",
+                                onclick: move |_| query.set(String::new()),
+                                "×"
+                            }
+                        }
+                    }
+                }
                 span { class: "spacer" }
                 span { class: "muted", "{selected_label}" }
                 button {
@@ -793,22 +867,6 @@ fn Shell() -> Element {
                                     "{matches.len()} of {match_total}"
                                 } else {
                                     "{match_total} found"
-                                }
-                            }
-                        }
-                        div { class: "search-wrap",
-                            input {
-                                class: "search",
-                                placeholder: "artist, title or album, any order",
-                                value: "{query}",
-                                oninput: move |e| query.set(e.value()),
-                            }
-                            if !query().is_empty() {
-                                button {
-                                    class: "clear-search",
-                                    title: "clear",
-                                    onclick: move |_| query.set(String::new()),
-                                    "×"
                                 }
                             }
                         }
