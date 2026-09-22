@@ -603,6 +603,34 @@ fn Shell() -> Element {
         let _ = handle.recv::<serde_json::Value>().await;
     });
 
+    // Long press opens the row menu on a touch screen, where there is no
+    // right-click to open it with.
+    let mut menu = use_context::<ContextMenu>().0;
+    use_future(move || async move {
+        let mut handle = document::eval(include_str!("../assets/long-press.js"));
+
+        while let Ok(message) = handle.recv::<serde_json::Value>().await {
+            if message.get("closeMap").is_some() {
+                map_open.set(false);
+                continue;
+            }
+            let Some(tag) = message.get("target").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // A tag that does not parse means the row's address and this
+            // parser have drifted apart; dropping it is better than opening
+            // a menu on a guess.
+            let Some(target) = crate::ui::MenuTarget::parse(tag) else {
+                continue;
+            };
+            menu.set(Some(crate::ui::MenuState {
+                x: message.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                y: message.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                target,
+            }));
+        }
+    });
+
     // The remote half of the search box. The local filter above runs on every
     // keystroke because it is a scan of memory; Qobuz is a network round trip
     // and must not, so this waits for the text to stop moving before asking.
@@ -664,6 +692,21 @@ fn Shell() -> Element {
     use_future(move || async move {
         let mut handle = document::eval(include_str!("../assets/map.js"));
         while let Ok(message) = handle.recv::<serde_json::Value>().await {
+            // Match on `type` first. A menu message carries a `track_id` too,
+            // so the selection arm below would otherwise swallow it and the
+            // menu would never open.
+            if message.get("type").and_then(|v| v.as_str()) == Some("menu") {
+                if let Some(id) = message.get("track_id").and_then(|v| v.as_f64()) {
+                    selected.set(Some(id as i64));
+                    menu.set(Some(crate::ui::MenuState {
+                        x: message.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        y: message.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        target: crate::ui::MenuTarget::SpaceTrack(id as i64),
+                    }));
+                }
+                continue;
+            }
+
             // An explicit null is the map saying the background was clicked.
             // Matched on the key being present rather than on the value
             // parsing, so a future message without one cannot clear the

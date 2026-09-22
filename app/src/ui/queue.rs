@@ -130,6 +130,7 @@ pub fn QueueView() -> Element {
                                 onclick: move |_| {
                                     spawn(async move { play_at(player, index).await });
                                 },
+                                "data-menu": MenuTarget::QueueEntry(index).tag(),
                                 oncontextmenu: move |event: Event<MouseData>| {
                                     event.prevent_default();
                                     open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));

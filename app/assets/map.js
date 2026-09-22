@@ -641,6 +641,18 @@
     }
   });
 
+  // Right-click a point for the same actions its row has. The canvas is the
+  // one surface with no rows to right-click, which left the map able to
+  // select a track and nothing else.
+  canvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const found = nearest(e.offsetX, e.offsetY);
+    if (found < 0) return;
+    selected = found;
+    schedule();
+    dioxus.send({ type: "menu", track_id: ids[found], x: e.clientX, y: e.clientY });
+  });
+
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const factor = Math.exp(-e.deltaY * 0.001);
@@ -690,12 +702,43 @@
     touchCount = touches.length;
   }
 
+  // Long press is the touch equivalent of the right-click above. The
+  // document-wide handler in long-press.js only fires inside `[data-menu]`,
+  // which a canvas has no way to be: a point is a coordinate, not an element.
+  let pressTimer = null;
+  let pressFired = false;
+
+  const cancelPress = () => {
+    if (pressTimer !== null) clearTimeout(pressTimer);
+    pressTimer = null;
+  };
+
   canvas.addEventListener("touchstart", (e) => {
     // A gesture starts with the first finger. Later fingers must not restart
     // it, or a pinch gets counted as a tap.
     if (touchCount === 0) {
       dragMoved = false;
       touchStart = centre(e.touches);
+      pressFired = false;
+      cancelPress();
+      if (e.touches.length === 1) {
+        const point = { x: touchStart.x, y: touchStart.y };
+        const client = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        pressTimer = setTimeout(() => {
+          pressTimer = null;
+          if (dragMoved) return;
+          const found = nearest(point.x, point.y, 22);
+          if (found < 0) return;
+          pressFired = true;
+          selected = found;
+          hover = found;
+          schedule();
+          dioxus.send({ type: "menu", track_id: ids[found], x: client.x, y: client.y });
+        }, 500);
+      }
+    } else {
+      // A second finger means a pinch, not a press.
+      cancelPress();
     }
     reseed(e.touches);
   }, { passive: true });
@@ -750,6 +793,12 @@
     }
 
     reseed(e.touches);
+    cancelPress();
+    // The press already opened a menu; ending it must not also select.
+    if (pressFired) {
+      pressFired = false;
+      return;
+    }
     if (dragMoved || !touchStart) return;
 
     const found = nearest(touchStart.x, touchStart.y, 22);
@@ -772,6 +821,7 @@
   // missing handler here leaves `touchCount` stale until the next touchstart.
   canvas.addEventListener("touchcancel", (e) => {
     reseed(e.touches);
+    cancelPress();
     dragMoved = true;
   }, { passive: true });
 

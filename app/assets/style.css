@@ -332,6 +332,18 @@ ol.list .row::before {
   border-radius: 5px;
   cursor: pointer;
 }
+
+/* Anything a long press can open a menu on. Without this the platform's own
+   text-selection UI engages mid-press, the magnifier on Android, the
+   selection handles in WebKitGTK, and the gesture becomes a fight over what
+   is being held. `pan-y` keeps vertical scrolling working while the timer
+   runs, so a press that turns into a scroll still scrolls. */
+[data-menu] {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-y;
+}
 .row.selected { background: var(--accent); color: #12131a; }
 .row.selected .artist, .row.selected .muted { color: #12131a; }
 

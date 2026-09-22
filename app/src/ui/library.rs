@@ -511,6 +511,7 @@ fn SpaceRows() -> Element {
                         let id = row.track_id;
                         move |_| selection.set(Some(id))
                     },
+                    "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
                     oncontextmenu: {
                         let id = row.track_id;
                         move |event: Event<MouseData>| {
@@ -660,6 +661,7 @@ fn TrackRows() -> Element {
                         let queue = library.shelf.peek().visible_tracks(&blocklist);
                         play_list(player, queue, index);
                     },
+                    "data-menu": MenuTarget::ShelfTrack(index).tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
                         event.prevent_default();
                         open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
@@ -712,6 +714,7 @@ fn AlbumRows() -> Element {
                             library.go(target);
                         }
                     },
+                    "data-menu": MenuTarget::ShelfAlbum(index).tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
                         event.prevent_default();
                         open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
@@ -754,6 +757,7 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                             library.go(target);
                         }
                     },
+                    "data-menu": MenuTarget::ShelfArtist { index, similar }.tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
                         event.prevent_default();
                         open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar });

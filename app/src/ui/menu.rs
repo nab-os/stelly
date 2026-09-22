@@ -34,6 +34,50 @@ pub enum MenuTarget {
     SpaceTrack(i64),
 }
 
+impl MenuTarget {
+    /// The row's address as a string, for `data-menu`.
+    ///
+    /// A long press is detected in JS and comes back through an eval channel,
+    /// and a DOM dataset holds nothing but text, so this is the only route
+    /// from a pressed element back to the enum. `parse` is its inverse, and
+    /// the round-trip test below is what keeps them that way: a mismatch does
+    /// not fail loudly, it just makes long-press quietly do nothing.
+    pub fn tag(&self) -> String {
+        match self {
+            MenuTarget::ShelfTrack(index) => format!("shelf-track:{index}"),
+            MenuTarget::ShelfAlbum(index) => format!("shelf-album:{index}"),
+            MenuTarget::ShelfArtist { index, similar } => {
+                let which = if *similar { "similar" } else { "main" };
+                format!("shelf-artist:{index}:{which}")
+            }
+            MenuTarget::QueueEntry(index) => format!("queue:{index}"),
+            MenuTarget::SpaceTrack(track_id) => format!("space-track:{track_id}"),
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let kind = parts.next()?;
+        let value = parts.next()?;
+
+        Some(match kind {
+            "shelf-track" => MenuTarget::ShelfTrack(value.parse().ok()?),
+            "shelf-album" => MenuTarget::ShelfAlbum(value.parse().ok()?),
+            "shelf-artist" => MenuTarget::ShelfArtist {
+                index: value.parse().ok()?,
+                similar: match parts.next()? {
+                    "similar" => true,
+                    "main" => false,
+                    _ => return None,
+                },
+            },
+            "queue" => MenuTarget::QueueEntry(value.parse().ok()?),
+            "space-track" => MenuTarget::SpaceTrack(value.parse().ok()?),
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct MenuState {
     /// Viewport coordinates of the click that opened it.
@@ -625,5 +669,43 @@ fn SpaceTrackItems(track_id: i64) -> Element {
         // asking for a walk through the space should look like asking.
         div { class: "menu-rule" }
         GenerationItems { track_id }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MenuTarget;
+
+    /// Every variant, because the pair is only useful if it is total: a
+    /// variant that fails to parse is a row whose long press does nothing,
+    /// and nothing is exactly what that failure looks like from outside.
+    #[test]
+    fn every_target_survives_the_round_trip() {
+        let cases = [
+            MenuTarget::ShelfTrack(0),
+            MenuTarget::ShelfTrack(12),
+            MenuTarget::ShelfAlbum(3),
+            MenuTarget::ShelfArtist { index: 4, similar: true },
+            MenuTarget::ShelfArtist { index: 0, similar: false },
+            MenuTarget::QueueEntry(7),
+            MenuTarget::SpaceTrack(8_841_102),
+            MenuTarget::SpaceTrack(-1),
+        ];
+
+        for target in cases {
+            let tag = target.tag();
+            assert_eq!(
+                MenuTarget::parse(&tag),
+                Some(target.clone()),
+                "{tag} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn rubbish_parses_to_nothing_rather_than_a_wrong_row() {
+        for text in ["", "shelf-track", "shelf-track:x", "nope:1", "shelf-artist:1:sideways"] {
+            assert_eq!(MenuTarget::parse(text), None, "{text:?} should not parse");
+        }
     }
 }

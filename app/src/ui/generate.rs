@@ -604,6 +604,7 @@ pub fn GeneratePanel() -> Element {
                             let id = step.track.track_id;
                             move |_| selected.set(Some(id))
                         },
+                        "data-menu": MenuTarget::SpaceTrack(step.track.track_id).tag(),
                         oncontextmenu: {
                             let id = step.track.track_id;
                             move |event: Event<MouseData>| {
