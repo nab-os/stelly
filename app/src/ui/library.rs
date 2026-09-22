@@ -78,6 +78,13 @@ pub struct Library {
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
+    /// Bumped by every `show`. A fetch carries the value it started with and
+    /// discards its result if it no longer matches, because `pending` is a
+    /// single slot but the tasks it spawns are not: two views asked for in
+    /// quick succession race, and the slower one would otherwise land last
+    /// and win. Latent while navigation was a click at a time; a search that
+    /// fires as you type makes it routine.
+    epoch: Signal<u64>,
 }
 
 impl Library {
@@ -91,6 +98,7 @@ impl Library {
             history: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
+            epoch: Signal::new(0),
         }
     }
 
@@ -122,6 +130,7 @@ impl Library {
         self.notice.set(None);
         self.loading.set(true);
         self.pending.set(Some(target));
+        *self.epoch.write() += 1;
     }
 
     /// Fetch whatever `show` last asked for. Runs in `LibraryPanel`, which is
@@ -130,10 +139,20 @@ impl Library {
         let target = self.pending.read().clone();
         let Some(target) = target else { return };
         self.pending.set(None);
+        let epoch = *self.epoch.peek();
 
         spawn(async move {
             let mut library = self;
-            match load(target).await {
+            let loaded = load(target).await;
+
+            // Someone asked for a different view while this was in flight.
+            // Writing now would put these rows under that view's heading, and
+            // clearing `loading` would call it finished.
+            if *library.epoch.peek() != epoch {
+                return;
+            }
+
+            match loaded {
                 Ok(shelf) => library.shelf.set(shelf),
                 Err(err) => library.error.set(Some(format!("{err:#}"))),
             }
