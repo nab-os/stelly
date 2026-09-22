@@ -110,6 +110,58 @@ impl Pane {
     }
 }
 
+/// The one search box.
+///
+/// Its own component, and deliberately propless, so Dioxus memoises it: it
+/// then re-renders when the text changes and at no other time.
+///
+/// That is not tidiness, it is the fix for a real bug. A controlled input in
+/// a webview is a race, the keystroke travels to Rust, a render patches
+/// `value` back into the DOM, and whatever was typed in the meantime is
+/// overwritten. Inside `Shell` this box re-rendered whenever anything else
+/// did, including when a search result landed, which is precisely when you
+/// are still typing. Characters went missing.
+#[component]
+fn SearchBox() -> Element {
+    let library = use_context::<Library>();
+    let search = use_context::<Search>();
+    let mut query = search.text;
+
+    rsx! {
+        div { class: "search-wrap header-search",
+            input {
+                class: "search",
+                placeholder: "artist, title or album, any order",
+                value: "{query}",
+                oninput: move |e| query.set(e.value()),
+                // Enter skips the debounce. The local list has already
+                // filtered; this is impatience with the round trip, and
+                // answering it late would be worse than not offering it.
+                onkeydown: move |event| {
+                    if event.key() != Key::Enter {
+                        return;
+                    }
+                    let mut search = search;
+                    let text = search.text.peek().trim().to_string();
+                    if text.is_empty() || text == *search.submitted.peek() {
+                        return;
+                    }
+                    search.submitted.set(text.clone());
+                    library.search_to(text);
+                },
+            }
+            if !query().is_empty() {
+                button {
+                    class: "clear-search",
+                    title: "clear",
+                    onclick: move |_| query.set(String::new()),
+                    "×"
+                }
+            }
+        }
+    }
+}
+
 /// The root: either the app, or the screen that gets you to the app.
 ///
 /// Two components rather than an early return, Dioxus counts hooks per
@@ -343,7 +395,9 @@ fn Settings(open: Signal<bool>) -> Element {
 #[component]
 fn Shell() -> Element {
     let search = use_context_provider(Search::new);
-    let mut query = search.text;
+    // Read-only here: the box that writes it is `SearchBox`, kept separate so
+    // the shell's renders cannot clobber what is being typed.
+    let query = search.text;
     let mut weights = use_signal(|| engine().lock().unwrap().space.default_weights());
 
     // Shared with the Qobuz panel, which can select a track it recognises.
@@ -781,38 +835,7 @@ fn Shell() -> Element {
                 // stop. Not inside either panel, sitting in one of them is
                 // what made it look like that panel's private filter.
                 if explore() {
-                    div { class: "search-wrap header-search",
-                        input {
-                            class: "search",
-                            placeholder: "artist, title or album, any order",
-                            value: "{query}",
-                            oninput: move |e| query.set(e.value()),
-                            // Enter skips the debounce. The local list has
-                            // already filtered; this is impatience with the
-                            // round trip, and answering it late would be
-                            // worse than not offering it at all.
-                            onkeydown: move |event| {
-                                if event.key() != Key::Enter {
-                                    return;
-                                }
-                                let mut search = search;
-                                let text = search.text.peek().trim().to_string();
-                                if text.is_empty() || text == *search.submitted.peek() {
-                                    return;
-                                }
-                                search.submitted.set(text.clone());
-                                library.search_to(text);
-                            },
-                        }
-                        if !query().is_empty() {
-                            button {
-                                class: "clear-search",
-                                title: "clear",
-                                onclick: move |_| query.set(String::new()),
-                                "×"
-                            }
-                        }
-                    }
+                    SearchBox {}
                 }
                 span { class: "spacer" }
                 span { class: "muted", "{selected_label}" }

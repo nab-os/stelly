@@ -490,7 +490,12 @@ button.danger:hover:not(:disabled) { background: #f7768e; color: #12131a; }
 
 .hidden-artists {
   border-top: 1px solid var(--row);
-  margin-top: 8px;
+  /* `auto`, not a fixed gap: this has to sit at the bottom of the column
+     whatever precedes it. Relying on the shelf's `flex: 1` to push it there
+     works only while the shelf is what is rendered, the loading and error
+     placeholders are plain paragraphs, and a short result list left this
+     riding up under the last row. */
+  margin-top: auto;
   padding-top: 6px;
   flex: none;
 }
