@@ -674,6 +674,22 @@ button:disabled { opacity: 0.4; cursor: default; }
    this lands on the circle's edge whatever size the tile is. */
 .tile .round ~ .space-mark { top: 0; left: 0; margin: 12% 0 0 12%; }
 
+/* In a mixed list an album tile and a track tile are the same square, so the
+   album says what it is. Tracks, the most common entry, go unmarked, and an
+   artist is already round. */
+.tile .kind {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  pointer-events: none;
+}
+.tile .kind ~ .space-mark { top: 24px; }
+
 /* ----------------------------------------------------------------- modals */
 
 .modal-backdrop {
