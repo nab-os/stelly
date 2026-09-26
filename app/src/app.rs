@@ -888,7 +888,9 @@ fn Shell() -> Element {
     use_context_provider(|| SpaceMatches(filtered));
 
     rsx! {
-        div { class: "app",
+        // `queue-open` lets a phone give the queue the list's whole height,
+        // see `.queue-drawer` in style.css.
+        div { class: if (player.queue_open)() { "app queue-open" } else { "app" },
             header {
                 h1 { "2kHz" }
                 span { class: "muted", "{total_tracks} tracks" }

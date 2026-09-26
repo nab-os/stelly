@@ -1186,7 +1186,16 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   }
   .pipeline > .panel { flex: none; min-width: 0; }
   .pipeline .log-panel { min-height: 220px; }
-  .pipeline .log-panel .log { min-height: 170px; }
+  /* Capped, or a natural-height panel grows to every buffered line and the
+     rest of the pipeline is a long scroll away below it. */
+  .pipeline .log-panel .log { min-height: 170px; max-height: 40vh; }
+
+  /* The queue takes the list's place rather than a strip under it: 40vh of
+     a phone is a handful of rows. The list is only hidden, not unmounted,
+     so closing the queue puts it back where it was. */
+  .app.queue-open .body { display: none; }
+  .queue-drawer { flex: 1; max-height: none; margin-top: 0; }
+  .queue-list { flex: 1; max-height: none; }
 
   /* A flex row that cannot wrap sets its container's min-content width. The
      device form, a text input and three buttons, was doing exactly that,

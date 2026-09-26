@@ -17,9 +17,9 @@ use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 /// screen; "show more" triples it.
 const FIRST_SHOWN: usize = 80;
 
-/// Which kinds of result a search shows. Taken from the chip that was lit
-/// when typing started: filtering from "tracks" and getting albums and
-/// artists back as well read as the filter being ignored.
+/// Which kinds of result a search shows. Every search starts with all of
+/// them; the tracks/albums/artists chips narrow it, and tapping the lit one
+/// again widens it back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
     Everything,
@@ -178,13 +178,12 @@ impl View {
         matches!(self, View::Playlists | View::Playlist { .. })
     }
 
-    /// What a search started from here should be narrowed to.
+    /// What the current search is narrowed to. Anything else is not a
+    /// search, and the one it starts is mixed: the chip lit while browsing
+    /// names a list of favourites, not a filter to carry into a search.
     pub(crate) fn scope(&self) -> Scope {
         match self {
             View::Search { scope, .. } => *scope,
-            View::FavouriteTracks => Scope::Tracks,
-            View::FavouriteAlbums => Scope::Albums,
-            View::FavouriteArtists => Scope::Artists,
             _ => Scope::Everything,
         }
     }
