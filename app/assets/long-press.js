@@ -1,4 +1,4 @@
-// Long press opens the row menu on a touch screen.
+// Long press opens the row menu, on a touch screen and with the mouse.
 //
 // Right-click covers the pointer case and is handled in Rust, per row. Touch
 // has no right-click, which left every row action unreachable on a phone,
@@ -54,12 +54,15 @@
   document.addEventListener(
     "pointerdown",
     (event) => {
-      // A mouse keeps the native path: right-click is instant, and a mouse
-      // held still over a row should not sprout a menu.
-      if (event.pointerType === "mouse") return;
+      // A mouse gets it too, on the main button: right-click still works,
+      // but holding a row is the same gesture everywhere, which is easier
+      // to remember than which input device wants which.
+      if (event.pointerType === "mouse" && event.button !== 0) return;
 
       const row = event.target.closest && event.target.closest("[data-menu]");
       if (!row) return;
+      // A held grip is the start of a queue drag, not a request for a menu.
+      if (event.target.closest(".queue-grip")) return;
 
       origin = { x: event.clientX, y: event.clientY };
       timer = setTimeout(() => {

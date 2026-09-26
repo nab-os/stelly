@@ -631,6 +631,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 .menu-item:hover:not(:disabled) { background: var(--row-hover); }
 .menu-item.danger { color: #f7768e; }
 .menu-item:disabled { opacity: 0.35; }
+/* The picked sort key and direction, in a menu that stays open across picks. */
+.menu-item.checked { color: var(--accent); font-weight: 600; }
 
 .menu-rule {
   height: 1px;

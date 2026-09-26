@@ -198,6 +198,8 @@ pub struct SpaceRow {
     /// For the artist-name link; `None` where the space stores -1.
     pub artist_id: Option<i64>,
     pub title: String,
+    /// The album's title, for sorting by it.
+    pub album: String,
     pub album_id: String,
 }
 

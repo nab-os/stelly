@@ -42,6 +42,101 @@ impl Scope {
     }
 }
 
+/// What every section of the list is ordered by. One choice for them all:
+/// sorting the tracks by title and leaving the albums beside them as they came
+/// would read as the sort half working. A key a section has nothing for
+/// (duration, for an album) leaves that section as it came.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SortKey {
+    #[default]
+    Default,
+    Title,
+    Artist,
+    Album,
+    Released,
+    Duration,
+}
+
+impl SortKey {
+    const ALL: [SortKey; 6] = [
+        SortKey::Default,
+        SortKey::Title,
+        SortKey::Artist,
+        SortKey::Album,
+        SortKey::Released,
+        SortKey::Duration,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SortKey::Default => "default",
+            SortKey::Title => "title",
+            SortKey::Artist => "artist",
+            SortKey::Album => "album",
+            SortKey::Released => "release date",
+            SortKey::Duration => "duration",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Sort {
+    pub key: SortKey,
+    pub descending: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SortValue {
+    Text(String),
+    Number(i64),
+}
+
+fn text(value: &str) -> Option<SortValue> {
+    Some(SortValue::Text(value.to_lowercase()))
+}
+
+impl Sort {
+    /// `items` in this order. "Default" is the order they came in, which
+    /// descending just reverses. Anything without a value for the key goes
+    /// last whichever way round, and ties keep the order they came in.
+    pub fn apply<T>(self, items: Vec<T>, value: impl Fn(&T, SortKey) -> Option<SortValue>) -> Vec<T> {
+        if self.key == SortKey::Default {
+            let mut items = items;
+            if self.descending {
+                items.reverse();
+            }
+            return items;
+        }
+        let mut keyed: Vec<(Option<SortValue>, T)> =
+            items.into_iter().map(|item| (value(&item, self.key), item)).collect();
+        keyed.sort_by(|(a, _), (b, _)| match (a, b) {
+            (Some(a), Some(b)) if self.descending => b.cmp(a),
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        keyed.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// The space's own rows, which know no release date or duration.
+    pub(crate) fn space_rows(self, rows: Vec<SpaceRow>) -> Vec<SpaceRow> {
+        self.apply(rows, |row, key| match key {
+            SortKey::Title => text(&row.title),
+            SortKey::Artist => text(&row.artist),
+            SortKey::Album => text(&row.album),
+            _ => None,
+        })
+    }
+}
+
+/// Whether every term turns up in a track's title, what a tracks search asks
+/// for. Artist and album are left out: every track by a band, or on an
+/// album, whose name happens to match is not a search for a track.
+pub(crate) fn names_track(terms: &[String], title: &str) -> bool {
+    terms.iter().all(|term| title.contains(term))
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
     Search { query: String, scope: Scope },
@@ -84,7 +179,7 @@ impl View {
     }
 
     /// What a search started from here should be narrowed to.
-    fn scope(&self) -> Scope {
+    pub(crate) fn scope(&self) -> Scope {
         match self {
             View::Search { scope, .. } => *scope,
             View::FavouriteTracks => Scope::Tracks,
@@ -121,7 +216,14 @@ pub struct Shelf {
 #[derive(Clone, Copy)]
 pub struct Library {
     pub view: Signal<View>,
+    /// `loaded`, in `sort` order. Everything that indexes into the shelf
+    /// (the menus, "play all", a click on row N) reads this one, so the
+    /// order on screen and the order acted on cannot drift apart.
     pub shelf: Signal<Shelf>,
+    /// The shelf as it came, kept so a different sort, or "default" again,
+    /// does not need another fetch.
+    loaded: Signal<Shelf>,
+    pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button.
@@ -169,6 +271,8 @@ impl Library {
         Self {
             view: Signal::new(View::FavouriteTracks),
             shelf: Signal::new(Shelf::default()),
+            loaded: Signal::new(Shelf::default()),
+            sort: Signal::new(Sort::default()),
             loading: Signal::new(true),
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
@@ -329,6 +433,12 @@ impl Library {
         }
     }
 
+    fn set_sort(mut self, sort: Sort) {
+        self.sort.set(sort);
+        let loaded = self.loaded.peek().clone();
+        self.shelf.set(loaded.sorted(sort));
+    }
+
     /// Whether the "In your space" section is part of this view. Only for a
     /// search: the tracks chip is the liked tracks, and the space holds
     /// everything the crawl reached from them, liked albums' tracks included,
@@ -353,6 +463,7 @@ impl Library {
     pub fn show(mut self, target: View) {
         self.view.set(target.clone());
         self.shelf.set(Shelf::default());
+        self.loaded.set(Shelf::default());
         self.error.set(None);
         self.notice.set(None);
         self.loading.set(true);
@@ -381,7 +492,11 @@ impl Library {
             }
 
             match loaded {
-                Ok(shelf) => library.shelf.set(shelf),
+                Ok(shelf) => {
+                    let sort = *library.sort.peek();
+                    library.loaded.set(shelf.clone());
+                    library.shelf.set(shelf.sorted(sort));
+                }
                 Err(err) => library.error.set(Some(format!("{err:#}"))),
             }
             library.loading.set(false);
@@ -420,6 +535,22 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
             let found = backend().search(&query, SEARCH_LIMIT).await?;
             if scope.tracks() {
                 shelf.tracks = found.tracks;
+            }
+            // Only what the artist's or album's name brought in. Qobuz
+            // matches more loosely than a substring test (accents, for one),
+            // so a track this test cannot place at all stays.
+            if scope == Scope::Tracks {
+                let terms: Vec<String> =
+                    query.to_lowercase().split_whitespace().map(str::to_string).collect();
+                shelf.tracks.retain(|track| {
+                    let artist = track.artist.to_lowercase();
+                    let title = track.title.to_lowercase();
+                    let album = track.album.to_lowercase();
+                    names_track(&terms, &title)
+                        || !terms.iter().all(|term| {
+                            artist.contains(term) || title.contains(term) || album.contains(term)
+                        })
+                });
             }
             if scope.albums() {
                 shelf.albums = found.albums;
@@ -761,6 +892,7 @@ pub fn LibraryPanel() -> Element {
                         "liked"
                     }
                 }
+                SortMenu {}
                 // Grid by default, list for when the duration and the
                 // "in your space" dot are what you came for. One switch for
                 // both track sections below, see `Library::tracks_view`.
@@ -825,6 +957,70 @@ pub fn LibraryPanel() -> Element {
                     }
                     if nothing_visible {
                         p { class: "muted", "nothing here" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The sort chip and the menu it opens: what to order by, a rule, then which
+/// way round. Stays open across picks, since a sort is usually both.
+#[component]
+fn SortMenu() -> Element {
+    let library = use_context::<Library>();
+    let mut open = use_signal(|| None::<(f64, f64)>);
+    let sort = *library.sort.read();
+
+    // Kept on screen the way the context menu is: opened from near the right
+    // edge, it would otherwise run off it.
+    use_effect(move || {
+        if open().is_some() {
+            document::eval(
+                "const el = document.querySelector('.sort-menu');
+                 if (el) {
+                   el.style.transform = 'none';
+                   const box = el.getBoundingClientRect();
+                   const dx = Math.min(0, window.innerWidth - 8 - box.right);
+                   const dy = Math.min(0, window.innerHeight - 8 - box.bottom);
+                   el.style.transform = `translate(${dx}px, ${dy}px)`;
+                 }",
+            );
+        }
+    });
+
+    let arrow = if sort.descending { "↓" } else { "↑" };
+
+    rsx! {
+        button {
+            class: if sort == Sort::default() { "chip" } else { "chip active" },
+            title: "sort",
+            onclick: move |event: Event<MouseData>| {
+                let point = event.client_coordinates();
+                open.set(Some((point.x, point.y)));
+            },
+            "{sort.key.label()} {arrow}"
+        }
+        if let Some((x, y)) = open() {
+            div { class: "menu-backdrop", onclick: move |_| open.set(None),
+                div {
+                    class: "context-menu sort-menu",
+                    style: "left: {x}px; top: {y}px;",
+                    onclick: move |event: Event<MouseData>| event.stop_propagation(),
+                    for key in SortKey::ALL {
+                        button {
+                            class: if sort.key == key { "menu-item checked" } else { "menu-item" },
+                            onclick: move |_| library.set_sort(Sort { key, ..sort }),
+                            "{key.label()}"
+                        }
+                    }
+                    div { class: "menu-rule" }
+                    for (label, descending) in [("ascending", false), ("descending", true)] {
+                        button {
+                            class: if sort.descending == descending { "menu-item checked" } else { "menu-item" },
+                            onclick: move |_| library.set_sort(Sort { descending, ..sort }),
+                            "{label}"
+                        }
                     }
                 }
             }
@@ -979,6 +1175,35 @@ fn SpaceRows() -> Element {
 }
 
 impl Shelf {
+    fn sorted(self, sort: Sort) -> Shelf {
+        let artist = |artist: &RemoteArtist, key: SortKey| match key {
+            SortKey::Title | SortKey::Artist => text(&artist.name),
+            _ => None,
+        };
+        Shelf {
+            tracks: sort.apply(self.tracks, |track, key| match key {
+                SortKey::Default => None,
+                SortKey::Title => text(&track.title),
+                SortKey::Artist => text(&track.artist),
+                SortKey::Album => text(&track.album),
+                SortKey::Released => track.released.as_deref().and_then(text),
+                SortKey::Duration => track.duration.map(SortValue::Number),
+            }),
+            albums: sort.apply(self.albums, |album, key| match key {
+                SortKey::Title | SortKey::Album => text(&album.title),
+                SortKey::Artist => text(&album.artist),
+                SortKey::Released => album.released.as_deref().and_then(text),
+                _ => None,
+            }),
+            artists: sort.apply(self.artists, artist),
+            playlists: sort.apply(self.playlists, |playlist, key| match key {
+                SortKey::Title => text(&playlist.name),
+                _ => None,
+            }),
+            similar: sort.apply(self.similar, artist),
+        }
+    }
+
     /// The rows a blocklist leaves visible, in display order. Rendering and
     /// the click handlers must both go through these, filtering in one and
     /// indexing the unfiltered list in the other made row N open row N+1.

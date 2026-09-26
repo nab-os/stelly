@@ -11,6 +11,7 @@ use crate::ui::{
     PlayerBar, QueueView, Search, Selection, SpaceMatches, SpaceReach, SpaceRow, Weights,
 };
 use crate::{engine, map, ServerConfig, Wiring};
+use crate::ui::library::{names_track, Scope, Sort};
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
 use std::rc::Rc;
@@ -825,17 +826,25 @@ fn Shell() -> Element {
             artist: t.artist.clone(),
             artist_id: Some(t.artist_id).filter(|id| *id >= 0),
             title: t.title.clone(),
+            album: t.album.clone(),
             album_id: t.album_id.clone(),
         };
 
+        let sort = *library.sort.read();
+        let tracks_only = library.view.read().scope() == Scope::Tracks;
+
         if terms.is_empty() {
-            let rows: Vec<SpaceRow> = catalog
-                .visible()
-                .map(|i| catalog.get(i))
-                .take(SHOWN)
-                .map(row)
-                .collect();
             let total = catalog.visible().count();
+            // The first `SHOWN` are only the right ones unsorted; any other
+            // order needs every row to pick them from.
+            let rows: Vec<SpaceRow> = if sort == Sort::default() {
+                catalog.visible().map(|i| catalog.get(i)).take(SHOWN).map(row).collect()
+            } else {
+                let rows = catalog.visible().map(|i| catalog.get(i)).map(row).collect();
+                let mut rows = sort.space_rows(rows);
+                rows.truncate(SHOWN);
+                rows
+            };
             (rows, total)
         } else {
             let first = terms[0].as_str();
@@ -847,7 +856,12 @@ fn Shell() -> Element {
                     // run again with matching rows.
                     continue;
                 };
-                if !terms.iter().all(|term| haystack.contains(term)) {
+                let matched = if tracks_only {
+                    names_track(&terms, &haystack.title)
+                } else {
+                    terms.iter().all(|term| haystack.contains(term))
+                };
+                if !matched {
                     continue;
                 }
                 // Something starting with what was typed is far likelier to
@@ -864,11 +878,9 @@ fn Shell() -> Element {
 
             let total = found.len();
             found.sort_by_key(|entry| entry.0);
-            let rows = found
-                .into_iter()
-                .take(SHOWN)
-                .map(|(_, row)| row)
-                .collect();
+            let rows = found.into_iter().map(|(_, row)| row).collect();
+            let mut rows = sort.space_rows(rows);
+            rows.truncate(SHOWN);
             (rows, total)
         }
     });
