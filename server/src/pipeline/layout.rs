@@ -11,7 +11,9 @@
 use super::assemble::fit_pca;
 use super::{Job, Paths};
 use crate::db;
+use crate::schema::layout;
 use anyhow::{bail, Result};
+use diesel::prelude::*;
 use std::collections::HashMap;
 use two_khz::space::Space;
 
@@ -55,17 +57,17 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<usize> {
     }
 
     let mut conn = db::open_for_write(&paths.db_path)?;
-    let tx = conn.transaction()?;
     // Rewritten wholesale rather than upserted: the layout is a function of
     // the space, so a track that has left it must not keep its coordinates.
-    let stale = tx.execute("DELETE FROM layout", [])?;
-    {
-        let mut insert = tx.prepare("INSERT INTO layout (track_id, x, y) VALUES (?1, ?2, ?3)")?;
-        for (id, (x, y)) in space.manifest.track_ids.iter().zip(&coords) {
-            insert.execute(rusqlite::params![id, x, y])?;
+    let stale = conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        let stale = diesel::delete(layout::table).execute(conn)?;
+        for (id, &(x, y)) in space.manifest.track_ids.iter().zip(&coords) {
+            diesel::insert_into(layout::table)
+                .values((layout::track_id.eq(id), layout::x.eq(x), layout::y.eq(y)))
+                .execute(conn)?;
         }
-    }
-    tx.commit()?;
+        Ok(stale)
+    })?;
 
     if stale > n {
         job.log(format!("dropped {} stale layout rows", stale - n));

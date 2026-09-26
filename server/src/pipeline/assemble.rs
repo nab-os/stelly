@@ -12,9 +12,11 @@
 //!                      projected into the semantic block for steering.
 
 use super::{labels, models, Job, Paths};
-use crate::db::{self, NOT_BLOCKED};
+use crate::db::{self, not_blocked};
+use crate::schema::{albums, features, tracks};
 use crate::text::TextEncoder;
 use anyhow::{bail, Context, Result};
+use diesel::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -221,33 +223,42 @@ struct Row {
 /// Every analysed track not by a blocked artist, in id order. The app also
 /// filters blocks at load time, which is what lets one take effect before
 /// the next rebuild.
-fn load_rows(conn: &rusqlite::Connection) -> Result<Vec<Row>> {
-    let mut statement = conn.prepare(&format!(
-        "SELECT t.id, a.release_date, f.descriptors_json, f.clap_f32
-         FROM tracks t
-         JOIN features f ON f.track_id = t.id
-         LEFT JOIN albums a ON a.id = t.album_id
-         WHERE {NOT_BLOCKED} AND f.clap_f32 IS NOT NULL
-         ORDER BY t.id"
-    ))?;
-    let rows = statement.query_map([], |row| {
-        let json: Option<String> = row.get(2)?;
-        let blob: Vec<u8> = row.get(3)?;
-        Ok(Row {
-            id: row.get(0)?,
-            release_date: row.get(1)?,
+fn load_rows(conn: &mut SqliteConnection) -> Result<Vec<Row>> {
+    #[derive(Queryable)]
+    struct Stored {
+        id: i64,
+        release_date: Option<String>,
+        json: Option<String>,
+        blob: Option<Vec<u8>>,
+    }
+
+    let stored: Vec<Stored> = tracks::table
+        .inner_join(features::table)
+        .left_join(albums::table)
+        .filter(not_blocked())
+        .filter(features::clap_f32.is_not_null())
+        .order(tracks::id)
+        .select((
+            tracks::id,
+            albums::release_date.nullable(),
+            features::descriptors_json,
+            features::clap_f32,
+        ))
+        .load(conn)?;
+    Ok(stored
+        .into_iter()
+        .map(|Stored { id, release_date, json, blob }| Row {
+            id,
+            release_date,
             descriptors: json
                 .and_then(|j| serde_json::from_str(&j).ok())
                 .unwrap_or(serde_json::Value::Null),
             clap: blob
+                .unwrap_or_default()
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
         })
-    })?;
-    let rows: Vec<Row> = rows.collect::<rusqlite::Result<_>>()?;
-    Ok(rows
-        .into_iter()
         .filter(|r| r.clap.len() == super::clap::EMBEDDING_DIMS)
         .collect())
 }
@@ -281,8 +292,7 @@ fn dot(a: &[f32], b: &[f32]) -> f64 {
 
 /// Build `space.bin`, `space.json` and `semantic_pca.bin` from what is stored.
 pub async fn run(paths: &Paths, weights: Option<HashMap<String, f32>>, job: &Job) -> Result<()> {
-    let conn = db::open_for_write(&paths.db_path)?;
-    let rows = load_rows(&conn)?;
+    let rows = load_rows(&mut db::open_for_write(&paths.db_path)?)?;
     if rows.is_empty() {
         bail!("no analysed tracks; run analyse first");
     }

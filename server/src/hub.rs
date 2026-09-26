@@ -7,10 +7,12 @@
 
 use crate::pipeline::{Job, Paths};
 use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
 use crate::{crawl, db};
 use anyhow::{Context, Result};
+use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -201,8 +203,8 @@ impl Hub {
     pub async fn fetch_artist(&self, artist_id: i64) -> Result<usize> {
         let (env_dir, db_path, limit) = self.worker_context().await?;
         off_thread(move || async move {
-            let (conn, mut client) = worker_parts(&env_dir, &db_path, limit)?;
-            crawl::discover_artist(&conn, &mut client, artist_id).await
+            let (mut conn, mut client) = worker_parts(&env_dir, &db_path, limit)?;
+            crawl::discover_artist(&mut conn, &mut client, artist_id).await
         })
         .await
     }
@@ -211,8 +213,8 @@ impl Hub {
         let (env_dir, db_path, limit) = self.worker_context().await?;
         let album_id = album_id.to_string();
         off_thread(move || async move {
-            let (conn, mut client) = worker_parts(&env_dir, &db_path, limit)?;
-            crawl::crawl_one_album(&conn, &mut client, &album_id).await
+            let (mut conn, mut client) = worker_parts(&env_dir, &db_path, limit)?;
+            crawl::crawl_one_album(&mut conn, &mut client, &album_id).await
         })
         .await
     }
@@ -225,10 +227,9 @@ impl Hub {
 
     /// Start a crawl on a thread of its own.
     ///
-    /// Not `tokio::spawn`: `rusqlite::Connection` is `Send` but not `Sync` and
-    /// `crawl::step` holds `&Connection` across awaits, so the future is
-    /// `!Send`. Its own client, but the same `RateLimit`, the account is what
-    /// 2/s protects, not the socket.
+    /// Not `tokio::spawn`: `crawl::step` holds its SQLite connection across
+    /// awaits and blocks on it; see `off_thread`. Its own client, but the same
+    /// `RateLimit`, the account is what 2/s protects, not the socket.
     pub async fn crawl_start(&self, max_distance: i64) -> Result<()> {
         if self.crawl.status.lock().unwrap().running {
             return Ok(());
@@ -393,17 +394,18 @@ impl Hub {
 
 // --------------------------------------------------------------- off-thread
 //
-// Crawl and analyse futures hold `&Connection` across awaits, so they are
-// `!Send` and no work-stealing runtime will schedule them. Rather than
-// restructure them, the work moves to a thread with its own runtime. The
-// client is separate but the budget is shared, see `qobuz::RateLimit`.
+// Crawl and analyse futures hold a SQLite connection across awaits and make
+// blocking calls on it, which a worker of the shared runtime must not do.
+// Rather than restructure them, the work moves to a thread with its own
+// runtime. The client is separate but the budget is shared, see
+// `qobuz::RateLimit`.
 
 /// A connection and a client, both belonging to the calling thread.
 fn worker_parts(
     env_dir: &Path,
     db_path: &Path,
     limit: crate::qobuz::RateLimit,
-) -> Result<(rusqlite::Connection, QobuzClient)> {
+) -> Result<(diesel::SqliteConnection, QobuzClient)> {
     let conn = db::open_for_write(db_path).context("opening the database")?;
     let credentials = crate::qobuz::Credentials::from_env(env_dir)?;
     Ok((conn, QobuzClient::sharing(credentials, limit)))
@@ -442,7 +444,7 @@ async fn crawl_loop(
 ) -> Result<()> {
     // This thread's own connection and client, but not its own budget, both
     // halves talk to one account. See `qobuz::RateLimit`.
-    let (conn, mut client) = worker_parts(env_dir, db_path, limit)?;
+    let (mut conn, mut client) = worker_parts(env_dir, db_path, limit)?;
 
     // No budget: the frontier and the stop button are the limits.
     let max_tracks = i64::MAX;
@@ -454,7 +456,7 @@ async fn crawl_loop(
             break;
         }
 
-        let result = crawl::step(&conn, &mut client, max_tracks, max_distance).await?;
+        let result = crawl::step(&mut conn, &mut client, max_tracks, max_distance).await?;
 
         let line = match &result {
             crawl::StepResult::Expanded { kind, ref_id } => format!("{kind} {ref_id}"),
@@ -476,15 +478,11 @@ async fn crawl_loop(
             status.tracks_added = stats.tracks_added;
             status.errors = stats.errors;
             status.blocked_skipped = stats.blocked_skipped;
-            status.tracks = conn
-                .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
-                .unwrap_or(0);
-            status.pending = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM frontier WHERE state = 'pending'",
-                    [],
-                    |row| row.get(0),
-                )
+            status.tracks = tracks::table.count().get_result(&mut conn).unwrap_or(0);
+            status.pending = frontier::table
+                .filter(frontier::state.eq("pending"))
+                .count()
+                .get_result(&mut conn)
                 .unwrap_or(0);
         }
 

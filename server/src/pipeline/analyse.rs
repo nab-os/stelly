@@ -10,11 +10,13 @@ use super::audio::{self, AudioCache, Pcm};
 use super::clap::{self, AudioEncoder};
 use super::descriptors::{self, Descriptors};
 use super::{models, Job, Paths};
-use crate::db::{self, utc_now, NOT_BLOCKED};
+use crate::db::{self, not_blocked, utc_now};
 use crate::qobuz::{Credentials, QobuzClient, RateLimit, FORMAT_MP3_320};
+use crate::schema::{failures, features, tracks};
 use anyhow::{Context, Result};
+use diesel::prelude::*;
+use diesel::upsert::excluded;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use rusqlite::{params, Connection};
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -67,87 +69,95 @@ pub struct Stats {
     pub total: usize,
 }
 
+#[derive(Queryable)]
 struct Pending {
     id: i64,
     title: String,
     duration: Option<i64>,
 }
 
+/// Tracks with no stored features, or features from another extractor.
+#[diesel::dsl::auto_type]
+fn unanalysed() -> _ {
+    let version: &'static str = VERSION;
+    features::track_id
+        .nullable()
+        .is_null()
+        .or(features::extractor_version.nullable().ne(version))
+}
+
 /// Tracks with no features, stale features, and optionally past failures.
 /// The user's own library first.
-fn pending_tracks(conn: &Connection, limit: usize, retry_failed: bool) -> Result<Vec<Pending>> {
-    let mut sql = format!(
-        "SELECT t.id, t.title, t.duration
-         FROM tracks t
-         LEFT JOIN features f ON f.track_id = t.id
-         LEFT JOIN failures x ON x.track_id = t.id
-         WHERE (f.track_id IS NULL OR f.extractor_version != ?1)
-           AND {NOT_BLOCKED}"
-    );
+fn pending_tracks(conn: &mut SqliteConnection, limit: usize, retry_failed: bool) -> Result<Vec<Pending>> {
+    let mut query = tracks::table
+        .left_join(features::table)
+        .left_join(failures::table)
+        .filter(unanalysed())
+        .filter(not_blocked())
+        .order((tracks::seed_distance.asc(), tracks::id.asc()))
+        .select((tracks::id, tracks::title, tracks::duration))
+        .into_boxed();
     if !retry_failed {
-        sql.push_str(" AND x.track_id IS NULL");
+        query = query.filter(failures::track_id.nullable().is_null());
     }
-    sql.push_str(" ORDER BY t.seed_distance ASC, t.id ASC");
     if limit > 0 {
-        sql.push_str(&format!(" LIMIT {limit}"));
+        query = query.limit(limit as i64);
     }
-    let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([VERSION], |row| {
-        Ok(Pending {
-            id: row.get(0)?,
-            title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            duration: row.get(2)?,
-        })
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    Ok(query.load(conn)?)
 }
 
 /// How many tracks `run` would queue, for the pipeline view's counts.
-pub fn pending_count(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM tracks t
-             LEFT JOIN features f ON f.track_id = t.id
-             LEFT JOIN failures x ON x.track_id = t.id
-             WHERE x.track_id IS NULL
-               AND (f.track_id IS NULL OR f.extractor_version != ?1)
-               AND {NOT_BLOCKED}"
-        ),
-        [VERSION],
-        |row| row.get(0),
-    )?)
+pub fn pending_count(conn: &mut SqliteConnection) -> Result<i64> {
+    Ok(tracks::table
+        .left_join(features::table)
+        .left_join(failures::table)
+        .filter(failures::track_id.nullable().is_null())
+        .filter(unanalysed())
+        .filter(not_blocked())
+        .count()
+        .get_result(conn)?)
 }
 
-pub fn store(conn: &Connection, track_id: i64, descriptors: &Descriptors, clap: &[f32]) -> Result<()> {
-    conn.execute(
-        "INSERT INTO features (track_id, extractor_version, descriptors_json, clap_f32, analysed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(track_id) DO UPDATE SET
-             extractor_version = excluded.extractor_version,
-             descriptors_json  = excluded.descriptors_json,
-             clap_f32          = excluded.clap_f32,
-             analysed_at       = excluded.analysed_at",
-        params![
-            track_id,
-            VERSION,
-            serde_json::to_string(descriptors)?,
-            bytemuck::cast_slice::<f32, u8>(clap),
-            utc_now()
-        ],
-    )?;
+pub fn store(conn: &mut SqliteConnection, track_id: i64, descriptors: &Descriptors, clap: &[f32]) -> Result<()> {
+    diesel::insert_into(features::table)
+        .values((
+            features::track_id.eq(track_id),
+            features::extractor_version.eq(VERSION),
+            features::descriptors_json.eq(serde_json::to_string(descriptors)?),
+            features::clap_f32.eq(bytemuck::cast_slice::<f32, u8>(clap)),
+            features::analysed_at.eq(utc_now()),
+        ))
+        .on_conflict(features::track_id)
+        .do_update()
+        .set((
+            features::extractor_version.eq(excluded(features::extractor_version)),
+            features::descriptors_json.eq(excluded(features::descriptors_json)),
+            features::clap_f32.eq(excluded(features::clap_f32)),
+            features::analysed_at.eq(excluded(features::analysed_at)),
+        ))
+        .execute(conn)?;
     // A track that now analyses cleanly should not stay on the failure list.
-    conn.execute("DELETE FROM failures WHERE track_id = ?1", [track_id])?;
+    diesel::delete(failures::table.find(track_id)).execute(conn)?;
     Ok(())
 }
 
-fn record_failure(conn: &Connection, track_id: i64, reason: &str) -> Result<()> {
+fn record_failure(conn: &mut SqliteConnection, track_id: i64, reason: &str) -> Result<()> {
     let reason: String = reason.chars().take(500).collect();
-    conn.execute(
-        "INSERT INTO failures (track_id, stage, reason, failed_at) VALUES (?1, 'analyse', ?2, ?3)
-         ON CONFLICT(track_id) DO UPDATE SET
-             stage = excluded.stage, reason = excluded.reason, failed_at = excluded.failed_at",
-        params![track_id, reason, utc_now()],
-    )?;
+    diesel::insert_into(failures::table)
+        .values((
+            failures::track_id.eq(track_id),
+            failures::stage.eq("analyse"),
+            failures::reason.eq(reason),
+            failures::failed_at.eq(utc_now()),
+        ))
+        .on_conflict(failures::track_id)
+        .do_update()
+        .set((
+            failures::stage.eq(excluded(failures::stage)),
+            failures::reason.eq(excluded(failures::reason)),
+            failures::failed_at.eq(excluded(failures::failed_at)),
+        ))
+        .execute(conn)?;
     Ok(())
 }
 
@@ -267,11 +277,11 @@ async fn fetch(
 /// Analyse every pending track. Safe to interrupt and resume: each result is
 /// committed as it lands.
 ///
-/// The future holds a `&Connection` across awaits, so it is `!Send`: run it on
+/// The future holds a blocking SQLite connection across awaits: run it on
 /// a thread of its own, as `stages` does.
 pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job) -> Result<Stats> {
-    let conn = db::open_for_write(&paths.db_path)?;
-    let todo = pending_tracks(&conn, options.limit, options.retry_failed)?;
+    let mut conn = db::open_for_write(&paths.db_path)?;
+    let todo = pending_tracks(&mut conn, options.limit, options.retry_failed)?;
     if todo.is_empty() {
         job.log("nothing to analyse");
         return Ok(Stats::default());
@@ -319,8 +329,8 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
     let started = Instant::now();
     let mut finished = 0usize;
 
-    let fail = |stats: &mut Stats, track_id: i64, reason: &str| -> Result<()> {
-        record_failure(&conn, track_id, reason)?;
+    let fail = |conn: &mut SqliteConnection, stats: &mut Stats, track_id: i64, reason: &str| -> Result<()> {
+        record_failure(conn, track_id, reason)?;
         stats.failed += 1;
         let title: String = titles
             .get(&track_id)
@@ -360,7 +370,7 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
                         extracting += 1;
                     }
                     Err(err) => {
-                        fail(&mut stats, track_id, &format!("{err:#}"))?;
+                        fail(&mut conn, &mut stats, track_id, &format!("{err:#}"))?;
                         finished += 1;
                     }
                 }
@@ -369,10 +379,10 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
                 extracting -= 1;
                 match outcome {
                     Ok((descriptors, embedding)) => {
-                        store(&conn, track_id, &descriptors, &embedding)?;
+                        store(&mut conn, track_id, &descriptors, &embedding)?;
                         stats.done += 1;
                     }
-                    Err(reason) => fail(&mut stats, track_id, &reason)?,
+                    Err(reason) => fail(&mut conn, &mut stats, track_id, &reason)?,
                 }
                 finished += 1;
 

@@ -6,12 +6,14 @@
 
 use crate::pipeline::{analyse, assemble, layout, Job, Paths};
 use crate::qobuz::RateLimit;
+use crate::schema::{failures, features, frontier, tracks};
 use anyhow::{bail, Result};
+use diesel::prelude::*;
 use std::path::Path;
 use two_khz::api::{Corpus, Stage};
 
-/// Run one terminating stage to completion. `!Send`, analyse holds a
-/// database connection across awaits, so drive it on a thread of its own.
+/// Run one terminating stage to completion. Analyse holds a blocking database
+/// connection across awaits, so drive it on a thread of its own.
 pub async fn run(stage: Stage, paths: &Paths, limiter: RateLimit, job: &Job) -> Result<()> {
     match stage {
         Stage::Crawl => bail!("the crawl runs from its own loop, not as a stage"),
@@ -32,23 +34,27 @@ pub async fn run(stage: Stage, paths: &Paths, limiter: RateLimit, job: &Job) -> 
 /// `on_map` stay zero: they are questions about what a client has loaded. See
 /// `api::Corpus`.
 pub fn corpus(db_path: &Path) -> Result<Corpus> {
-    let conn = crate::db::open_for_write(db_path)?;
-    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let conn = &mut crate::db::open_for_write(db_path)?;
 
     // Asked the way `build-space` asks it.
-    let buildable = count(&format!(
-        "SELECT COUNT(*) FROM tracks t
-         JOIN features f ON f.track_id = t.id
-         WHERE f.clap_f32 IS NOT NULL AND {}",
-        crate::db::NOT_BLOCKED
-    ));
+    let buildable = tracks::table
+        .inner_join(features::table)
+        .filter(features::clap_f32.is_not_null())
+        .filter(crate::db::not_blocked())
+        .count()
+        .get_result(conn)
+        .unwrap_or(0);
 
     Ok(Corpus {
-        tracks: count("SELECT COUNT(*) FROM tracks"),
-        analysed: count("SELECT COUNT(*) FROM features"),
-        to_analyse: analyse::pending_count(&conn).unwrap_or(0),
-        failed: count("SELECT COUNT(*) FROM failures"),
-        pending: count("SELECT COUNT(*) FROM frontier WHERE state = 'pending'"),
+        tracks: tracks::table.count().get_result(conn).unwrap_or(0),
+        analysed: features::table.count().get_result(conn).unwrap_or(0),
+        to_analyse: analyse::pending_count(conn).unwrap_or(0),
+        failed: failures::table.count().get_result(conn).unwrap_or(0),
+        pending: frontier::table
+            .filter(frontier::state.eq("pending"))
+            .count()
+            .get_result(conn)
+            .unwrap_or(0),
         buildable,
         in_space: 0,
         on_map: 0,

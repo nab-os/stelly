@@ -92,7 +92,7 @@ pub fn synth(bpm: u32, base: f64, noise: f64, harmonics: usize, seed: u64) -> Pc
 }
 
 /// (track id, album index), in the order they were written.
-pub fn populate(conn: &rusqlite::Connection) -> Result<Vec<(i64, usize)>> {
+pub fn populate(conn: &mut diesel::SqliteConnection) -> Result<Vec<(i64, usize)>> {
     let mut tracks = Vec::new();
     let mut track_id = 1000;
     for (index, (title, ..)) in ALBUMS.iter().enumerate() {
@@ -126,13 +126,13 @@ pub fn populate(conn: &rusqlite::Connection) -> Result<Vec<(i64, usize)>> {
 /// Build the whole demo under `root`: database, space and layout.
 pub async fn build(root: &std::path::Path, job: &Job) -> Result<Paths> {
     let paths = Paths::under(root);
-    let conn = db::open_for_write(&paths.db_path)?;
+    let mut conn = db::open_for_write(&paths.db_path)?;
 
     job.log(format!(
         "synthesising {} tracks…",
         ALBUMS.len() * TRACKS_PER_ALBUM
     ));
-    let tracks = populate(&conn)?;
+    let tracks = populate(&mut conn)?;
 
     models::ensure(&paths.model_dir, &[models::CLAP_AUDIO], job).await?;
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -143,7 +143,7 @@ pub async fn build(root: &std::path::Path, job: &Job) -> Result<Paths> {
         let (_, bpm, base, noise, harmonics) = ALBUMS[album];
         let pcm = synth(bpm, base, noise, harmonics, track_id as u64);
         let (descriptors, embedding) = analyse::analyse_pcm(&mut encoder, &pcm)?;
-        analyse::store(&conn, track_id, &descriptors, &embedding)?;
+        analyse::store(&mut conn, track_id, &descriptors, &embedding)?;
         if (n + 1) % 8 == 0 {
             job.log(format!("  {}/{}", n + 1, tracks.len()));
         }
@@ -172,12 +172,17 @@ mod tests {
         let root = std::env::temp_dir().join(format!("two-khz-smoke-{}", std::process::id()));
         let paths = build(&root, &Job::stderr()).await.unwrap();
 
-        let conn = rusqlite::Connection::open(&paths.db_path).unwrap();
-        let bpm_of = |track: i64| -> Option<f64> {
-            let json: String = conn
-                .query_row("SELECT descriptors_json FROM features WHERE track_id = ?1", [track], |r| r.get(0))
+        use crate::schema::{features, layout};
+        use diesel::prelude::*;
+
+        let conn = &mut db::open_for_write(&paths.db_path).unwrap();
+        let mut bpm_of = |track: i64| -> Option<f64> {
+            let json: Option<String> = features::table
+                .find(track)
+                .select(features::descriptors_json)
+                .first(conn)
                 .unwrap();
-            serde_json::from_str::<serde_json::Value>(&json).unwrap()["bpm"].as_f64()
+            serde_json::from_str::<serde_json::Value>(&json.unwrap()).unwrap()["bpm"].as_f64()
         };
         // Drum and Bass is album 4: tracks 1017..1020, at 174 BPM (or 87).
         let bpm = assemble::fold_bpm(bpm_of(1017)).unwrap().exp2();
@@ -199,7 +204,7 @@ mod tests {
         eprintln!("same-album top-1: {top1}/{} ({:.0}%)", weighted.n_tracks, share * 100.0);
         assert!(share > 0.75);
 
-        let laid_out: i64 = conn.query_row("SELECT COUNT(*) FROM layout", [], |r| r.get(0)).unwrap();
+        let laid_out: i64 = layout::table.count().get_result(conn).unwrap();
         assert_eq!(laid_out as usize, weighted.n_tracks);
         let _ = std::fs::remove_dir_all(&root);
     }

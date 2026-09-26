@@ -4,9 +4,12 @@
 //! `artist/getSimilarArtists`. The frontier lives in SQLite, so the crawl is
 //! interruptible.
 
+use crate::db::{coalesce, least};
 use crate::qobuz::QobuzClient;
+use crate::schema::{albums, artists, blocked_artists, frontier, tracks};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use diesel::prelude::*;
+use diesel::upsert::excluded;
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -53,25 +56,27 @@ fn as_id_string(value: &Value, key: &str) -> Option<String> {
 // COALESCE keeps stored values when a sparser payload for the same entity
 // arrives, a stub artist inside a track versus a full artist/get.
 
-pub fn upsert_artist(conn: &Connection, artist: &Value) -> Result<Option<i64>> {
+pub fn upsert_artist(conn: &mut SqliteConnection, artist: &Value) -> Result<Option<i64>> {
     let Some(id) = as_i64(artist, "id") else {
         return Ok(None);
     };
-    conn.execute(
-        "INSERT INTO artists (id, name, qobuz_json) VALUES (?1, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET
-             name       = excluded.name,
-             qobuz_json = COALESCE(excluded.qobuz_json, artists.qobuz_json)",
-        params![
-            id,
-            text(artist, "name").unwrap_or_else(|| "Unknown Artist".into()),
-            artist.to_string()
-        ],
-    )?;
+    diesel::insert_into(artists::table)
+        .values((
+            artists::id.eq(id),
+            artists::name.eq(text(artist, "name").unwrap_or_else(|| "Unknown Artist".into())),
+            artists::qobuz_json.eq(artist.to_string()),
+        ))
+        .on_conflict(artists::id)
+        .do_update()
+        .set((
+            artists::name.eq(excluded(artists::name)),
+            artists::qobuz_json.eq(coalesce(excluded(artists::qobuz_json), artists::qobuz_json)),
+        ))
+        .execute(conn)?;
     Ok(Some(id))
 }
 
-pub fn upsert_album(conn: &Connection, album: &Value) -> Result<Option<String>> {
+pub fn upsert_album(conn: &mut SqliteConnection, album: &Value) -> Result<Option<String>> {
     let Some(id) = as_id_string(album, "id") else {
         return Ok(None);
     };
@@ -80,31 +85,33 @@ pub fn upsert_album(conn: &Connection, album: &Value) -> Result<Option<String>> 
         None => None,
     };
 
-    conn.execute(
-        "INSERT INTO albums (id, artist_id, title, release_date, label, genre, qobuz_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-             artist_id    = COALESCE(excluded.artist_id, albums.artist_id),
-             title        = excluded.title,
-             release_date = COALESCE(excluded.release_date, albums.release_date),
-             label        = COALESCE(excluded.label, albums.label),
-             genre        = COALESCE(excluded.genre, albums.genre),
-             qobuz_json   = COALESCE(excluded.qobuz_json, albums.qobuz_json)",
-        params![
-            id,
-            artist_id,
-            text(album, "title").unwrap_or_else(|| "Unknown Album".into()),
-            text(album, "release_date_original").or_else(|| text(album, "released_at")),
-            album.get("label").and_then(|l| l.get("name")).and_then(|v| v.as_str()),
-            album.get("genre").and_then(|g| g.get("name")).and_then(|v| v.as_str()),
-            album.to_string()
-        ],
-    )?;
+    diesel::insert_into(albums::table)
+        .values((
+            albums::id.eq(&id),
+            albums::artist_id.eq(artist_id),
+            albums::title.eq(text(album, "title").unwrap_or_else(|| "Unknown Album".into())),
+            albums::release_date
+                .eq(text(album, "release_date_original").or_else(|| text(album, "released_at"))),
+            albums::label.eq(album.get("label").and_then(|l| l.get("name")).and_then(|v| v.as_str())),
+            albums::genre.eq(album.get("genre").and_then(|g| g.get("name")).and_then(|v| v.as_str())),
+            albums::qobuz_json.eq(album.to_string()),
+        ))
+        .on_conflict(albums::id)
+        .do_update()
+        .set((
+            albums::artist_id.eq(coalesce(excluded(albums::artist_id), albums::artist_id)),
+            albums::title.eq(excluded(albums::title)),
+            albums::release_date.eq(coalesce(excluded(albums::release_date), albums::release_date)),
+            albums::label.eq(coalesce(excluded(albums::label), albums::label)),
+            albums::genre.eq(coalesce(excluded(albums::genre), albums::genre)),
+            albums::qobuz_json.eq(coalesce(excluded(albums::qobuz_json), albums::qobuz_json)),
+        ))
+        .execute(conn)?;
     Ok(Some(id))
 }
 
 pub fn upsert_track(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     track: &Value,
     album_id: Option<&str>,
     artist_id: Option<i64>,
@@ -131,100 +138,97 @@ pub fn upsert_track(
         }
     };
 
-    conn.execute(
-        "INSERT INTO tracks (id, album_id, artist_id, title, duration, isrc,
-                             qobuz_json, seed_distance)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET
-             album_id      = COALESCE(excluded.album_id, tracks.album_id),
-             artist_id     = COALESCE(excluded.artist_id, tracks.artist_id),
-             title         = excluded.title,
-             duration      = COALESCE(excluded.duration, tracks.duration),
-             isrc          = COALESCE(excluded.isrc, tracks.isrc),
-             qobuz_json    = COALESCE(excluded.qobuz_json, tracks.qobuz_json),
-             -- Keep the shortest known distance to a favourite.
-             seed_distance = MIN(tracks.seed_distance, excluded.seed_distance)",
-        params![
-            id,
-            album_id,
-            artist_id,
-            text(track, "title").unwrap_or_else(|| "Unknown Track".into()),
-            as_i64(track, "duration"),
-            text(track, "isrc"),
-            track.to_string(),
-            seed_distance
-        ],
-    )?;
+    diesel::insert_into(tracks::table)
+        .values((
+            tracks::id.eq(id),
+            tracks::album_id.eq(album_id),
+            tracks::artist_id.eq(artist_id),
+            tracks::title.eq(text(track, "title").unwrap_or_else(|| "Unknown Track".into())),
+            tracks::duration.eq(as_i64(track, "duration")),
+            tracks::isrc.eq(text(track, "isrc")),
+            tracks::qobuz_json.eq(track.to_string()),
+            tracks::seed_distance.eq(seed_distance),
+        ))
+        .on_conflict(tracks::id)
+        .do_update()
+        .set((
+            tracks::album_id.eq(coalesce(excluded(tracks::album_id), tracks::album_id)),
+            tracks::artist_id.eq(coalesce(excluded(tracks::artist_id), tracks::artist_id)),
+            tracks::title.eq(excluded(tracks::title)),
+            tracks::duration.eq(coalesce(excluded(tracks::duration), tracks::duration)),
+            tracks::isrc.eq(coalesce(excluded(tracks::isrc), tracks::isrc)),
+            tracks::qobuz_json.eq(coalesce(excluded(tracks::qobuz_json), tracks::qobuz_json)),
+            // Keep the shortest known distance to a favourite.
+            tracks::seed_distance.eq(least(tracks::seed_distance, excluded(tracks::seed_distance))),
+        ))
+        .execute(conn)?;
     Ok(Some(id))
 }
 
 // ----------------------------------------------------------------- frontier
 
 /// Add to the frontier, keeping the lowest priority (closest to a seed).
-pub fn enqueue(conn: &Connection, kind: &str, ref_id: &str, priority: i64) -> Result<()> {
-    conn.execute(
-        "INSERT INTO frontier (kind, ref_id, priority, state) VALUES (?1, ?2, ?3, 'pending')
-         ON CONFLICT(kind, ref_id) DO UPDATE SET
-             priority = MIN(frontier.priority, excluded.priority)",
-        params![kind, ref_id, priority],
-    )?;
+pub fn enqueue(conn: &mut SqliteConnection, kind: &str, ref_id: &str, priority: i64) -> Result<()> {
+    diesel::insert_into(frontier::table)
+        .values((
+            frontier::kind.eq(kind),
+            frontier::ref_id.eq(ref_id),
+            frontier::priority.eq(priority),
+            frontier::state.eq("pending"),
+        ))
+        .on_conflict((frontier::kind, frontier::ref_id))
+        .do_update()
+        .set(frontier::priority.eq(least(frontier::priority, excluded(frontier::priority))))
+        .execute(conn)?;
     Ok(())
 }
 
-fn mark(conn: &Connection, kind: &str, ref_id: &str, state: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE frontier SET state = ?1 WHERE kind = ?2 AND ref_id = ?3",
-        params![state, kind, ref_id],
-    )?;
+fn mark(conn: &mut SqliteConnection, kind: &str, ref_id: &str, state: &str) -> Result<()> {
+    diesel::update(frontier::table.find((kind, ref_id)))
+        .set(frontier::state.eq(state))
+        .execute(conn)?;
     Ok(())
 }
 
+#[derive(Queryable)]
 struct Item {
     kind: String,
     ref_id: String,
     priority: i64,
 }
 
-fn next_batch(conn: &Connection, limit: usize) -> Result<Vec<Item>> {
-    let mut statement = conn.prepare(
-        "SELECT kind, ref_id, priority FROM frontier
-         WHERE state = 'pending'
-         ORDER BY priority ASC, kind DESC
-         LIMIT ?1",
-    )?;
-    let rows = statement.query_map(params![limit as i64], |row| {
-        Ok(Item {
-            kind: row.get(0)?,
-            ref_id: row.get(1)?,
-            priority: row.get(2)?,
-        })
-    })?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+fn next_batch(conn: &mut SqliteConnection, limit: usize) -> Result<Vec<Item>> {
+    Ok(frontier::table
+        .filter(frontier::state.eq("pending"))
+        .order((frontier::priority.asc(), frontier::kind.desc()))
+        .limit(limit as i64)
+        .select((frontier::kind, frontier::ref_id, frontier::priority))
+        .load(conn)?)
 }
 
-fn track_count(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?)
+fn track_count(conn: &mut SqliteConnection) -> Result<i64> {
+    Ok(tracks::table.count().get_result(conn)?)
 }
 
-fn blocked_ids(conn: &Connection) -> Result<HashSet<i64>> {
-    let mut statement = conn.prepare("SELECT artist_id FROM blocked_artists")?;
-    let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+fn blocked_ids(conn: &mut SqliteConnection) -> Result<HashSet<i64>> {
+    Ok(blocked_artists::table
+        .select(blocked_artists::artist_id)
+        .load::<i64>(conn)?
+        .into_iter()
+        .collect())
 }
 
 /// Whether a frontier item belongs to a blocked artist.
-fn is_blocked(conn: &Connection, kind: &str, ref_id: &str, blocked: &HashSet<i64>) -> bool {
+fn is_blocked(conn: &mut SqliteConnection, kind: &str, ref_id: &str, blocked: &HashSet<i64>) -> bool {
     if blocked.is_empty() {
         return false;
     }
     match kind {
         "artist" => ref_id.parse::<i64>().is_ok_and(|id| blocked.contains(&id)),
-        "album" => conn
-            .query_row(
-                "SELECT artist_id FROM albums WHERE id = ?1",
-                params![ref_id],
-                |row| row.get::<_, Option<i64>>(0),
-            )
+        "album" => albums::table
+            .find(ref_id)
+            .select(albums::artist_id)
+            .first::<Option<i64>>(conn)
             .ok()
             .flatten()
             .is_some_and(|id| blocked.contains(&id)),
@@ -235,7 +239,7 @@ fn is_blocked(conn: &Connection, kind: &str, ref_id: &str, blocked: &HashSet<i64
 // --------------------------------------------------------------------- seed
 
 /// Load every favourite into the catalogue at seed_distance 0.
-pub async fn seed(conn: &Connection, client: &mut QobuzClient, cap: usize) -> Result<Stats> {
+pub async fn seed(conn: &mut SqliteConnection, client: &mut QobuzClient, cap: usize) -> Result<Stats> {
     let mut stats = Stats::default();
 
     for track in client.favorites_raw("tracks", cap).await? {
@@ -271,7 +275,7 @@ pub async fn seed(conn: &Connection, client: &mut QobuzClient, cap: usize) -> Re
 
 /// Pull an artist's albums, and enqueue their similar artists one hop further out.
 pub async fn expand_artist(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     artist_id: i64,
     distance: i64,
@@ -283,10 +287,9 @@ pub async fn expand_artist(
         }
     }
 
-    conn.execute(
-        "UPDATE artists SET similar_fetched_at = ?1 WHERE id = ?2",
-        params![now(), artist_id],
-    )?;
+    diesel::update(artists::table.find(artist_id))
+        .set(artists::similar_fetched_at.eq(now()))
+        .execute(conn)?;
 
     if distance < max_distance {
         let blocked = blocked_ids(conn)?;
@@ -306,7 +309,7 @@ pub async fn expand_artist(
 
 /// Pull an album's tracklist. Returns how many tracks were written.
 pub async fn expand_album(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     album_id: &str,
     distance: i64,
@@ -348,7 +351,7 @@ pub enum StepResult {
 /// One entry rather than the whole crawl, because the app runs this while you
 /// browse: the caller takes the client for one step and gives it back.
 pub async fn step(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     max_tracks: i64,
     max_distance: i64,
@@ -362,7 +365,8 @@ pub async fn step(
     };
     let (kind, ref_id) = (item.kind.clone(), item.ref_id.clone());
 
-    if item.priority > max_distance || is_blocked(conn, &kind, &ref_id, &blocked_ids(conn)?) {
+    let blocked = blocked_ids(conn)?;
+    if item.priority > max_distance || is_blocked(conn, &kind, &ref_id, &blocked) {
         mark(conn, &kind, &ref_id, "skipped")?;
         return Ok(StepResult::Skipped { kind, ref_id });
     }
@@ -427,7 +431,7 @@ pub type Progress<'a> = &'a (dyn Fn(&Stats, i64) + Send + Sync);
 
 /// Work the frontier until the track budget or the distance limit is reached.
 pub async fn crawl(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     max_tracks: i64,
     max_distance: i64,
@@ -466,7 +470,7 @@ pub async fn crawl(
 /// of albums, which at 2/s is minutes of a frozen button. Returns how many
 /// albums were queued.
 pub async fn discover_artist(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     artist_id: i64,
 ) -> Result<usize> {
@@ -489,7 +493,7 @@ pub async fn discover_artist(
 
 /// Crawl a single album's tracklist.
 pub async fn crawl_one_album(
-    conn: &Connection,
+    conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     album_id: &str,
 ) -> Result<usize> {

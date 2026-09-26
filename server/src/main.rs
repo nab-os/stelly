@@ -23,10 +23,12 @@ mod login;
 mod pipeline;
 mod qobuz;
 mod routes;
+mod schema;
 mod stages;
 mod text;
 
 use anyhow::{Context, Result};
+use argh::FromArgs;
 use auth::AuthStore;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -106,85 +108,152 @@ impl IntoResponse for Failure {
 
 // --------------------------------------------------------------------- cli
 
-fn usage() -> ! {
-    eprintln!(
-        "\
-two-khz-server: everything in 2kHz but the screen
-
-serving
-  serve [--bind ADDR]            run the API (default {DEFAULT_BIND})
-  pair --name NAME [--scope S]   mint a device token; S is play|pipeline
-  devices                        list paired devices
-  revoke ID                      revoke one device
-  build-catalog                  rebuild the slim catalogue clients sync
-
-{}
-
-Devices are stored in the same database as the catalogue. A token is shown
+/// two-khz-server: everything in 2kHz but the screen.
+#[derive(FromArgs)]
+#[argh(
+    example = "{command_name} login\n{command_name} pair --name desktop --scope pipeline\n{command_name} serve",
+    note = "Devices are stored in the same database as the catalogue. A token is shown
 once, at pairing, and only its hash is kept.
 
 TWO_KHZ_DATA_DIR, TWO_KHZ_MODEL_DIR and TWO_KHZ_CACHE_DIR move the corpus,
 the model weights and the excerpt cache; TWO_KHZ_ENV_DIR, the .env holding
-the Qobuz credentials. The environment itself wins over any .env.",
-        cli::USAGE
-    );
-    std::process::exit(2);
+the Qobuz credentials. The environment itself wins over any .env."
+)]
+struct Cli {
+    #[argh(subcommand)]
+    command: Command,
 }
 
-fn flag(args: &[String], name: &str) -> Option<String> {
-    let index = args.iter().position(|a| a == name)?;
-    args.get(index + 1).cloned()
+/// Serving first, then the account, the pipeline and hiding; argh lists them
+/// in this order. The last three groups are parsed and run by `cli`.
+#[derive(FromArgs)]
+#[argh(subcommand)]
+pub enum Command {
+    Serve(Serve),
+    Pair(Pair),
+    Devices(Devices),
+    Revoke(Revoke),
+    BuildCatalog(BuildCatalog),
+
+    Login(cli::Login),
+    RefreshCredentials(cli::RefreshCredentials),
+    Whoami(cli::Whoami),
+    Favourites(cli::Favourites),
+
+    Crawl(cli::Crawl),
+    Analyse(cli::Analyse),
+    BuildSpace(cli::BuildSpace),
+    Layout(cli::Layout),
+    Models(cli::Models),
+    Status(cli::Status),
+    Evaluate(cli::Evaluate),
+    Demo(cli::Demo),
+
+    Block(cli::Block),
+    Unblock(cli::Unblock),
+    Blocked(cli::Blocked),
+}
+
+/// Run the API.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "serve")]
+pub struct Serve {
+    /// address:port to listen on (default 127.0.0.1:7700)
+    #[argh(option, default = "DEFAULT_BIND.to_string()")]
+    bind: String,
+}
+
+/// Mint a token for a new device.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "pair")]
+pub struct Pair {
+    /// what to call the device in `devices`
+    #[argh(option)]
+    name: String,
+    /// play or pipeline (default play)
+    #[argh(option, from_str_fn(scope), default = "Scope::Play")]
+    scope: Scope,
+}
+
+fn scope(text: &str) -> Result<Scope, String> {
+    Scope::parse(text).ok_or_else(|| format!("unknown scope “{text}”; use play or pipeline"))
+}
+
+/// List paired devices.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "devices")]
+pub struct Devices {}
+
+/// Revoke one device.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "revoke")]
+pub struct Revoke {
+    /// the device's id; see `devices`
+    #[argh(positional)]
+    id: i64,
+}
+
+/// Rebuild the slim catalogue clients sync.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "build-catalog")]
+pub struct BuildCatalog {}
+
+/// Spellings argh would otherwise refuse. Only the subcommand is rewritten,
+/// never an argument that happens to match.
+const ALIASES: &[(&str, &str)] = &[("favorites", "favourites"), ("analyze", "analyse")];
+
+fn parse_args() -> Cli {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some(first) = args.first_mut() {
+        if let Some((_, canonical)) = ALIASES.iter().find(|(alias, _)| alias == first) {
+            *first = canonical;
+        }
+    }
+
+    match Cli::from_args(&["two-khz-server"], &args) {
+        Ok(cli) => cli,
+        Err(argh::EarlyExit { output, status }) => match status {
+            Ok(()) => {
+                println!("{output}");
+                std::process::exit(0);
+            }
+            Err(()) => {
+                eprintln!("{output}\nRun two-khz-server --help for more information.");
+                std::process::exit(2);
+            }
+        },
+    }
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(command) = args.first().map(|s| s.as_str()) else {
-        usage()
-    };
-
+    let Cli { command } = parse_args();
     let paths = Paths::from_env();
-    if let Some(outcome) = cli::run(command, &args[1..], &paths) {
-        return outcome;
-    }
 
     let data_dir = paths.data_dir.clone();
     let db_path = paths.db_path.clone();
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("creating {}", data_dir.display()))?;
-    let store = AuthStore::new(&db_path)?;
+    let store = || -> Result<AuthStore> {
+        std::fs::create_dir_all(&data_dir)
+            .with_context(|| format!("creating {}", data_dir.display()))?;
+        AuthStore::new(&db_path)
+    };
 
     match command {
-        "serve" => {
-            let bind = flag(&args, "--bind").unwrap_or_else(|| DEFAULT_BIND.to_string());
-            serve(bind, paths, store)
-        }
-        "pair" => {
-            let Some(name) = flag(&args, "--name") else {
-                eprintln!("pair needs --name");
-                std::process::exit(2);
-            };
-            let scope = flag(&args, "--scope")
-                .map(|s| {
-                    Scope::parse(&s).unwrap_or_else(|| {
-                        eprintln!("unknown scope “{s}”; use play or pipeline");
-                        std::process::exit(2);
-                    })
-                })
-                .unwrap_or(Scope::Play);
-
-            let grant = store.issue(&name, scope)?;
+        Command::Serve(args) => serve(args.bind, paths, store()?),
+        Command::Pair(args) => {
+            let grant = store()?.issue(&args.name, args.scope)?;
             println!(
                 "Paired “{}” with scope {}.\n\nSet this on the device, it is not shown again:\n\n  \
                  export TWO_KHZ_SERVER=http://<this-host>:7700\n  \
                  export TWO_KHZ_TOKEN={}\n",
                 grant.device.name,
-                scope.as_str(),
+                args.scope.as_str(),
                 grant.token
             );
             Ok(())
         }
-        "devices" => {
-            let devices = store.list()?;
+        Command::Devices(_) => {
+            let devices = store()?.list()?;
             if devices.is_empty() {
                 println!("No devices paired. Start with:\n  two-khz-server pair --name desktop --scope pipeline");
             }
@@ -199,16 +268,13 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        "revoke" => {
-            let Some(id) = args.get(1).and_then(|v| v.parse::<i64>().ok()) else {
-                eprintln!("revoke needs a device id; see `two-khz-server devices`");
-                std::process::exit(2);
-            };
-            store.revoke(id)?;
-            println!("Revoked device {id}.");
+        Command::Revoke(args) => {
+            store()?.revoke(args.id)?;
+            println!("Revoked device {}.", args.id);
             Ok(())
         }
-        "build-catalog" => {
+        Command::BuildCatalog(_) => {
+            store()?;
             let target = data_dir.join("catalog.db");
             let bytes = catalog::build(&db_path, &target)?;
             println!(
@@ -219,7 +285,7 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        _ => usage(),
+        pipeline => cli::run(pipeline, &paths),
     }
 }
 

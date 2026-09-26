@@ -7,20 +7,46 @@
 //! and a `--purge` that deletes rows. `play` still needs a token: a stream URL
 //! is minted against the user's account, so handing those out is sharing it.
 
-use anyhow::{Context, Result};
+use crate::schema::devices;
+use anyhow::Result;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
 use two_khz::api::{Device, PairingGrant, Scope};
 use rand::Rng;
-use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// 32 bytes, hex-encoded. Long enough that guessing is not a threat model.
 const TOKEN_BYTES: usize = 32;
 
 pub struct AuthStore {
     db_path: PathBuf,
+}
+
+/// A `devices` row. The scope is stored as its name.
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = devices, check_for_backend(diesel::sqlite::Sqlite))]
+struct DeviceRow {
+    id: i64,
+    name: String,
+    scope: String,
+    created_at: String,
+    last_seen: Option<String>,
+}
+
+impl From<DeviceRow> for Device {
+    fn from(row: DeviceRow) -> Self {
+        Device {
+            id: row.id,
+            name: row.name,
+            scope: Scope::parse(&row.scope).unwrap_or(Scope::Play),
+            created_at: row.created_at,
+            last_seen: row.last_seen,
+        }
+    }
 }
 
 impl AuthStore {
@@ -32,16 +58,15 @@ impl AuthStore {
         Ok(store)
     }
 
-    fn open(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("opening {}", self.db_path.display()))
+    fn open(&self) -> Result<SqliteConnection> {
+        crate::db::connect(&self.db_path, Duration::from_secs(5))
     }
 
     /// Devices live in the catalogue database, so one file is still the whole
     /// backup. Created here rather than in the shared `schema.sql` because the
     /// pipeline has no business knowing which phones are paired.
     fn ensure_schema(&self) -> Result<()> {
-        self.open()?.execute_batch(
+        self.open()?.batch_execute(
             "CREATE TABLE IF NOT EXISTS devices (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
                  name       TEXT NOT NULL,
@@ -63,16 +88,19 @@ impl AuthStore {
         let token = hex(&raw);
         let now = crate::db::utc_now();
 
-        let conn = self.open()?;
-        conn.execute(
-            "INSERT INTO devices (name, scope, token_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![name, scope.as_str(), hash(&token), now],
-        )?;
+        let id = diesel::insert_into(devices::table)
+            .values((
+                devices::name.eq(name),
+                devices::scope.eq(scope.as_str()),
+                devices::token_hash.eq(hash(&token)),
+                devices::created_at.eq(&now),
+            ))
+            .returning(devices::id)
+            .get_result(&mut self.open()?)?;
 
         Ok(PairingGrant {
             device: Device {
-                id: conn.last_insert_rowid(),
+                id,
                 name: name.to_string(),
                 scope,
                 created_at: now,
@@ -88,55 +116,32 @@ impl AuthStore {
     /// Fine for a 256-bit random token, which cannot be probed a byte at a
     /// time; it would not be for a password.
     pub fn verify(&self, token: &str) -> Option<Device> {
-        let conn = self.open().ok()?;
-        let digest = hash(token);
+        let conn = &mut self.open().ok()?;
 
-        let device = conn
-            .query_row(
-                "SELECT id, name, scope, created_at, last_seen
-                 FROM devices WHERE token_hash = ?1",
-                [&digest],
-                |row| {
-                    Ok(Device {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        scope: Scope::parse(&row.get::<_, String>(2)?).unwrap_or(Scope::Play),
-                        created_at: row.get(3)?,
-                        last_seen: row.get(4)?,
-                    })
-                },
-            )
-            .ok()?;
+        let device: Device = devices::table
+            .filter(devices::token_hash.eq(hash(token)))
+            .select(DeviceRow::as_select())
+            .first(conn)
+            .ok()?
+            .into();
 
-        let _ = conn.execute(
-            "UPDATE devices SET last_seen = ?1 WHERE id = ?2",
-            rusqlite::params![crate::db::utc_now(), device.id],
-        );
+        let _ = diesel::update(devices::table.find(device.id))
+            .set(devices::last_seen.eq(crate::db::utc_now()))
+            .execute(conn);
 
         Some(device)
     }
 
     pub fn list(&self) -> Result<Vec<Device>> {
-        let conn = self.open()?;
-        let mut statement = conn.prepare(
-            "SELECT id, name, scope, created_at, last_seen FROM devices ORDER BY id",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(Device {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                scope: Scope::parse(&row.get::<_, String>(2)?).unwrap_or(Scope::Play),
-                created_at: row.get(3)?,
-                last_seen: row.get(4)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let rows = devices::table
+            .order(devices::id)
+            .select(DeviceRow::as_select())
+            .load(&mut self.open()?)?;
+        Ok(rows.into_iter().map(Device::from).collect())
     }
 
     pub fn revoke(&self, device_id: i64) -> Result<()> {
-        let removed = self
-            .open()?
-            .execute("DELETE FROM devices WHERE id = ?1", [device_id])?;
+        let removed = diesel::delete(devices::table.find(device_id)).execute(&mut self.open()?)?;
         if removed == 0 {
             anyhow::bail!("no device with id {device_id}");
         }
@@ -144,9 +149,7 @@ impl AuthStore {
     }
 
     pub fn count(&self) -> Result<i64> {
-        Ok(self
-            .open()?
-            .query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))?)
+        Ok(devices::table.count().get_result(&mut self.open()?)?)
     }
 }
 
