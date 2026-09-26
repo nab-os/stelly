@@ -45,3 +45,9 @@ regex = "1.13.1"
 
 [profile.release]
 opt-level = 3
+
+# Optimised even under plain `cargo run`. The analyser's resampling, mel
+# spectrogram and descriptors are tight loops that run ~7x slower unoptimised,
+# 8.8s an excerpt against 1.3s, which turns `analyse` into a crawl.
+[profile.dev]
+opt-level = 3
