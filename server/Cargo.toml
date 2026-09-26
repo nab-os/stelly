@@ -1,6 +1,6 @@
 [package]
 name = "two-khz-server"
-version = "0.7.1"
+version = "0.7.3"
 edition = "2021"
 
 # Deliberately not a workspace member with `app`: a shared target directory

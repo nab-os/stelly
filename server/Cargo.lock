@@ -2759,7 +2759,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "two-khz-app"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "two-khz-server"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "argh",
