@@ -7,7 +7,7 @@ use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
 use super::{
     artist_link, open_track, AlbumDetail, ArtistDetail, Blocklist, Cover, Detail, DetailSubject, LocalIds,
-    Search, Selection, SpaceMatches, SpaceReach, space_mark, LIST_CAP, SEARCH_LIMIT,
+    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
 use crate::backend::backend;
@@ -335,7 +335,7 @@ impl Library {
     /// which is not what that chip is asking for.
     fn shows_space(&self) -> bool {
         match &*self.view.read() {
-            View::Search { scope, .. } => scope.tracks() || *self.space_only.read(),
+            View::Search { scope, .. } => scope.tracks(),
             _ => false,
         }
     }
@@ -407,7 +407,15 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
     match view {
         // Clicking the search tab before typing anything is not a query.
         View::Search { query, .. } if query.trim().is_empty() => {}
-        View::Search { .. } if space_only => {}
+        View::Search { query, scope } if space_only => {
+            let (albums, artists) = space_groups(&query);
+            if scope.albums() {
+                shelf.albums = albums;
+            }
+            if scope.artists() {
+                shelf.artists = artists;
+            }
+        }
         View::Search { query, scope } => {
             let found = backend().search(&query, SEARCH_LIMIT).await?;
             if scope.tracks() {
@@ -437,6 +445,78 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
     Ok(shelf)
 }
 
+/// The albums and artists behind the space's tracks matching `query`, for a
+/// space-only search. Matched the way the space list is, every word somewhere
+/// in the artist, title or album, and put in the shelf so the tiles, their
+/// menus and the liked filter all work as they do for a Qobuz search.
+fn space_groups(query: &str) -> (Vec<RemoteAlbum>, Vec<RemoteArtist>) {
+    let terms: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let Some(first) = terms.first() else {
+        return Default::default();
+    };
+
+    let mut albums: Vec<(u8, RemoteAlbum)> = Vec::new();
+    let mut artists: Vec<(u8, RemoteArtist)> = Vec::new();
+    let mut album_at = std::collections::HashMap::new();
+    let mut artist_at = std::collections::HashMap::new();
+
+    let guard = crate::engine().lock().unwrap();
+    let catalog = &guard.navigator.catalog;
+    for i in catalog.visible() {
+        let track = catalog.get(i);
+        let artist = track.artist.to_lowercase();
+        let title = track.title.to_lowercase();
+        let album = track.album.to_lowercase();
+        if !terms
+            .iter()
+            .all(|term| artist.contains(term) || title.contains(term) || album.contains(term))
+        {
+            continue;
+        }
+
+        // Named after what was typed first, the same preference the space
+        // list gives a track, but on the album's own title here.
+        let rank = u8::from(!(artist.starts_with(first) || album.starts_with(first)));
+        let artist_id = Some(track.artist_id).filter(|id| *id >= 0);
+
+        if !track.album_id.is_empty() {
+            let at = *album_at.entry(track.album_id.clone()).or_insert_with(|| {
+                albums.push((
+                    rank,
+                    RemoteAlbum {
+                        id: track.album_id.clone(),
+                        title: track.album.clone(),
+                        artist: track.artist.clone(),
+                        artist_id,
+                        image: crate::qobuz::cover_url(&track.album_id),
+                        ..Default::default()
+                    },
+                ));
+                albums.len() - 1
+            });
+            albums[at].0 = albums[at].0.min(rank);
+        }
+
+        if let Some(id) = artist_id {
+            let rank = u8::from(!artist.starts_with(first));
+            let at = *artist_at.entry(id).or_insert_with(|| {
+                artists.push((
+                    rank,
+                    RemoteArtist { id, name: track.artist.clone(), ..Default::default() },
+                ));
+                artists.len() - 1
+            });
+            artists[at].0 = artists[at].0.min(rank);
+        }
+    }
+
+    albums.sort_by_key(|entry| entry.0);
+    artists.sort_by_key(|entry| entry.0);
+    (
+        albums.into_iter().map(|(_, album)| album).collect(),
+        artists.into_iter().map(|(_, artist)| artist).collect(),
+    )
+}
 
 // --------------------------------------------------------------- crawl hook
 
@@ -570,9 +650,7 @@ pub fn LibraryPanel() -> Element {
             // the first three narrow it instead, and a second tap on the lit
             // one widens it back to everything; playlists are not something
             // a search returns, so that chip goes.
-            if space_only {
-                // The space is tracks only, so there is nothing to narrow.
-            } else if searching {
+            if searching {
                 div { class: "actions",
                     for (label, chip) in [
                         ("tracks", Scope::Tracks),
@@ -645,7 +723,8 @@ pub fn LibraryPanel() -> Element {
                     }
                 }
                 // A search asks the whole catalogue; this narrows the Qobuz
-                // half of the answer to what is already favourited. Only
+                // half of the answer to what is already favourited, or the
+                // space's own when "space" has left Qobuz out. Only
                 // shown while searching, the tracks/albums/artists chips
                 // above already are the liked list the rest of the time, so
                 // a second "liked" filter on top of them would filter
@@ -667,7 +746,7 @@ pub fn LibraryPanel() -> Element {
                         "space"
                     }
                 }
-                if searching && !space_only {
+                if searching {
                     button {
                         class: if liked_only { "chip active" } else { "chip" },
                         title: "only show what you've already liked",
@@ -801,6 +880,18 @@ fn SpaceRows() -> Element {
     let mut shown = use_signal(|| FIRST_SHOWN);
 
     let (rows, total) = matches();
+    // With Qobuz out of the search, "liked" has only the space left to
+    // narrow. Counted over the rows the scan kept, not every match.
+    let (liked_only, liked) = library.liked_state();
+    let liked_only = liked_only && library.searching_space_only();
+    let (rows, total) = if liked_only {
+        let rows: Vec<SpaceRow> =
+            rows.into_iter().filter(|row| liked.tracks.contains(&row.track_id)).collect();
+        let total = rows.len();
+        (rows, total)
+    } else {
+        (rows, total)
+    };
     let searching = !search.text.read().trim().is_empty();
     let visible = shown().min(rows.len());
     let grid = *library.tracks_view.read() == TracksView::Grid;
@@ -809,7 +900,11 @@ fn SpaceRows() -> Element {
         return rsx! {
             if searching {
                 h3 { class: "shelf-head source-head", "In your space" }
-                p { class: "muted", "Nothing matches. Every word has to appear somewhere." }
+                if liked_only {
+                    p { class: "muted", "Nothing you've liked matches." }
+                } else {
+                    p { class: "muted", "Nothing matches. Every word has to appear somewhere." }
+                }
             }
         };
     }
