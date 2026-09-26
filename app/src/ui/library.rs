@@ -46,9 +46,11 @@ impl Scope {
 /// sorting the tracks by title and leaving the albums beside them as they came
 /// would read as the sort half working. A key a section has nothing for
 /// (duration, for an album) leaves that section as it came.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SortKey {
-    #[default]
+    /// When it was favourited. Only favourites know, so anywhere else this
+    /// leaves the order as it came.
+    Liked,
     Default,
     Title,
     Artist,
@@ -58,7 +60,8 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    const ALL: [SortKey; 6] = [
+    const ALL: [SortKey; 7] = [
+        SortKey::Liked,
         SortKey::Default,
         SortKey::Title,
         SortKey::Artist,
@@ -69,7 +72,8 @@ impl SortKey {
 
     fn label(self) -> &'static str {
         match self {
-            SortKey::Default => "default",
+            SortKey::Liked => "liked date",
+            SortKey::Default => "original order",
             SortKey::Title => "title",
             SortKey::Artist => "artist",
             SortKey::Album => "album",
@@ -79,10 +83,18 @@ impl SortKey {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Sort {
     pub key: SortKey,
     pub descending: bool,
+}
+
+/// Most recently liked first: home is a mixed list, and liked date is the one
+/// order that puts its tracks, albums and artists into a single timeline.
+impl Default for Sort {
+    fn default() -> Self {
+        Sort { key: SortKey::Liked, descending: true }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1084,6 +1096,9 @@ impl Item {
     /// release date) puts it after everything that has one.
     fn sort_value(&self, key: SortKey) -> Option<SortValue> {
         match (self, key) {
+            (Item::Track(_, track), SortKey::Liked) => track.liked_at.map(SortValue::Number),
+            (Item::Album(_, album), SortKey::Liked) => album.liked_at.map(SortValue::Number),
+            (Item::Artist(_, artist), SortKey::Liked) => artist.liked_at.map(SortValue::Number),
             (Item::Track(_, track), SortKey::Title) => text(&track.title),
             (Item::Track(_, track), SortKey::Artist) => text(&track.artist),
             (Item::Track(_, track), SortKey::Album) => text(&track.album),
@@ -1455,12 +1470,14 @@ fn SpaceRows() -> Element {
 impl Shelf {
     fn sorted(self, sort: Sort) -> Shelf {
         let artist = |artist: &RemoteArtist, key: SortKey| match key {
+            SortKey::Liked => artist.liked_at.map(SortValue::Number),
             SortKey::Title | SortKey::Artist => text(&artist.name),
             _ => None,
         };
         Shelf {
             tracks: sort.apply(self.tracks, |track, key| match key {
                 SortKey::Default => None,
+                SortKey::Liked => track.liked_at.map(SortValue::Number),
                 SortKey::Title => text(&track.title),
                 SortKey::Artist => text(&track.artist),
                 SortKey::Album => text(&track.album),
@@ -1468,6 +1485,7 @@ impl Shelf {
                 SortKey::Duration => track.duration.map(SortValue::Number),
             }),
             albums: sort.apply(self.albums, |album, key| match key {
+                SortKey::Liked => album.liked_at.map(SortValue::Number),
                 SortKey::Title | SortKey::Album => text(&album.title),
                 SortKey::Artist => text(&album.artist),
                 SortKey::Released => album.released.as_deref().and_then(text),
