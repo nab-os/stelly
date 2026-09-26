@@ -17,9 +17,34 @@ use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 /// screen; "show more" triples it.
 const FIRST_SHOWN: usize = 80;
 
+/// Which kinds of result a search shows. Taken from the chip that was lit
+/// when typing started: filtering from "tracks" and getting albums and
+/// artists back as well read as the filter being ignored.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope {
+    Everything,
+    Tracks,
+    Albums,
+    Artists,
+}
+
+impl Scope {
+    fn tracks(self) -> bool {
+        matches!(self, Scope::Everything | Scope::Tracks)
+    }
+
+    fn albums(self) -> bool {
+        matches!(self, Scope::Everything | Scope::Albums)
+    }
+
+    fn artists(self) -> bool {
+        matches!(self, Scope::Everything | Scope::Artists)
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
-    Search(String),
+    Search { query: String, scope: Scope },
     FavouriteTracks,
     FavouriteAlbums,
     FavouriteArtists,
@@ -39,7 +64,7 @@ pub enum View {
 impl View {
     fn label(&self) -> String {
         match self {
-            View::Search(query) => format!("results for “{query}”"),
+            View::Search { query, .. } => format!("results for “{query}”"),
             View::FavouriteTracks => "favourite tracks".into(),
             View::FavouriteAlbums => "favourite albums".into(),
             View::FavouriteArtists => "favourite artists".into(),
@@ -56,6 +81,17 @@ impl View {
     /// separate "library" tab.
     fn is_playlists(&self) -> bool {
         matches!(self, View::Playlists | View::Playlist { .. })
+    }
+
+    /// What a search started from here should be narrowed to.
+    fn scope(&self) -> Scope {
+        match self {
+            View::Search { scope, .. } => *scope,
+            View::FavouriteTracks => Scope::Tracks,
+            View::FavouriteAlbums => Scope::Albums,
+            View::FavouriteArtists => Scope::Artists,
+            _ => Scope::Everything,
+        }
     }
 }
 
@@ -258,17 +294,28 @@ impl Library {
     /// a query that fires as you type would otherwise leave one history entry
     /// per character, and "back" would walk you through your own spelling.
     pub(crate) fn search_to(self, query: String) {
-        if matches!(&*self.view.peek(), View::Search(_)) {
-            self.show(View::Search(query));
+        let current = self.view.peek().clone();
+        let scope = current.scope();
+        if matches!(current, View::Search { .. }) {
+            self.show(View::Search { query, scope });
         } else {
-            self.go(View::Search(query));
+            self.go(View::Search { query, scope });
+        }
+    }
+
+    /// Re-run the current search over a different kind of result. Replaces
+    /// rather than pushes, the same as refining the query does.
+    fn rescope(self, scope: Scope) {
+        let current = self.view.peek().clone();
+        if let View::Search { query, .. } = current {
+            self.show(View::Search { query, scope });
         }
     }
 
     /// Emptying the box should put back whatever the search covered up,
     /// rather than leaving an empty shelf with no way out but the tabs.
     pub(crate) fn leave_search(self) {
-        if !matches!(&*self.view.peek(), View::Search(_)) {
+        if !matches!(&*self.view.peek(), View::Search { .. }) {
             return;
         }
         if self.history.peek().is_empty() {
@@ -338,12 +385,18 @@ async fn load(view: View) -> anyhow::Result<Shelf> {
 
     match view {
         // Clicking the search tab before typing anything is not a query.
-        View::Search(query) if query.trim().is_empty() => {}
-        View::Search(query) => {
+        View::Search { query, .. } if query.trim().is_empty() => {}
+        View::Search { query, scope } => {
             let found = backend().search(&query, SEARCH_LIMIT).await?;
-            shelf.tracks = found.tracks;
-            shelf.albums = found.albums;
-            shelf.artists = found.artists;
+            if scope.tracks() {
+                shelf.tracks = found.tracks;
+            }
+            if scope.albums() {
+                shelf.albums = found.albums;
+            }
+            if scope.artists() {
+                shelf.artists = found.artists;
+            }
         }
         View::FavouriteTracks => shelf.tracks = backend().favourite_tracks(LIST_CAP).await?,
         View::FavouriteAlbums => shelf.albums = backend().favourite_albums(LIST_CAP).await?,
@@ -403,13 +456,18 @@ pub fn LibraryPanel() -> Element {
 
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
-    let searching = matches!(view, View::Search(_));
+    let searching = matches!(view, View::Search { .. });
+    let scope = view.scope();
     // The space has no album or artist grouping of its own, it is a flat
     // set of analysed tracks, so it only has anything to say for the two
     // views that are about tracks. Showing it regardless of which chip was
     // picked was the gap that made the source-row filter look like it only
     // applied to the Qobuz half of the list.
-    let show_space = matches!(view, View::FavouriteTracks | View::Search(_));
+    let show_space = match view {
+        View::FavouriteTracks => true,
+        View::Search { scope, .. } => scope.tracks(),
+        _ => false,
+    };
     let shelf = library.shelf.read().clone();
     let tracks_view = *library.tracks_view.read();
 
@@ -451,7 +509,7 @@ pub fn LibraryPanel() -> Element {
         && shelf.playlists.is_empty();
     // "Nothing here" belongs to the whole list, not to the Qobuz half of it:
     // with matches in the space above, the list is plainly not empty.
-    let nothing_visible = nothing_from_qobuz && space.0.read().1 == 0;
+    let nothing_visible = nothing_from_qobuz && (!show_space || space.0.read().1 == 0);
     let has_history = !library.history.read().is_empty();
 
     // Drives every navigation. Deliberately here rather than in `show`: see
@@ -488,9 +546,27 @@ pub fn LibraryPanel() -> Element {
             // here too, sharing a row with library/playlists; it is a header
             // icon now (see `app.rs`'s `SearchBox`), so this row only ever
             // has to say what four sources look like, not decide between
-            // finding something and browsing it. Hidden while a search is
-            // showing, since none of the four describes a result set.
-            if !searching {
+            // finding something and browsing it. While a search is showing
+            // the first three narrow it instead, and a second tap on the lit
+            // one widens it back to everything; playlists are not something
+            // a search returns, so that chip goes.
+            if searching {
+                div { class: "actions",
+                    for (label, chip) in [
+                        ("tracks", Scope::Tracks),
+                        ("albums", Scope::Albums),
+                        ("artists", Scope::Artists),
+                    ] {
+                        button {
+                            class: if scope == chip { "chip active" } else { "chip" },
+                            onclick: move |_| {
+                                library.rescope(if scope == chip { Scope::Everything } else { chip })
+                            },
+                            "{label}"
+                        }
+                    }
+                }
+            } else {
                 div { class: "actions",
                     button {
                         class: if view == View::FavouriteTracks { "chip active" } else { "chip" },
@@ -902,7 +978,7 @@ fn TrackRows() -> Element {
 fn AlbumRows() -> Element {
     let library = use_context::<Library>();
     let blocklist = use_context::<Blocklist>();
-    let mut detail = use_context::<Detail>().0;
+    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let (liked_only, liked) = library.liked_state();
@@ -925,9 +1001,12 @@ fn AlbumRows() -> Element {
                 li {
                     key: "{index}-{album.id}",
                     class: "tile",
+                    // Straight to the tracklist: the album page carries the
+                    // same cover, badges and actions the sheet would have,
+                    // so the sheet was only ever a detour on the way there.
                     onclick: {
                         let album = album.clone();
-                        move |_| detail.set(Some(DetailSubject::Album(album.clone())))
+                        move |_| library.go(View::Album(album.clone()))
                     },
                     "data-menu": MenuTarget::ShelfAlbum(index).tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
