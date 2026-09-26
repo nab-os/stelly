@@ -293,7 +293,7 @@ something else is why they each got their own ad hoc toggle.
 │ ♥  │                          │ ← detail     │
 │ ⌕  │   the current place      │              │
 │ ◎  │   (favourites / search / │ cover, verbs │
-│ ⚙︎⚙︎ │    map / pipeline)       │ generate ▸   │
+│ ▤  │    map / pipeline)       │ generate ▸   │
 │    │                          │              │
 │ ⚙  │                          │              │
 ├────┴──────────────────────────┴──────────────┤
