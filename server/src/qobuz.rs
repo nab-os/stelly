@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const API_BASE: &str = "https://www.qobuz.com/api.json/0.2";
 
 pub use two_khz::qobuz::{
-    RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults, FORMAT_MP3_320,
+    own_releases, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults, FORMAT_MP3_320,
 };
 
 /// Requests per second, and how many may be spent at once. One budget for the
@@ -471,6 +471,42 @@ impl QobuzClient {
             .collect())
     }
 
+    /// Add or remove a track, album or artist from the account's Qobuz
+    /// favourites. `kind` is "track", "album" or "artist", singular,
+    /// matching the app's `request_analysis` convention, unlike
+    /// `favorites_raw`'s plural "tracks"/"albums"/"artists".
+    ///
+    /// `favorite/create` and `favorite/delete` are not exercised anywhere
+    /// else in this codebase, unlike every other endpoint here. They are the
+    /// standard paired Qobuz calls, every third-party client that reads
+    /// `favorite/getUserFavorites` writes through these the same way, but
+    /// that is inference from the read side and from how this API's other
+    /// pairs are shaped, not something confirmed against a live account.
+    async fn favorite_write(&mut self, endpoint: &str, kind: &str, id: &str) -> Result<()> {
+        self.login().await?;
+        let param = match kind {
+            "track" => "track_ids",
+            "album" => "album_ids",
+            "artist" => "artist_ids",
+            other => bail!("unknown favourite kind {other:?}"),
+        };
+        self.request(
+            endpoint,
+            &BTreeMap::from([(param.to_string(), id.to_string())]),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn favorite_add(&mut self, kind: &str, id: &str) -> Result<()> {
+        self.favorite_write("favorite/create", kind, id).await
+    }
+
+    pub async fn favorite_remove(&mut self, kind: &str, id: &str) -> Result<()> {
+        self.favorite_write("favorite/delete", kind, id).await
+    }
+
     pub async fn user_playlists(&mut self, cap: usize) -> Result<Vec<RemotePlaylist>> {
         self.login().await?;
         Ok(self
@@ -557,7 +593,7 @@ impl QobuzClient {
         cap: usize,
     ) -> Result<(RemoteArtist, Vec<RemoteAlbum>)> {
         let (artist, raw) = self.artist_albums_inner(artist_id, cap).await?;
-        let mut out: Vec<RemoteAlbum> = raw.iter().filter_map(RemoteAlbum::parse).collect();
+        let mut out = own_releases(artist_id, raw.iter().filter_map(RemoteAlbum::parse).collect());
         out.sort_by(|a, b| b.year().cmp(&a.year()));
         Ok((artist, out))
     }

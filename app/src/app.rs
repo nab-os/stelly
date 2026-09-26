@@ -6,14 +6,13 @@
 use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
-    Blocklist, ContextMenu, ContextMenuView, Crawler, DetailPane, GeneratePanel, Generator,
-    Library, LibraryPanel, LocalIds, MapView, Pipeline, PipelineView, Player, PlayerBar, QueueView,
-    Search, Selection, SpaceMatches, SpaceRow,
+    open_track, Blocklist, ContextMenu, ContextMenuView, Crawler, Detail, DetailSheet, FullPlayer,
+    Generator, Library, LibraryPanel, LocalIds, MapView, PathPill, Pipeline, PipelineView, Player,
+    PlayerBar, QueueView, Search, Selection, SpaceMatches, SpaceReach, SpaceRow, Weights,
 };
 use crate::{engine, map, ServerConfig, Wiring};
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -78,37 +77,6 @@ pub async fn sync_and_load() -> anyhow::Result<()> {
     let _ = DATA_DIR.set(data_dir.clone());
     let _ = DB_PATH.set(db_path.clone());
     crate::init_engine(&data_dir, &db_path)
-}
-
-/// One of the two Explore panes. Only meaningful on a screen too narrow to
-/// hold both.
-///
-/// The map used to be the third. It is an overlay now, on every screen size,
-/// so a phone no longer has to spend a third of its switcher on a view that
-/// reads as blank until you know what it is.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Pane {
-    Library,
-    Tools,
-}
-
-impl Pane {
-    const ALL: [Pane; 2] = [Pane::Library, Pane::Tools];
-
-    /// Matches the `.pane-*` class the stylesheet keys off.
-    fn slug(self) -> &'static str {
-        match self {
-            Pane::Library => "library",
-            Pane::Tools => "tools",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Pane::Library => "browse",
-            Pane::Tools => "tools",
-        }
-    }
 }
 
 /// The one search box.
@@ -388,6 +356,57 @@ fn Settings(open: Signal<bool>) -> Element {
                 if let Some(message) = status.read().clone() {
                     pre { class: "log", "{message}" }
                 }
+
+                HiddenArtists {}
+            }
+        }
+    }
+}
+
+/// The block list, with a way out of it. Used to sit at the foot of the
+/// browse column, riding along under whatever the shelf happened to be
+/// showing; a list you check on rarely is a settings-panel thing, not a
+/// permanent fixture of the screen a session spends the rest of its time in.
+#[component]
+fn HiddenArtists() -> Element {
+    let blocklist = use_context::<Blocklist>();
+    let hidden = blocklist.artists.read().clone();
+
+    // Collapsed by default: this list grows without bound, 115 entries on a
+    // well-used corpus.
+    let mut open = use_signal(|| false);
+
+    if hidden.is_empty() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: if open() { "hidden-artists open" } else { "hidden-artists" },
+            h3 { class: "shelf-head",
+                "Hidden ({hidden.len()})"
+                span { class: "spacer" }
+                button {
+                    class: "chip",
+                    onclick: move |_| { let next = !open(); open.set(next); },
+                    if open() { "hide list" } else { "show" }
+                }
+            }
+            if open() {
+                ul { class: "list",
+                    for entry in hidden {
+                        li { key: "{entry.artist_id}", class: "row",
+                            span { class: "title", "{entry.name}" }
+                            if let Some(reason) = entry.reason.clone() {
+                                span { class: "muted", "{reason}" }
+                            }
+                            button {
+                                class: "chip",
+                                onclick: move |_| blocklist.unblock.call(entry.artist_id),
+                                "unhide"
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -399,11 +418,18 @@ fn Shell() -> Element {
     // Read-only here: the box that writes it is `SearchBox`, kept separate so
     // the shell's renders cannot clobber what is being typed.
     let query = search.text;
-    let mut weights = use_signal(|| engine().lock().unwrap().space.default_weights());
+    use_context_provider(|| {
+        Weights(Signal::new(engine().lock().unwrap().space.default_weights()))
+    });
 
     // Shared with the Qobuz panel, which can select a track it recognises.
     let selection = use_context_provider(|| Selection(Signal::new(None)));
     let mut selected = selection.0;
+
+    // The detail sheet's own open flag, independent of `selected`, see
+    // `Selection`'s doc comment in `ui/mod.rs`.
+    let detail = use_context_provider(|| Detail(Signal::new(None)));
+    let mut detail_signal = detail.0;
 
     let player = use_context_provider(|| Player {
         queue: Signal::new(Vec::new()),
@@ -415,6 +441,7 @@ fn Shell() -> Element {
         volume: Signal::new(1.0),
         muted: Signal::new(false),
         queue_open: Signal::new(false),
+        full_open: Signal::new(false),
     });
 
     let library = use_context_provider(Library::new);
@@ -440,9 +467,6 @@ fn Shell() -> Element {
     // action itself, so no row has to carry a popup or a set of callbacks.
     use_context_provider(|| ContextMenu(Signal::new(None)));
 
-    // Which Explore pane a narrow screen shows; ignored above the breakpoint.
-    let mut pane = use_signal(|| Pane::Library);
-
     // The map, opened on purpose rather than occupying the middle of the
     // window. Most of the time you know what you are looking for and type it;
     // the map is for the times you do not.
@@ -467,6 +491,7 @@ fn Shell() -> Element {
                     Ok(_) => match crate::reload_engine(data_dir(), db_path()) {
                         Ok(()) => {
                             selected.set(None);
+                            detail_signal.set(None);
                             generator.clear();
                             document::eval(
                                 "window.twoKhzReloadPoints && window.twoKhzReloadPoints();",
@@ -562,6 +587,12 @@ fn Shell() -> Element {
         Rc::new(engine().lock().unwrap().navigator.catalog.id_set())
     });
     use_context_provider(|| LocalIds(local_ids));
+    let space_reach = use_memo(move || {
+        blocked.read();
+        pipeline.generation.read();
+        Rc::new(engine().lock().unwrap().navigator.catalog.reach())
+    });
+    use_context_provider(|| SpaceReach(space_reach));
 
     // One lowercased copy of every track's searchable text, built when the
     // space is loaded rather than on every keystroke. The filter below used to
@@ -712,7 +743,13 @@ fn Shell() -> Element {
             // parsing, so a future message without one cannot clear the
             // selection by accident.
             if let Some(value) = message.get("track_id") {
-                selected.set(value.as_f64().map(|id| id as i64));
+                match value.as_f64().map(|id| id as i64) {
+                    Some(id) => open_track(selected, detail_signal, id),
+                    None => {
+                        selected.set(None);
+                        detail_signal.set(None);
+                    }
+                }
             }
         }
     });
@@ -758,16 +795,6 @@ fn Shell() -> Element {
         document::eval(&script);
     });
 
-    let block_names: Vec<String> = engine()
-        .lock()
-        .unwrap()
-        .space
-        .manifest
-        .blocks
-        .iter()
-        .map(|b| b.name.clone())
-        .collect();
-
     let (total_tracks, hidden_tracks) = {
         blocked.read();
         let guard = engine().lock().unwrap();
@@ -798,6 +825,7 @@ fn Shell() -> Element {
         let row = |t: &crate::db::TrackMeta| SpaceRow {
             track_id: t.track_id,
             artist: t.artist.clone(),
+            artist_id: Some(t.artist_id).filter(|id| *id >= 0),
             title: t.title.clone(),
             album_id: t.album_id.clone(),
         };
@@ -849,37 +877,6 @@ fn Shell() -> Element {
 
     use_context_provider(|| SpaceMatches(filtered));
 
-    let selected_label = selected()
-        .and_then(|id| {
-            let guard = engine().lock().unwrap();
-            guard
-                .navigator
-                .catalog
-                .tracks
-                .iter()
-                .find(|t| t.track_id == id)
-                .map(|t| format!("{} - {}", t.artist, t.title))
-        })
-        .unwrap_or_else(|| "nothing selected".into());
-
-    // Whether anything has moved off the values the space was built with.
-    // Drives the reset button, so it is never offered as a no-op.
-    let weights_changed = {
-        let defaults = engine().lock().unwrap().space.default_weights();
-        let current = weights();
-        defaults.iter().any(|(name, default)| {
-            current
-                .get(name)
-                .map_or(false, |value| (value - default).abs() > 1e-6)
-        })
-    };
-
-    let body_class = format!(
-        "body pane-{}{}",
-        pane().slug(),
-        if explore() { "" } else { " hidden" }
-    );
-
     rsx! {
         div { class: "app",
             header {
@@ -888,45 +885,38 @@ fn Shell() -> Element {
                 if hidden_tracks > 0 {
                     span { class: "muted", "({hidden_tracks} hidden)" }
                 }
-                nav { class: "views",
-                    button {
-                        class: if explore() { "tab active" } else { "tab" },
-                        onclick: move |_| explore.set(true),
-                        "explore"
-                    }
-                    button {
-                        class: if explore() { "tab" } else { "tab active" },
-                        onclick: move |_| explore.set(false),
-                        "pipeline"
-                    }
-                }
-                // One box, above both columns, because it drives both: the
-                // analysed space filters as you type, Qobuz is asked once you
-                // stop. Not inside either panel, sitting in one of them is
-                // what made it look like that panel's private filter.
+                // Always here rather than behind an icon: a toggle just
+                // traded "an input taking header room" for "an extra tap
+                // before every search, and the icon itself vanishing behind
+                // the pipeline toggle", worse on both counts. `SearchBox`
+                // is a fixed-width flex item, so it costs the header a
+                // consistent amount of room rather than reflowing everything
+                // each time it would have opened and closed.
                 if explore() {
                     SearchBox {}
-                    button {
-                        class: if map_open() { "chip active" } else { "chip" },
-                        title: "browse the space as a map",
-                        onclick: move |_| {
-                            if map_open() {
-                                map_open.set(false);
-                            } else {
-                                map_route.set(false);
-                                map_open.set(true);
-                            }
-                        },
-                        "map"
-                    }
+                } else {
+                    span { class: "spacer" }
                 }
-                span { class: "spacer" }
-                span { class: "muted", "{selected_label}" }
+                // Pipeline switches the whole window to a different screen,
+                // `.nav-btn`, not a plain filter chip, because it means
+                // something different: this changes *which* page you're on,
+                // not what the current one shows. Same family as the map's
+                // toggle on the player bar.
                 button {
-                    class: "chip",
+                    class: if explore() { "chip nav-btn" } else { "chip nav-btn active" },
+                    title: if explore() { "open the pipeline" } else { "back to browsing" },
+                    onclick: move |_| { let now = explore(); explore.set(!now); },
+                    "pipeline"
+                }
+                // Settings opens a modal over whatever is already showing,
+                // never a state of its own to be "active" in, so it is
+                // deliberately not a chip: an icon button says "this is an
+                // action", not "this is a place".
+                button {
+                    class: "icon-btn",
                     title: "server address and token",
                     onclick: move |_| settings.set(true),
-                    "settings"
+                    "⚙"
                 }
             }
 
@@ -934,26 +924,11 @@ fn Shell() -> Element {
                 Settings { open: settings }
             }
 
-            // Narrow screens show one pane at a time. Here rather than a
-            // floating bar because they belong with the view tabs; CSS hides
-            // them once all three panes fit.
-            if explore() {
-                nav { class: "panes",
-                    for option in Pane::ALL {
-                        button {
-                            key: "{option.slug()}",
-                            class: if pane() == option { "tab active" } else { "tab" },
-                            onclick: move |_| pane.set(option),
-                            "{option.label()}"
-                        }
-                    }
-                }
-            }
-
-            // Hidden, not unmounted: map.js holds a reference to the canvas,
-            // so remounting would leave it drawing into a dead node. The pane
-            // switcher is a class for the same reason.
-            div { class: "{body_class}",
+            // One column now, not two panes to switch between: the list is
+            // the whole of Explore, and the track sheet overlays it (or
+            // docks beside it on a wide screen, see `.sheet` in
+            // style.css) instead of being a second screen behind a tab.
+            div { class: if explore() { "body" } else { "body hidden" },
                 LibraryPanel {}
 
                 // Hidden, never unmounted, and never moved in this tree.
@@ -961,10 +936,7 @@ fn Shell() -> Element {
                 // listeners and a ResizeObserver at eval time and has no
                 // re-init path: a conditional render would leave it drawing
                 // into a detached node, and re-mounting would install a
-                // second copy of the whole script over the first. The class
-                // switch is the same one the pane switcher already uses, and
-                // map.js's ResizeObserver already handles the 0x0 -> full
-                // transition it produces.
+                // second copy of the whole script over the first.
                 div { class: if map_open() { "map-wrap" } else { "map-wrap hidden" },
                     div { class: "map-bar",
                         span { class: "muted", "the space" }
@@ -987,77 +959,24 @@ fn Shell() -> Element {
                     canvas { id: "map" }
                 }
 
-                aside { class: "side",
-                    // The space's own tracks used to be listed here, opposite
-                    // the Qobuz column, which made "where a track came from"
-                    // into a place on screen rather than a fact about the
-                    // track. They are one list now; see `LibraryPanel`. What
-                    // stands here instead is the one track you picked.
-
-                    // ------------------------------------------------ detail
-                    DetailPane {}
-
-                    // ---------------------------------------------- generate
-                    GeneratePanel {}
-
-                    // ----------------------------------------------- weights
-                    section { class: "panel",
-                        h2 {
-                            "Weights"
-                            span { class: "spacer" }
-                            button {
-                                class: "chip",
-                                title: "back to the weights the space was built with",
-                                disabled: !weights_changed,
-                                onclick: move |_| {
-                                    let defaults = engine().lock().unwrap().space.default_weights();
-                                    weights.set(defaults.clone());
-                                    let _ = engine().lock().unwrap().set_weights(&defaults);
-                                    generator.invalidate();
-                                },
-                                "reset"
-                            }
-                        }
-                        p { class: "muted",
-                            "Reshapes distances immediately. Map positions are fixed until the layout step is re-run."
-                        }
-                        for name in block_names {
-                            div { class: "slider", key: "{name}",
-                                label { "{name}" }
-                                input {
-                                    r#type: "range",
-                                    min: "0",
-                                    max: "3",
-                                    step: "0.1",
-                                    value: "{weights().get(&name).copied().unwrap_or(1.0)}",
-                                    oninput: {
-                                        let name = name.clone();
-                                        move |e: FormEvent| {
-                                            if let Ok(v) = e.value().parse::<f32>() {
-                                                let mut w: HashMap<String, f32> = weights();
-                                                w.insert(name.clone(), v);
-                                                weights.set(w.clone());
-                                                let _ = engine().lock().unwrap().set_weights(&w);
-                                                generator.invalidate();
-                                            }
-                                        }
-                                    },
-                                }
-                                span { class: "muted",
-                                    {format!("{:.1}", weights().get(&name).copied().unwrap_or(1.0))}
-                                }
-                            }
-                        }
-                    }
-                }
+                // A track, an album or an artist, and everything you can do
+                // with it. See `DetailSheet`'s doc comment for why this is
+                // its own open flag rather than piggybacking on `selected`.
+                DetailSheet {}
             }
 
             if !explore() {
                 PipelineView {}
             }
 
+            // A half-built path survives losing the sheet it was started
+            // from, backgrounding the app, scrolling away, picking a
+            // second track from a different screen entirely.
+            PathPill {}
+
             QueueView {}
             PlayerBar {}
+            FullPlayer {}
 
             // Last, so it paints over everything it can be opened from.
             ContextMenuView {}

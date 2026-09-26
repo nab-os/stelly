@@ -148,6 +148,16 @@ impl Hub {
             .await
     }
 
+    // ------------------------------------------------------- favourites
+
+    pub async fn favorite_add(&self, kind: &str, id: &str) -> Result<()> {
+        self.qobuz()?.lock().await.favorite_add(kind, id).await
+    }
+
+    pub async fn favorite_remove(&self, kind: &str, id: &str) -> Result<()> {
+        self.qobuz()?.lock().await.favorite_remove(kind, id).await
+    }
+
     // --------------------------------------------------------- text steering
 
     /// Load the tower once, remembering that we tried. A missing export is not

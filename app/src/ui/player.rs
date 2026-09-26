@@ -3,7 +3,7 @@
 //! The `<audio>` element owns playback; see `assets/player.js`. Rust hands it
 //! a URL and gets track-boundary events back.
 
-use super::Cover;
+use super::{artist_link, open_artist, Cover, Detail, MapView};
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
@@ -28,6 +28,10 @@ pub struct Player {
     /// Whether the queue drawer is showing. Lives here rather than in the
     /// shell so the player bar's toggle and the drawer share one switch.
     pub queue_open: Signal<bool>,
+    /// Whether the full "now playing" screen is showing, over everything,
+    /// opened from the mini-bar's art or title rather than its transport
+    /// buttons, which still want a bare click to do their own thing.
+    pub full_open: Signal<bool>,
 }
 
 impl Player {
@@ -300,6 +304,16 @@ pub async fn play_at(mut player: Player, index: usize) {
                  }})({});",
                 serde_json::to_string(&url).unwrap_or_else(|_| "''".into())
             ));
+            // What the OS shows as "now playing", see `twoKhzSetMetadata`'s
+            // doc comment in player.js for why this is the same fix as the
+            // hardware/mouse previous-next buttons.
+            document::eval(&format!(
+                "window.twoKhzSetMetadata && window.twoKhzSetMetadata({}, {}, {}, {});",
+                serde_json::to_string(&track.title).unwrap_or_else(|_| "''".into()),
+                serde_json::to_string(&track.artist).unwrap_or_else(|_| "''".into()),
+                serde_json::to_string(&track.album).unwrap_or_else(|_| "''".into()),
+                serde_json::to_string(&track.image).unwrap_or_else(|_| "null".into()),
+            ));
         }
         Err(err) => player.status.set(Some(format!("{err:#}"))),
     }
@@ -353,6 +367,14 @@ pub fn PlayerBar() -> Element {
     let volume = *player.volume.read();
     let muted = *player.muted.read();
     let mut queue_open = player.queue_open;
+    let mut full_open = player.full_open;
+    let map = use_context::<MapView>();
+    let detail = use_context::<Detail>().0;
+
+    // Only worth a screen of its own with something on it. `.now` stays
+    // clickable-looking either way, the disabled state is silent rather
+    // than a dead cursor, since "nothing playing" already says why.
+    let has_current = current.is_some();
 
     // The audio element's own duration is authoritative once it has loaded;
     // Qobuz's metadata fills the gap before that.
@@ -373,11 +395,36 @@ pub fn PlayerBar() -> Element {
             // would duplicate every button.
             audio { id: "player" }
 
-            // Eager: the player bar is always on screen, and there is exactly
-            // one of these. Waiting for an intersection would only delay it.
-            Cover {
-                url: current.as_ref().and_then(|track| track.image.clone()),
-                class: "now-art eager",
+            // Cover and title share the "now" grid area, side by side,
+            // next to the thing it names, and shorter for it: two stacked
+            // lines fit in less width than one long one did.
+            div { class: "now",
+                // Eager: the player bar is always on screen, and there is
+                // exactly one of these. Waiting for an intersection would
+                // only delay it. The art is the opener for the full "now
+                // playing" screen, the transport buttons stay bare clicks
+                // that do their own thing, which is why this is not on the
+                // whole `footer`.
+                button {
+                    class: "now-art-button",
+                    disabled: !has_current,
+                    title: "now playing",
+                    onclick: move |_| full_open.set(true),
+                    Cover {
+                        url: current.as_ref().and_then(|track| track.image.clone()),
+                        class: "now-art eager",
+                    }
+                }
+                if let Some(track) = current.clone() {
+                    div {
+                        class: "now-title",
+                        onclick: move |_| full_open.set(true),
+                        span { class: "title", "{track.title}" }
+                        {artist_link(detail, track.artist_id, track.artist.clone(), "muted")}
+                    }
+                } else {
+                    div { class: "now-title muted", "nothing playing" }
+                }
             }
 
             div { class: "transport",
@@ -399,35 +446,24 @@ pub fn PlayerBar() -> Element {
                 }
             }
 
-            div { class: "now",
-                if let Some(track) = current.clone() {
-                    div { class: "now-title",
-                        span { class: "title", "{track.title}" }
-                        span { class: "muted", " - {track.artist}" }
-                    }
-                } else {
-                    div { class: "now-title muted", "nothing playing" }
+            div { class: "seek",
+                span { class: "muted", "{clock(position)}" }
+                input {
+                    r#type: "range",
+                    min: "0",
+                    max: "1000",
+                    value: "{progress}",
+                    disabled: total <= 0.0,
+                    oninput: move |event| {
+                        if let Ok(value) = event.value().parse::<f64>() {
+                            document::eval(&format!(
+                                "window.twoKhzSeek && window.twoKhzSeek({});",
+                                value / 1000.0
+                            ));
+                        }
+                    },
                 }
-
-                div { class: "seek",
-                    span { class: "muted", "{clock(position)}" }
-                    input {
-                        r#type: "range",
-                        min: "0",
-                        max: "1000",
-                        value: "{progress}",
-                        disabled: total <= 0.0,
-                        oninput: move |event| {
-                            if let Ok(value) = event.value().parse::<f64>() {
-                                document::eval(&format!(
-                                    "window.twoKhzSeek && window.twoKhzSeek({});",
-                                    value / 1000.0
-                                ));
-                            }
-                        },
-                    }
-                    span { class: "muted", "{clock(total)}" }
-                }
+                span { class: "muted", "{clock(total)}" }
             }
 
             div { class: "player-meta",
@@ -478,6 +514,17 @@ pub fn PlayerBar() -> Element {
                         }
                     }
                 }
+                // The map's entry point in the primary chrome: not the header,
+                // which competes with search and settings for room a session
+                // touches every time, and not a place that stands empty for
+                // 82% of a corpus that is not on it yet, reached from
+                // wherever playback already is instead.
+                button {
+                    class: if *map.map_open.read() { "chip nav-btn active" } else { "chip nav-btn" },
+                    title: "browse the space as a map",
+                    onclick: move |_| map.toggle(),
+                    "map"
+                }
                 // Last on the line, and the way into the drawer that holds
                 // everything else the queue can do, clearing included.
                 button {
@@ -498,6 +545,200 @@ pub fn PlayerBar() -> Element {
 
             if let Some(message) = player.status.read().clone() {
                 div { class: "player-status muted", "{message}" }
+            }
+        }
+    }
+}
+
+/// The mini-bar blown up to a screen of its own, opened from its art or
+/// title, at every width, rather than only existing as a phone concession.
+/// Desktop gets the same benefit a "now playing" window always has: art big
+/// enough to look at, rather than a 48px thumbnail.
+///
+/// Queue and map both close this on the way to opening themselves, rather
+/// than stacking overlay on overlay, the queue drawer and the map already
+/// have their own places to be, and this is not trying to hold either of
+/// them itself.
+#[component]
+pub fn FullPlayer() -> Element {
+    let mut player = use_context::<Player>();
+    let map = use_context::<MapView>();
+    let detail = use_context::<Detail>().0;
+
+    let mut full_open = player.full_open;
+    if !full_open() {
+        return rsx! {};
+    }
+
+    let Some(current) = player.current() else {
+        // Closed itself: nothing plays while this was open, which the queue
+        // running out is the one way to reach.
+        full_open.set(false);
+        return rsx! {};
+    };
+
+    let (position, duration) = *player.position.read();
+    let queue_length = player.queue.read().len();
+    let index = *player.index.read();
+    let playing = *player.playing.read();
+    let quality = *player.quality.read();
+    let volume = *player.volume.read();
+    let muted = *player.muted.read();
+
+    let total = if duration > 0.0 {
+        duration
+    } else {
+        current.duration.unwrap_or(0) as f64
+    };
+    let progress = if total > 0.0 {
+        (position / total * 1000.0).clamp(0.0, 1000.0)
+    } else {
+        0.0
+    };
+
+    let close = move |_| full_open.set(false);
+
+    rsx! {
+        div { class: "full-player-backdrop", onclick: close }
+        section { class: "panel full-player",
+            div { class: "sheet-head",
+                span { class: "spacer" }
+                button { class: "chip sheet-close", onclick: close, "×" }
+            }
+
+            Cover { url: current.image.clone(), class: "full-art eager" }
+
+            div { class: "full-meta",
+                span { class: "detail-title ellipsis", "{current.title}" }
+                // Not `artist_link`: this sits above the sheet it would open,
+                // so it has to close itself on the way, or the artist's sheet
+                // opens underneath and the click looks like it did nothing.
+                if let Some(artist_id) = current.artist_id {
+                    span {
+                        class: "muted ellipsis clickable",
+                        title: "open {current.artist}",
+                        onclick: {
+                            let name = current.artist.clone();
+                            move |_| {
+                                full_open.set(false);
+                                open_artist(detail, artist_id, name.clone());
+                            }
+                        },
+                        "{current.artist}"
+                    }
+                } else {
+                    span { class: "muted ellipsis", "{current.artist}" }
+                }
+            }
+
+            div { class: "seek full-seek",
+                span { class: "muted", "{clock(position)}" }
+                input {
+                    r#type: "range",
+                    min: "0",
+                    max: "1000",
+                    value: "{progress}",
+                    disabled: total <= 0.0,
+                    oninput: move |event| {
+                        if let Ok(value) = event.value().parse::<f64>() {
+                            document::eval(&format!(
+                                "window.twoKhzSeek && window.twoKhzSeek({});",
+                                value / 1000.0
+                            ));
+                        }
+                    },
+                }
+                span { class: "muted", "{clock(total)}" }
+            }
+
+            div { class: "transport full-transport",
+                button {
+                    disabled: index == 0 || queue_length == 0,
+                    onclick: move |_| step(player, -1),
+                    "⏮"
+                }
+                button {
+                    class: "play",
+                    disabled: queue_length == 0,
+                    onclick: move |_| toggle(player),
+                    if playing { "⏸" } else { "▶" }
+                }
+                button {
+                    disabled: index + 1 >= queue_length,
+                    onclick: move |_| step(player, 1),
+                    "⏭"
+                }
+            }
+
+            div { class: "player-meta",
+                div { class: "volume",
+                    button {
+                        class: "chip",
+                        title: if muted { "unmute" } else { "mute" },
+                        onclick: move |_| {
+                            let next = !*player.muted.peek();
+                            player.muted.set(next);
+                            apply_volume(player);
+                        },
+                        if muted || volume <= 0.0 { "🔇" } else { "🔊" }
+                    }
+                    input {
+                        r#type: "range",
+                        min: "0",
+                        max: "100",
+                        step: "1",
+                        value: "{(volume * 100.0).round() as i64}",
+                        oninput: move |event| {
+                            if let Ok(percent) = event.value().parse::<f64>() {
+                                player.volume.set((percent / 100.0).clamp(0.0, 1.0));
+                                if percent > 0.0 {
+                                    player.muted.set(false);
+                                }
+                                apply_volume(player);
+                            }
+                        },
+                    }
+                }
+                select {
+                    onchange: move |event| {
+                        if let Ok(value) = event.value().parse::<u32>() {
+                            player.quality.set(value);
+                        }
+                    },
+                    for format_id in [FORMAT_MP3_320, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES] {
+                        option {
+                            key: "{format_id}",
+                            value: "{format_id}",
+                            selected: quality == format_id,
+                            "{quality_label(format_id)}"
+                        }
+                    }
+                }
+            }
+
+            div { class: "actions",
+                button {
+                    class: if *player.queue_open.read() { "chip active" } else { "chip" },
+                    disabled: queue_length == 0,
+                    onclick: move |_| {
+                        full_open.set(false);
+                        let mut queue_open = player.queue_open;
+                        queue_open.set(true);
+                    },
+                    if queue_length > 0 { "queue {index + 1}/{queue_length}" } else { "queue" }
+                }
+                button {
+                    class: "chip nav-btn",
+                    onclick: move |_| {
+                        full_open.set(false);
+                        map.browse();
+                    },
+                    "on the map"
+                }
+            }
+
+            if let Some(message) = player.status.read().clone() {
+                p { class: "muted ellipsis", "{message}" }
             }
         }
     }
@@ -546,6 +787,17 @@ pub fn use_transport(player: Player) {
                             .set(Some("playback failed, the stream URL may have expired".into()));
                     }
                 }
+                // A mouse's side buttons and a keyboard's media keys both
+                // arrive as `previoustrack`/`nexttrack` MediaSession actions,
+                // not as clicks on the transport bar, see `player.js`.
+                // They mean "change track", which only the queue here
+                // knows how to do, so this is the one message type that
+                // does not just mirror the `<audio>` element's own state.
+                Some("transport") => match message.get("action").and_then(|v| v.as_str()) {
+                    Some("previous") => step(player, -1),
+                    Some("next") => step(player, 1),
+                    _ => {}
+                },
                 _ => {}
             }
         }

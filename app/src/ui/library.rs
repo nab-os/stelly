@@ -5,10 +5,13 @@
 
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
-use super::{Blocklist, Cover, LocalIds, Search, Selection, SpaceMatches, LIST_CAP, SEARCH_LIMIT};
+use super::{
+    artist_link, open_track, AlbumDetail, ArtistDetail, Blocklist, Cover, Detail, DetailSubject, LocalIds,
+    Search, Selection, SpaceMatches, SpaceReach, space_mark, LIST_CAP, SEARCH_LIMIT,
+};
 use dioxus::prelude::*;
 use crate::backend::backend;
-use crate::qobuz::RemoteTrack;
+use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 
 /// How many space rows the list opens with. Enough to fill the column on any
 /// screen; "show more" triples it.
@@ -22,8 +25,15 @@ pub enum View {
     FavouriteArtists,
     Playlists,
     Playlist { id: i64, name: String },
-    Album { id: String, title: String },
-    Artist { id: i64, name: String },
+    /// The full object, not just its id and title, carried over from
+    /// wherever this was reached (almost always the detail sheet, which
+    /// already had it in hand), so the page landed on can show the same
+    /// cover/badges/actions inline instead of just a bare tracklist under a
+    /// heading. See `LibraryPanel`'s `AlbumDetail` call.
+    Album(RemoteAlbum),
+    /// As `Album`: the full object, so the discography page can show it
+    /// inline the same way.
+    Artist(RemoteArtist),
 }
 
 impl View {
@@ -35,26 +45,28 @@ impl View {
             View::FavouriteArtists => "favourite artists".into(),
             View::Playlists => "your playlists".into(),
             View::Playlist { name, .. } => name.clone(),
-            View::Album { title, .. } => title.clone(),
-            View::Artist { name, .. } => name.clone(),
+            View::Album(album) => album.title.clone(),
+            View::Artist(artist) => artist.name.clone(),
         }
     }
 
-    /// The tab a view belongs to, so the right one stays lit while drilling in.
-    fn tab(&self) -> Tab {
-        match self {
-            View::Search(_) => Tab::Search,
-            View::Playlists | View::Playlist { .. } => Tab::Playlists,
-            _ => Tab::Library,
-        }
+    /// Whether the source row (tracks/albums/artists/playlists) should light
+    /// one of its chips up for this view, drilling into a specific album or
+    /// artist leaves none of them lit, the same as before this replaced a
+    /// separate "library" tab.
+    fn is_playlists(&self) -> bool {
+        matches!(self, View::Playlists | View::Playlist { .. })
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Search,
-    Library,
-    Playlists,
+/// How the two track sections, the space and Qobuz, render. Grid by
+/// default: a cover to recognise, the way albums and artists already worked.
+/// List is where the detail that does not fit a tile lives (duration, the
+/// "in your space" dot), for when that is what you are after.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TracksView {
+    Grid,
+    List,
 }
 
 /// Whatever the current view loaded. One struct rather than a per-view enum:
@@ -81,6 +93,18 @@ pub struct Library {
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
+    /// One switch for both track sections (the space's and Qobuz's), not one
+    /// each, they are the same kind of decision made twice, and a search
+    /// result shows both at once.
+    pub tracks_view: Signal<TracksView>,
+    /// Narrows a search to what is already favourited. Off by default: most
+    /// searches are for something new, not a re-check of what is already
+    /// kept.
+    pub liked_only: Signal<bool>,
+    /// The three favourited-id sets a search result is checked against, or
+    /// `None` before the first time `liked_only` turns on, the fetch that
+    /// fills this is not worth paying for a session that never asks.
+    liked: Signal<Option<Liked>>,
     /// Bumped by every `show`. A fetch carries the value it started with and
     /// discards its result if it no longer matches, because `pending` is a
     /// single slot but the tasks it spawns are not: two views asked for in
@@ -88,6 +112,17 @@ pub struct Library {
     /// and win. Latent while navigation was a click at a time; a search that
     /// fires as you type makes it routine.
     epoch: Signal<u64>,
+}
+
+/// The signed-in account's favourites, by id, fetched once and cached
+/// rather than asked per row: Qobuz has no "is this one favourited" lookup,
+/// only "list them all", so checking membership after one fetch is the whole
+/// of what is affordable.
+#[derive(Clone, Default)]
+pub(crate) struct Liked {
+    pub(crate) tracks: std::collections::HashSet<i64>,
+    pub(crate) albums: std::collections::HashSet<String>,
+    pub(crate) artists: std::collections::HashSet<i64>,
 }
 
 impl Library {
@@ -100,7 +135,103 @@ impl Library {
             history: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
+            tracks_view: Signal::new(TracksView::Grid),
+            liked_only: Signal::new(false),
+            liked: Signal::new(None),
             epoch: Signal::new(0),
+        }
+    }
+
+    /// Fetch the three favourited-id sets, once. Safe to call every time the
+    /// toggle turns on, the `is_some` guard means only the first call after
+    /// launch actually reaches the network.
+    pub(crate) fn ensure_liked_loaded(self) {
+        if self.liked.peek().is_some() {
+            return;
+        }
+        let mut liked = self.liked;
+        spawn(async move {
+            let (tracks, albums, artists) = tokio::join!(
+                backend().favourite_tracks(LIST_CAP),
+                backend().favourite_albums(LIST_CAP),
+                backend().favourite_artists(LIST_CAP),
+            );
+            liked.set(Some(Liked {
+                tracks: tracks
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|t| t.id)
+                    .collect(),
+                albums: albums
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|a| a.id.clone())
+                    .collect(),
+                artists: artists
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|a| a.id)
+                    .collect(),
+            }));
+        });
+    }
+
+    /// Whether the "liked" filter is on, and what to check against. Reading
+    /// both together is what lets `unwrap_or_default`'s empty sets do double
+    /// duty as "nothing is confirmed liked yet" while the fetch is still in
+    /// flight, rather than needing a separate loading state every caller has
+    /// to handle.
+    fn liked_state(&self) -> (bool, Liked) {
+        (*self.liked_only.read(), self.liked())
+    }
+
+    /// The favourited-id cache alone, regardless of whether the "liked"
+    /// search filter is itself switched on, for anything that wants to
+    /// know "is this one liked" rather than "should the shelf be narrowed to
+    /// liked things". The detail sheet's heart icon is the other reader;
+    /// both go through `ensure_liked_loaded` first, so whichever asks first
+    /// pays for the fetch and the other finds it already there.
+    pub(crate) fn liked(&self) -> Liked {
+        self.liked.read().clone().unwrap_or_default()
+    }
+
+    /// Flip one id's membership in the cached favourite sets, optimistically,
+    /// after a successful favourite add/remove, so the heart in the
+    /// detail sheet does not sit wrong until the next full reload. A no-op
+    /// before the cache has ever been loaded: there is no set to flip a
+    /// member of yet, and by the time one is loaded it will ask Qobuz fresh
+    /// rather than replay this.
+    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool) {
+        let mut signal = self.liked;
+        let mut current = signal.write();
+        let Some(current) = current.as_mut() else { return };
+        match kind {
+            "track" => {
+                if let Ok(track_id) = id.parse::<i64>() {
+                    if liked {
+                        current.tracks.insert(track_id);
+                    } else {
+                        current.tracks.remove(&track_id);
+                    }
+                }
+            }
+            "album" => {
+                if liked {
+                    current.albums.insert(id.to_string());
+                } else {
+                    current.albums.remove(id);
+                }
+            }
+            "artist" => {
+                if let Ok(artist_id) = id.parse::<i64>() {
+                    if liked {
+                        current.artists.insert(artist_id);
+                    } else {
+                        current.artists.remove(&artist_id);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -219,12 +350,12 @@ async fn load(view: View) -> anyhow::Result<Shelf> {
         View::FavouriteArtists => shelf.artists = backend().favourite_artists(LIST_CAP).await?,
         View::Playlists => shelf.playlists = backend().playlists(LIST_CAP).await?,
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
-        View::Album { id, .. } => shelf.tracks = backend().album_tracks(&id).await?,
-        View::Artist { id, .. } => {
-            shelf.albums = backend().artist_albums(id, LIST_CAP).await?;
+        View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
+        View::Artist(artist) => {
+            shelf.albums = backend().artist_albums(artist.id, LIST_CAP).await?;
             // Not fatal: an artist with no similar list should still show a
             // discography rather than an error.
-            shelf.similar = backend().similar_artists(id, 20).await.unwrap_or_default();
+            shelf.similar = backend().similar_artists(artist.id, 20).await.unwrap_or_default();
         }
     }
 
@@ -269,12 +400,18 @@ async fn fetch_into_catalog(kind: &str, id: &str) -> anyhow::Result<usize> {
 pub fn LibraryPanel() -> Element {
     let library = use_context::<Library>();
     let player = use_context::<Player>();
-    let search = use_context::<Search>();
 
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
-    let tab = view.tab();
+    let searching = matches!(view, View::Search(_));
+    // The space has no album or artist grouping of its own, it is a flat
+    // set of analysed tracks, so it only has anything to say for the two
+    // views that are about tracks. Showing it regardless of which chip was
+    // picked was the gap that made the source-row filter look like it only
+    // applied to the Qobuz half of the list.
+    let show_space = matches!(view, View::FavouriteTracks | View::Search(_));
     let shelf = library.shelf.read().clone();
+    let tracks_view = *library.tracks_view.read();
 
     // Every emptiness test below asks about what is *visible*: no heading over
     // nothing, and the bulk actions must not reach past the filter.
@@ -284,9 +421,28 @@ pub fn LibraryPanel() -> Element {
     // The whole shelf, for the bulk actions: "play all" means the view's
     // tracks, including ones the space section happens to be showing.
     let shelf_tracks = shelf.visible_tracks(&blocklist);
+    let (liked_only, liked) = library.liked_state();
     let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&space));
+    let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
+        tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
+    } else {
+        tracks
+    };
     let albums = shelf.visible_albums(&blocklist);
+    let albums: Vec<crate::qobuz::RemoteAlbum> = if liked_only {
+        albums.into_iter().filter(|a| liked.albums.contains(&a.id)).collect()
+    } else {
+        albums
+    };
     let artists = shelf.visible_artists(&blocklist, false);
+    let artists: Vec<crate::qobuz::RemoteArtist> = if liked_only {
+        artists.into_iter().filter(|a| liked.artists.contains(&a.id)).collect()
+    } else {
+        artists
+    };
+    // Similar artists are Qobuz's suggestion, not something to have already
+    // liked, filtering them by the same toggle would just empty a section
+    // whose entire point is showing you what you have not reached yet.
     let similar = shelf.visible_artists(&blocklist, true);
     let nothing_from_qobuz = tracks.is_empty()
         && albums.is_empty()
@@ -304,34 +460,37 @@ pub fn LibraryPanel() -> Element {
 
     rsx! {
         aside { class: "panel library",
-            // Named for what you are looking at, not for where the rows came
-            // from. "Qobuz" as a column heading was half of what made this
-            // feel like two rival lists; it survives below as a section badge,
-            // which is the honest scope for it.
-            h2 { class: "ellipsis", "{view.label()}" }
-
-            div { class: "tabs",
-                button {
-                    class: if tab == Tab::Search { "tab active" } else { "tab" },
-                    onclick: move |_| {
-                        let text = search.text.peek().trim().to_string();
-                        library.search_to(text);
-                    },
-                    "search"
+            // An album or an artist's own page shows the same cover, badges
+            // and actions the detail sheet does, ahead of its tracklist or
+            // discography below, rather than the sheet's content being
+            // dismissed on the way here and this page starting over with
+            // nothing but a bare heading over a list. `inline: true` is the
+            // one difference: it drops the sheet's own "View tracklist" /
+            // "View discography" button, which here would just reload the
+            // list already sitting right underneath it.
+            if let View::Album(album) = &view {
+                div { class: "library-detail",
+                    AlbumDetail { album: album.clone(), inline: true }
                 }
-                button {
-                    class: if tab == Tab::Library { "tab active" } else { "tab" },
-                    onclick: move |_| library.go(View::FavouriteTracks),
-                    "library"
+            } else if let View::Artist(artist) = &view {
+                div { class: "library-detail",
+                    ArtistDetail { artist: artist.clone(), inline: true }
                 }
-                button {
-                    class: if tab == Tab::Playlists { "tab active" } else { "tab" },
-                    onclick: move |_| library.go(View::Playlists),
-                    "playlists"
-                }
+            } else {
+                // Named for what you are looking at, not for where the rows
+                // came from. "Qobuz" as a column heading was half of what
+                // made this feel like two rival lists; it survives below as
+                // a section badge, which is the honest scope for it.
+                h2 { class: "ellipsis", "{view.label()}" }
             }
 
-            if tab == Tab::Library {
+            // What kind of thing you are browsing. Search used to be a tab
+            // here too, sharing a row with library/playlists; it is a header
+            // icon now (see `app.rs`'s `SearchBox`), so this row only ever
+            // has to say what four sources look like, not decide between
+            // finding something and browsing it. Hidden while a search is
+            // showing, since none of the four describes a result set.
+            if !searching {
                 div { class: "actions",
                     button {
                         class: if view == View::FavouriteTracks { "chip active" } else { "chip" },
@@ -347,6 +506,11 @@ pub fn LibraryPanel() -> Element {
                         class: if view == View::FavouriteArtists { "chip active" } else { "chip" },
                         onclick: move |_| library.go(View::FavouriteArtists),
                         "artists"
+                    }
+                    button {
+                        class: if view.is_playlists() { "chip active" } else { "chip" },
+                        onclick: move |_| library.go(View::Playlists),
+                        "playlists"
                     }
                 }
             }
@@ -382,6 +546,50 @@ pub fn LibraryPanel() -> Element {
                         "queue"
                     }
                 }
+                // A search asks the whole catalogue; this narrows the Qobuz
+                // half of the answer to what is already favourited. Only
+                // shown while searching, the tracks/albums/artists chips
+                // above already are the liked list the rest of the time, so
+                // a second "liked" filter on top of them would filter
+                // favourites by whether they are favourited.
+                if searching {
+                    button {
+                        class: if liked_only { "chip active" } else { "chip" },
+                        title: "only show what you've already liked",
+                        onclick: move |_| {
+                            let mut liked_only = library.liked_only;
+                            let now = liked_only();
+                            liked_only.set(!now);
+                            if !now {
+                                library.ensure_liked_loaded();
+                            }
+                        },
+                        "liked"
+                    }
+                }
+                // Grid by default, list for when the duration and the
+                // "in your space" dot are what you came for. One switch for
+                // both track sections below, see `Library::tracks_view`.
+                div { class: "view-toggle",
+                    button {
+                        class: if tracks_view == TracksView::Grid { "chip active" } else { "chip" },
+                        title: "grid",
+                        onclick: move |_| {
+                            let mut tracks_view = library.tracks_view;
+                            tracks_view.set(TracksView::Grid);
+                        },
+                        "▦"
+                    }
+                    button {
+                        class: if tracks_view == TracksView::List { "chip active" } else { "chip" },
+                        title: "list",
+                        onclick: move |_| {
+                            let mut tracks_view = library.tracks_view;
+                            tracks_view.set(TracksView::List);
+                        },
+                        "☰"
+                    }
+                }
             }
 
             if let Some(message) = library.notice.read().clone() {
@@ -396,17 +604,14 @@ pub fn LibraryPanel() -> Element {
                 div { class: "shelf",
                     // What you already have, first: it needs no round trip,
                     // it is what the space can actually navigate, and it is
-                    // usually what you were looking for.
-                    SpaceRows {}
-
-                    if !nothing_from_qobuz {
-                        h3 { class: "shelf-head source-head",
-                            "On Qobuz"
-                            span { class: "spacer" }
-                            if tracks.len() >= SEARCH_LIMIT {
-                                span { class: "muted", "first {SEARCH_LIMIT}" }
-                            }
-                        }
+                    // usually what you were looking for. Only for the views
+                    // "tracks" actually means, though, it used to show
+                    // regardless of whether Albums, Artists or Playlists was
+                    // the thing picked above, ignoring that filter entirely
+                    // and reading as a second list bolted onto the one the
+                    // chips claimed to control.
+                    if show_space {
+                        SpaceRows {}
                     }
 
                     if !artists.is_empty() {
@@ -429,8 +634,6 @@ pub fn LibraryPanel() -> Element {
                     }
                 }
             }
-
-            HiddenArtists {}
         }
     }
 }
@@ -468,8 +671,10 @@ fn qobuz_only(
 /// neighbour of the row you opened it on.
 #[component]
 fn SpaceRows() -> Element {
+    let library = use_context::<Library>();
     let matches = use_context::<SpaceMatches>().0;
-    let mut selection = use_context::<Selection>().0;
+    let selection = use_context::<Selection>().0;
+    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let search = use_context::<Search>();
 
@@ -479,6 +684,7 @@ fn SpaceRows() -> Element {
     let (rows, total) = matches();
     let searching = !search.text.read().trim().is_empty();
     let visible = shown().min(rows.len());
+    let grid = *library.tracks_view.read() == TracksView::Grid;
 
     if total == 0 {
         return rsx! {
@@ -498,18 +704,21 @@ fn SpaceRows() -> Element {
             }
         }
 
-        ul { class: "list",
+        ul { class: if grid { "tiles" } else { "list" },
             for row in rows.iter().take(visible) {
                 li {
                     key: "{row.track_id}",
-                    class: if selection.read().as_ref() == Some(&row.track_id) {
-                        "row selected"
-                    } else {
-                        "row"
+                    class: {
+                        let base = if grid { "tile" } else { "row" };
+                        if selection.read().as_ref() == Some(&row.track_id) {
+                            format!("{base} selected")
+                        } else {
+                            base.to_string()
+                        }
                     },
                     onclick: {
                         let id = row.track_id;
-                        move |_| selection.set(Some(id))
+                        move |_| open_track(selection, detail, id)
                     },
                     "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
                     oncontextmenu: {
@@ -522,9 +731,21 @@ fn SpaceRows() -> Element {
                     // The space stores no art, so this is derived from the
                     // album id. A guess that misses leaves the placeholder
                     // tint, which is why it is worth guessing at all.
-                    Cover { url: crate::qobuz::cover_url(&row.album_id), class: "thumb" }
-                    span { class: "artist", "{row.artist}" }
-                    span { class: "title", "{row.title}" }
+                    Cover {
+                        url: crate::qobuz::cover_url(&row.album_id),
+                        class: if grid { String::new() } else { "thumb".to_string() },
+                    }
+                    // Tiles read top-down as title-then-artist everywhere
+                    // else (albums, artists); rows read artist-then-title.
+                    // Grid mode follows the tile convention it just joined
+                    // rather than keeping the row order under a cover.
+                    if grid {
+                        span { class: "title", "{row.title}" }
+                        {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                    } else {
+                        {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                        span { class: "title", "{row.title}" }
+                    }
                     {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
                 }
             }
@@ -538,53 +759,6 @@ fn SpaceRows() -> Element {
                     shown.set(next);
                 },
                 "show more"
-            }
-        }
-    }
-}
-
-/// The block list, with a way out of it. Only rendered when something is
-/// hidden, so it stays out of the way until it is relevant.
-#[component]
-fn HiddenArtists() -> Element {
-    let blocklist = use_context::<Blocklist>();
-    let hidden = blocklist.artists.read().clone();
-
-    // Collapsed by default: this list grows without bound, 115 entries on a
-    // well-used corpus, and at a fixed height took a third of the column.
-    let mut open = use_signal(|| false);
-
-    if hidden.is_empty() {
-        return rsx! {};
-    }
-
-    rsx! {
-        div { class: if open() { "hidden-artists open" } else { "hidden-artists" },
-            h3 { class: "shelf-head",
-                "Hidden ({hidden.len()})"
-                span { class: "spacer" }
-                button {
-                    class: "chip",
-                    onclick: move |_| { let next = !open(); open.set(next); },
-                    if open() { "hide list" } else { "show" }
-                }
-            }
-            if open() {
-            ul { class: "list",
-                for entry in hidden {
-                    li { key: "{entry.artist_id}", class: "row",
-                        span { class: "title", "{entry.name}" }
-                        if let Some(reason) = entry.reason.clone() {
-                            span { class: "muted", "{reason}" }
-                        }
-                        button {
-                            class: "chip",
-                            onclick: move |_| blocklist.unblock.call(entry.artist_id),
-                            "unhide"
-                        }
-                    }
-                }
-            }
             }
         }
     }
@@ -630,6 +804,7 @@ fn TrackRows() -> Element {
     let player = use_context::<Player>();
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
+    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
 
     let matches = use_context::<SpaceMatches>();
@@ -640,19 +815,43 @@ fn TrackRows() -> Element {
     // that one is a real thing to want.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
     let tracks = qobuz_only(tracks, &space_ids(&matches));
+    let (liked_only, liked) = library.liked_state();
+    let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
+        tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
+    } else {
+        tracks
+    };
     let now_playing = player.current().map(|t| t.id);
+    let grid = *library.tracks_view.read() == TracksView::Grid;
+    let count = tracks.len();
 
     if tracks.is_empty() {
         return rsx! {};
     }
 
     rsx! {
-        h3 { class: "shelf-head", "Tracks" }
-        ul { class: "list",
+        h3 { class: "shelf-head",
+            "Tracks"
+            // Qobuz's own cap, not this shelf's, see `SEARCH_LIMIT` where
+            // the request is made. Worth saying so a short list here does
+            // not read as "the space has no more of these".
+            if count >= SEARCH_LIMIT {
+                span { class: "spacer" }
+                span { class: "muted", "first {SEARCH_LIMIT}" }
+            }
+        }
+        ul { class: if grid { "tiles" } else { "list" },
             for (index, track) in tracks {
                 li {
                     key: "{index}-{track.id}",
-                    class: if now_playing == Some(track.id) { "row playing" } else { "row" },
+                    class: {
+                        let base = if grid { "tile" } else { "row" };
+                        if now_playing == Some(track.id) {
+                            format!("{base} playing")
+                        } else {
+                            base.to_string()
+                        }
+                    },
                     // Single click plays: this is a player, and the queue is
                     // the list you clicked in.
                     onclick: move |_| {
@@ -666,19 +865,32 @@ fn TrackRows() -> Element {
                         event.prevent_default();
                         open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
                     },
-                    Cover { url: track.image.clone(), class: "thumb" }
-                    span { class: "artist", "{track.artist}" }
-                    span { class: "title", "{track.title}" }
-                    if !track.streamable {
-                        span { class: "muted tag", "-" }
+                    Cover {
+                        url: track.image.clone(),
+                        class: if grid { String::new() } else { "thumb".to_string() },
                     }
-                    if local.0.read().contains(&track.id) {
-                        // A mark, not a button: that this track is a point on
-                        // the map is something to know while scanning the
-                        // list, and the menu is where you act on it.
-                        span { class: "in-space-dot", title: "analysed, on the map", "•" }
+                    if grid {
+                        {space_mark(local.0.read().contains(&track.id))}
+                        // The detail row keeps the streamability tag, the
+                        // in-space dot and the duration; a tile is the cover
+                        // and just enough text to recognise it by.
+                        span { class: "title", "{track.title}" }
+                        {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                    } else {
+                        {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                        span { class: "title", "{track.title}" }
+                        if !track.streamable {
+                            span { class: "muted tag", "-" }
+                        }
+                        if local.0.read().contains(&track.id) {
+                            // A mark, not a button: that this track is a
+                            // point on the map is something to know while
+                            // scanning the list, and the menu is where you
+                            // act on it.
+                            span { class: "in-space-dot", title: "analysed, on the map", "•" }
+                        }
+                        span { class: "muted", "{track.duration_label()}" }
                     }
-                    span { class: "muted", "{track.duration_label()}" }
                     {menu_button(menu, MenuTarget::ShelfTrack(index))}
                 }
             }
@@ -690,29 +902,32 @@ fn TrackRows() -> Element {
 fn AlbumRows() -> Element {
     let library = use_context::<Library>();
     let blocklist = use_context::<Blocklist>();
+    let mut detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
-    let albums = library.shelf.read().visible_albums(&blocklist);
+    let reach = use_context::<SpaceReach>().0;
+    let (liked_only, liked) = library.liked_state();
+    // Enumerated before filtering, same as `qobuz_only`: `index` is this
+    // row's address into `visible_albums`, and filtering after numbering
+    // would point the menu at whatever slid into a dropped row's place.
+    let albums: Vec<(usize, crate::qobuz::RemoteAlbum)> = library
+        .shelf
+        .read()
+        .visible_albums(&blocklist)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
+        .collect();
 
     rsx! {
         h3 { class: "shelf-head", "Albums" }
         ul { class: "tiles",
-            for (index, album) in albums.into_iter().enumerate() {
+            for (index, album) in albums {
                 li {
                     key: "{index}-{album.id}",
                     class: "tile",
-                    onclick: move |_| {
-                        let target = library
-                            .shelf
-                            .peek()
-                            .visible_albums(&blocklist)
-                            .get(index)
-                            .map(|a| View::Album {
-                                id: a.id.clone(),
-                                title: a.title.clone(),
-                            });
-                        if let Some(target) = target {
-                            library.go(target);
-                        }
+                    onclick: {
+                        let album = album.clone();
+                        move |_| detail.set(Some(DetailSubject::Album(album.clone())))
                     },
                     "data-menu": MenuTarget::ShelfAlbum(index).tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
@@ -720,8 +935,9 @@ fn AlbumRows() -> Element {
                         open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
                     },
                     Cover { url: album.image.clone() }
+                    {space_mark(reach.read().0.contains(&album.id))}
                     span { class: "title", "{album.title}" }
-                    span { class: "artist", "{album.artist}" }
+                    {artist_link(detail, album.artist_id, album.artist.clone(), "artist")}
                     {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                 }
             }
@@ -733,29 +949,32 @@ fn AlbumRows() -> Element {
 fn ArtistRows(heading: String, similar: bool) -> Element {
     let library = use_context::<Library>();
     let blocklist = use_context::<Blocklist>();
+    let mut detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
-    let artists = library.shelf.read().visible_artists(&blocklist, similar);
+    let reach = use_context::<SpaceReach>().0;
+    let (liked_only, liked) = library.liked_state();
+    // Never for "similar artists": that section's entire point is showing
+    // who you have *not* already reached, so filtering it by what is already
+    // liked would just empty it.
+    let artists: Vec<(usize, crate::qobuz::RemoteArtist)> = library
+        .shelf
+        .read()
+        .visible_artists(&blocklist, similar)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, a)| similar || !liked_only || liked.artists.contains(&a.id))
+        .collect();
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
         ul { class: "tiles",
-            for (index, artist) in artists.into_iter().enumerate() {
+            for (index, artist) in artists {
                 li {
                     key: "{index}-{artist.id}",
                     class: "tile",
-                    onclick: move |_| {
-                        let target = library
-                            .shelf
-                            .peek()
-                            .visible_artists(&blocklist, similar)
-                            .get(index)
-                            .map(|a| View::Artist {
-                                id: a.id,
-                                name: a.name.clone(),
-                            });
-                        if let Some(target) = target {
-                            library.go(target);
-                        }
+                    onclick: {
+                        let artist = artist.clone();
+                        move |_| detail.set(Some(DetailSubject::Artist(artist.clone())))
                     },
                     "data-menu": MenuTarget::ShelfArtist { index, similar }.tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
@@ -763,6 +982,7 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                         open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar });
                     },
                     Cover { url: artist.image.clone(), class: "round" }
+                    {space_mark(reach.read().1.contains(&artist.id))}
                     span { class: "title", "{artist.name}" }
                     if let Some(count) = artist.albums_count {
                         span { class: "artist", "{count} albums" }

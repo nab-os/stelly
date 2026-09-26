@@ -66,6 +66,16 @@ impl Remote {
         if status == reqwest::StatusCode::FORBIDDEN {
             anyhow::bail!("this device is not paired for that ({status}): {message}");
         }
+        // A handler's own "not found" carries an `ApiError` body; an empty
+        // 404 is axum finding no route at all, a server built before the
+        // endpoint this client is asking for existed. Worth saying so, since
+        // the client and the server are deployed separately and drift.
+        if status == reqwest::StatusCode::NOT_FOUND && message.trim().is_empty() {
+            anyhow::bail!(
+                "the server does not have this feature yet (404), it is older than this \
+                 app; update it to use this"
+            );
+        }
         anyhow::bail!("server returned {status}: {message}")
     }
 
@@ -129,8 +139,14 @@ impl Remote {
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.get(&format!("/api/artists/{artist_id}/albums?cap={cap}"))
-            .await
+        let albums: Vec<RemoteAlbum> = self
+            .get(&format!("/api/artists/{artist_id}/albums?cap={cap}"))
+            .await?;
+        // Filtered here as well as in `QobuzClient::artist_albums`: the
+        // server and this app are deployed separately, and a server built
+        // before that filter still sends every album the artist is merely
+        // credited on. Idempotent against one that already filters.
+        Ok(crate::qobuz::own_releases(artist_id, albums))
     }
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
@@ -149,6 +165,24 @@ impl Remote {
             .get(&format!("/api/tracks/{track_id}/url?format={format_id}"))
             .await?;
         Ok(found.url)
+    }
+
+    pub async fn favorite_add(&self, kind: &str, id: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .post(&format!("/api/favourites/{kind}/{id}"), &serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn favorite_remove(&self, kind: &str, id: &str) -> Result<()> {
+        let response = self
+            .http
+            .delete(self.url(&format!("/api/favourites/{kind}/{id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        Self::check(response).await?;
+        Ok(())
     }
 
     pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {

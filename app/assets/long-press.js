@@ -8,6 +8,18 @@
 // platform's own selection UI has engaged, and Android's WebView swallows it
 // often enough not to rely on. So the gesture is detected here.
 //
+// WebKitGTK has the mirror-image bug on the mouse path: a right-click fires
+// `contextmenu` (which Rust's `oncontextmenu` handles, opening the menu) and
+// then *also* fires a plain `click` on the same row, targeting whatever was
+// under the pointer when the button went down, which is the row, not the
+// menu that has since opened on top of it. Rust's `onclick` for a row
+// selects the track, which for a track opens the detail sheet over the
+// menu that a moment ago opened correctly. From outside that reads as
+// "right-click opens the sheet instead of a menu", because the menu is
+// there for one frame and then immediately buried. The swallow-the-next-click
+// trick below already existed for long press; a `contextmenu` listener
+// arms the same flag for the mouse path.
+//
 // Delegated from the document and installed once: rows come and go constantly,
 // and a listener per row would be thousands of them. The send function is
 // swappable so a re-run replaces the channel instead of stacking a second
@@ -82,6 +94,22 @@
   // Capture: the scroll that cancels a press happens inside the list, and a
   // scroll event on a descendant does not bubble.
   document.addEventListener("scroll", cancel, { capture: true, passive: true });
+
+  // Arms the swallow for the mouse path, see the comment at the top of the
+  // file. Capture phase and no target check: whatever WebKit sends `click`
+  // to next is the thing to drop, on a row or not.
+  document.addEventListener(
+    "contextmenu",
+    () => {
+      swallowNextClick = true;
+      // In case WebKit does not follow this contextmenu with a click after
+      // all (behaviour that motivated this fix has not been seen on every
+      // platform build), so a flag armed here cannot outlive the gesture
+      // that set it and swallow an unrelated later click.
+      setTimeout(() => { swallowNextClick = false; }, 300);
+    },
+    { capture: true }
+  );
 
   document.addEventListener(
     "click",

@@ -50,6 +50,11 @@ pub fn router(state: AppState) -> Router {
         // ----------------------------------------------------------- hiding
         .route("/api/blocked", get(blocked).post(block))
         .route("/api/blocked/{id}", delete(unblock))
+        // ------------------------------------------------------- favourites
+        .route(
+            "/api/favourites/{kind}/{id}",
+            post(favorite_add).delete(favorite_remove),
+        )
         // ----------------------------------------------------------- counts
         .route("/api/corpus", get(corpus))
         // --------------------------------------------------------- crawling
@@ -303,6 +308,26 @@ async fn unblock(
     Path(id): Path<i64>,
 ) -> Reply<serde_json::Value> {
     state.hub.unblock_artist(id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Following an artist or liking a track/album is `play`, not `pipeline`: it
+/// changes the Qobuz account's own favourites, not this app's catalogue.
+async fn favorite_add(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Path((kind, id)): Path<(String, String)>,
+) -> Reply<serde_json::Value> {
+    state.hub.favorite_add(&kind, &id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn favorite_remove(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Path((kind, id)): Path<(String, String)>,
+) -> Reply<serde_json::Value> {
+    state.hub.favorite_remove(&kind, &id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

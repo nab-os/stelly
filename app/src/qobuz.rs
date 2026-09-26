@@ -38,6 +38,19 @@ pub struct RemoteTrack {
     /// track ids but one ISRC, which is what `identity` dedupes on.
     #[serde(default)]
     pub isrc: Option<String>,
+    /// The release this entry belongs to, not necessarily the track's own
+    /// field, see `parse`. Full date where Qobuz reports one, same shape
+    /// as `RemoteAlbum::released`.
+    #[serde(default)]
+    pub released: Option<String>,
+    /// Qobuz's own credit string, composer, lyricist, producer and so on,
+    /// each tagged with their role, semicolon-separated. Shown as reported
+    /// rather than reparsed into a struct: the exact grammar of this field is
+    /// not confirmed against a live response (see `parse`'s comment), so
+    /// trusting it only as far as "split on `;` and print" is the safe
+    /// failure mode if the assumption is wrong.
+    #[serde(default)]
+    pub performers: Option<String>,
 }
 
 impl RemoteTrack {
@@ -74,6 +87,10 @@ pub struct RemoteAlbum {
     pub tracks_count: Option<i64>,
     #[serde(default)]
     pub image: Option<String>,
+    /// crawl.rs has captured this into its own database column since the
+    /// crawler was written; `RemoteAlbum` itself never did.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -215,6 +232,17 @@ impl RemoteTrack {
             (None, _) => "Unknown Track".to_string(),
         };
 
+        // A track's own date, if Qobuz put one on it directly; otherwise the
+        // release it belongs to, nested or passed down, same order as the
+        // cover just above. Unlike the cover, this has no visual cost to
+        // getting slightly redundant when a track's own date does exist and
+        // happens to match, so the fallback chain is worth the full three
+        // steps.
+        let released = text(value, "release_date_original")
+            .or_else(|| text(value, "released_at"))
+            .or_else(|| text(&album, "release_date_original"))
+            .or_else(|| context.and_then(|parent| parent.released.clone()));
+
         Some(Self {
             id,
             title,
@@ -233,6 +261,10 @@ impl RemoteTrack {
                 .or_else(|| value.get("hires"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            released,
+            // Unconfirmed against a live response, see the field's doc
+            // comment on `RemoteTrack`.
+            performers: text(value, "performers"),
         })
     }
 
@@ -267,6 +299,11 @@ impl RemoteAlbum {
                 .map(|s| s.to_string()),
             tracks_count: as_i64(value, "tracks_count"),
             image: image(value),
+            label: value
+                .get("label")
+                .and_then(|l| l.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         })
     }
 
@@ -314,9 +351,52 @@ pub struct SearchResults {
     pub artists: Vec<RemoteArtist>,
 }
 
+/// Keep only the albums whose main artist is `artist_id`.
+///
+/// `artist/get?extra=albums` is every album the artist is *credited* on, and
+/// covers credit the original composer, so a much-covered band's
+/// "discography" comes back mostly other people's albums. Measured on Rage
+/// Against The Machine: 42 returned, 13 theirs, the rest cover albums named
+/// after their songs. An album whose artist Qobuz did not report is kept:
+/// nothing says it is someone else's.
+///
+/// Typed results only, the server's `artist_albums_raw` stays unfiltered
+/// for the crawler, where an album credited to the artist is still somewhere
+/// worth expanding the frontier to.
+pub fn own_releases(artist_id: i64, albums: Vec<RemoteAlbum>) -> Vec<RemoteAlbum> {
+    albums
+        .into_iter()
+        .filter(|album| album.artist_id.is_none_or(|id| id == artist_id))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn album(title: &str, artist_id: Option<i64>) -> RemoteAlbum {
+        RemoteAlbum {
+            title: title.into(),
+            artist_id,
+            ..Default::default()
+        }
+    }
+
+    /// The case that motivated `own_releases`: a cover album credits the
+    /// original band, so `artist/get` lists it under them.
+    #[test]
+    fn discography_drops_albums_by_other_artists() {
+        let kept = own_releases(
+            155699,
+            vec![
+                album("Evil Empire", Some(155699)),
+                album("Killing in the Name", Some(42)),
+                album("Untagged", None),
+            ],
+        );
+        let titles: Vec<_> = kept.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["Evil Empire", "Untagged"]);
+    }
 
     fn track(id: i64, isrc: Option<&str>) -> RemoteTrack {
         RemoteTrack {

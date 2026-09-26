@@ -18,13 +18,46 @@
 
   const PENDING = "[data-cover]:not([data-cover=''])";
 
+  // A screenful at a time still means every cover *within* that screenful
+  // fires its fetch in the same tick, which, for the grid views tiles
+  // switched to by default, is a couple of dozen requests competing for the
+  // handful of connections a browser keeps open per origin. Queuing behind a
+  // small cap means the ones actually on screen still win that contest,
+  // instead of racing evenly against ones that only happen to share their
+  // 200px margin.
+  const MAX_CONCURRENT = 6;
+  let active = 0;
+  const queue = [];
+
+  const settle = () => {
+    active--;
+    pump();
+  };
+
+  const pump = () => {
+    while (active < MAX_CONCURRENT && queue.length) {
+      const el = queue.shift();
+      const url = el.dataset.cover;
+      el.removeAttribute("data-cover");
+      if (!url) continue;
+      active++;
+      // A plain `Image()` first: setting `backgroundImage` directly gives no
+      // load/error event to queue behind, and preloading this way costs
+      // nothing extra, the real fetch happens once, and the CSS assignment
+      // below hits the browser's own cache.
+      const probe = new Image();
+      probe.onload = () => {
+        el.style.backgroundImage = `url('${url}')`;
+        settle();
+      };
+      probe.onerror = settle;
+      probe.src = url;
+    }
+  };
+
   const load = (el) => {
-    const url = el.dataset.cover;
-    if (!url) return;
-    el.style.backgroundImage = `url('${url}')`;
-    // Once promoted it must stop matching the selector, or every rescan
-    // walks every cover ever loaded.
-    el.removeAttribute("data-cover");
+    queue.push(el);
+    pump();
   };
 
   const observer = new IntersectionObserver(

@@ -6,7 +6,7 @@
 
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{clear_queue, move_to, play_at, Player};
-use super::Cover;
+use super::{artist_link, Cover, Detail};
 use crate::engine;
 use crate::qobuz::RemoteTrack;
 use dioxus::prelude::*;
@@ -73,6 +73,7 @@ pub fn QueueView() -> Element {
     let player = use_context::<Player>();
     let mut queue_open = player.queue_open;
     let mut menu = use_context::<ContextMenu>().0;
+    let detail = use_context::<Detail>().0;
 
     // Long-lived: this component stays mounted whether or not the drawer is
     // open, so the channel outlives any one drag. The script delegates from
@@ -136,7 +137,7 @@ pub fn QueueView() -> Element {
                                     open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));
                                 },
                                 Cover { url: track.image.clone(), class: "thumb" }
-                                span { class: "artist", "{track.artist}" }
+                                {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
                                 span { class: "title", "{track.title}" }
                                 span { class: "muted", "{track.duration_label()}" }
                                 // The drag handle. Only this has
