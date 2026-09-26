@@ -60,8 +60,8 @@ pub struct Shelf {
     pub albums: Vec<crate::qobuz::RemoteAlbum>,
     pub artists: Vec<crate::qobuz::RemoteArtist>,
     pub playlists: Vec<crate::qobuz::RemotePlaylist>,
-    /// Shown under an artist: the same hop the Python crawler takes when it
-    /// expands the frontier, so you can see where analysis would go next.
+    /// Shown under an artist: the same hop the crawl takes when it expands
+    /// the frontier, so you can see where analysis would go next.
     pub similar: Vec<crate::qobuz::RemoteArtist>,
 }
 
@@ -148,7 +148,7 @@ impl Default for Library {
 }
 
 /// First load, so the app shell does not have to reach into navigation.
-/// Favourites, because that is also what the Python crawl seeds from.
+/// Favourites, because that is also what the crawl seeds from.
 pub fn open_initial(library: Library) {
     library.show(View::FavouriteTracks);
 }
@@ -199,7 +199,7 @@ fn request_analysis(library: Library, kind: &str, id: &str, label: &str) {
             Ok(count) => {
                 let what = if kind == "artist" { "albums queued" } else { "tracks" };
                 library.notice.set(Some(format!(
-                    "{label}: {count} {what}. Run `uv run two-khz analyse` to extract features."
+                    "{label}: {count} {what}. Run analyse from the pipeline view to extract features."
                 )));
             }
             Err(err) => library.notice.set(Some(format!("{err:#}"))),

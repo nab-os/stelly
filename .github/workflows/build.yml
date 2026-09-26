@@ -91,16 +91,15 @@ jobs:
             --cargo-args="--locked" \
             --out-dir "$GITHUB_WORKSPACE/staging"
 
-      # the headless half: server + crawler, no GTK, no webkit
+      # the server: API, crawl and the whole pipeline, no GTK, no webkit
       #
-      # `--no-default-features --features local` is what keeps dioxus, wry and
-      # GTK out of this build entirely; the app binary is skipped because its
-      # required-features include `gui`.
-      - name: Build the server and headless tools
-        run: |
-          cargo build --release --locked --manifest-path app/Cargo.toml \
-            --no-default-features --features local --bins
-          cargo build --release --locked --manifest-path server/Cargo.toml
+      # It takes the app crate with default features off, which is what keeps
+      # dioxus, wry and GTK out of this build entirely.
+      - name: Build the server
+        run: cargo build --release --locked --manifest-path server/Cargo.toml
+
+      - name: Test the server
+        run: cargo test --release --locked --manifest-path server/Cargo.toml
 
       # dx leaves Depends and Maintainer blank; finish-deb.sh fills them in,
       # computing Depends with dpkg-shlibdeps against this runner's release.
@@ -120,8 +119,6 @@ jobs:
           mkdir -p "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/two-khz" \
                    "$R/usr/share/doc/two-khz-server"
           install -m755 server/target/release/two-khz-server "$R/usr/bin/two-khz-server"
-          install -m755 app/target/release/crawl             "$R/usr/bin/two-khz-crawl"
-          install -m755 app/target/release/parity            "$R/usr/bin/two-khz-parity"
           install -m644 schema.sql "$R/usr/share/two-khz/schema.sql"
           install -m644 README.md  "$R/usr/share/doc/two-khz-server/README.md"
           sed -e "s/@VERSION@/${{ steps.v.outputs.version }}/" \
@@ -132,10 +129,10 @@ jobs:
           Section: sound
           Priority: optional
           Homepage: https://github.com/nab-os/2kHz
-          Description: Headless half of 2kHz: API server, crawler and pipeline runner
-           Owns the Qobuz credentials, the SQLite corpus, the pipeline stages and
-           the CLAP text tower, and serves them to 2kHz clients over HTTP. No GUI:
-           this package deliberately links neither GTK nor webkit.
+          Description: 2kHz server: API, crawler and analysis pipeline
+           Owns the Qobuz credentials, the SQLite corpus, the CLAP models and every
+           pipeline stage, and serves them to 2kHz clients over HTTP. No GUI: this
+           package deliberately links neither GTK nor webkit.
           EOF
           .github/scripts/finish-deb.sh "$R" \
             "dist/two-khz-server_${{ steps.v.outputs.version }}_amd64.${{ steps.v.outputs.suffix }}.deb" \
@@ -155,8 +152,6 @@ jobs:
 
           mkdir -p "$T/two-khz-server-$V"
           cp server/target/release/two-khz-server "$T/two-khz-server-$V/"
-          cp app/target/release/crawl  "$T/two-khz-server-$V/two-khz-crawl"
-          cp app/target/release/parity "$T/two-khz-server-$V/two-khz-parity"
           cp schema.sql README.md "$T/two-khz-server-$V/"
           tar -C "$T" -czf "dist/two-khz-server_${V}_${S}.tar.gz" "two-khz-server-$V"
 
@@ -417,8 +412,8 @@ jobs:
           context: .
           target: server
           platforms: linux/amd64
-          # essentia-tensorflow pins the pipeline target to x86_64, and a
-          # second arch here would only build under emulation.
+          # A second arch here would only build under emulation, which for
+          # ort and the bundled SQLite is most of an hour.
           push: ${{ github.ref_type == 'tag' }}
           load: ${{ github.ref_type != 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -443,54 +438,6 @@ jobs:
           fi
           echo "testing $IMAGE"
           docker run --rm "$IMAGE" devices
-
-  # ------------------------------------------------- docker (the big one)
-  #
-  # Tags only, and GHCR only. Several GB once `extract` drags in torch and
-  # essentia-tensorflow, which is more than Docker Hub is a good home for.
-  # If the runner ever fills its disk, drop in jlumbroso/free-disk-space
-  # before the build rather than trimming the extras.
-  docker-pipeline:
-    name: docker (pipeline)
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    env:
-      DOCKER_BUILD_RECORD_UPLOAD: false
-
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/two-khz-server
-          # Suffixed rather than a separate repository, so `docker pull
-          # …:pipeline` sits next to the slim tags instead of hiding.
-          tags: |
-            type=ref,event=tag,suffix=-pipeline
-            type=semver,pattern={{version}},suffix=-pipeline
-            type=raw,value=pipeline
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: pipeline
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   # -------------------------------------------------------------- release
   release:

@@ -24,7 +24,7 @@ icon = [
 category = "Music"
 short_description = "Browse a Qobuz library as a space you can walk through"
 long_description = """
-2kHz analyses a music library with Essentia and CLAP, lays the result out with
+2kHz analyses a music library with CLAP, lays the result out with
 UMAP, and lets you navigate the space directly: nearest neighbours, a radio
 walk, a path between two tracks, or a slow drift. Weights are applied at query
 time, so the sliders are live.

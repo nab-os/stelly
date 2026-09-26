@@ -1,7 +1,6 @@
 //! The API.
 //!
-//! Thin on purpose: every handler is a scope check and a call into
-//! `two_khz::backend::Local`, the same type the desktop app uses locally.
+//! Thin on purpose: every handler is a scope check and a call into `Hub`.
 //! There must never be a second implementation here.
 //!
 //! Bounded gestures are `play`, unbounded jobs are `pipeline`.
@@ -124,7 +123,7 @@ async fn search(
     _: PlayAuth,
     Query(query): Query<SearchQuery>,
 ) -> Reply<SearchResults> {
-    Ok(Json(state.local.search(&query.q, query.limit).await?))
+    Ok(Json(state.hub.search(&query.q, query.limit).await?))
 }
 
 async fn favourite_tracks(
@@ -132,7 +131,7 @@ async fn favourite_tracks(
     _: PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteTrack>> {
-    Ok(Json(state.local.favourite_tracks(query.cap).await?))
+    Ok(Json(state.hub.favourite_tracks(query.cap).await?))
 }
 
 async fn favourite_albums(
@@ -140,7 +139,7 @@ async fn favourite_albums(
     _: PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteAlbum>> {
-    Ok(Json(state.local.favourite_albums(query.cap).await?))
+    Ok(Json(state.hub.favourite_albums(query.cap).await?))
 }
 
 async fn favourite_artists(
@@ -148,7 +147,7 @@ async fn favourite_artists(
     _: PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteArtist>> {
-    Ok(Json(state.local.favourite_artists(query.cap).await?))
+    Ok(Json(state.hub.favourite_artists(query.cap).await?))
 }
 
 async fn playlists(
@@ -156,7 +155,7 @@ async fn playlists(
     _: PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemotePlaylist>> {
-    Ok(Json(state.local.playlists(query.cap).await?))
+    Ok(Json(state.hub.playlists(query.cap).await?))
 }
 
 async fn playlist_tracks(
@@ -165,7 +164,7 @@ async fn playlist_tracks(
     Path(id): Path<i64>,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteTrack>> {
-    Ok(Json(state.local.playlist_tracks(id, query.cap).await?))
+    Ok(Json(state.hub.playlist_tracks(id, query.cap).await?))
 }
 
 async fn album_tracks(
@@ -173,7 +172,7 @@ async fn album_tracks(
     _: PlayAuth,
     Path(id): Path<String>,
 ) -> Reply<Vec<RemoteTrack>> {
-    Ok(Json(state.local.album_tracks(&id).await?))
+    Ok(Json(state.hub.album_tracks(&id).await?))
 }
 
 async fn artist_albums(
@@ -182,7 +181,7 @@ async fn artist_albums(
     Path(id): Path<i64>,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteAlbum>> {
-    Ok(Json(state.local.artist_albums(id, query.cap).await?))
+    Ok(Json(state.hub.artist_albums(id, query.cap).await?))
 }
 
 async fn similar_artists(
@@ -191,7 +190,7 @@ async fn similar_artists(
     Path(id): Path<i64>,
     Query(query): Query<LimitQuery>,
 ) -> Reply<Vec<RemoteArtist>> {
-    Ok(Json(state.local.similar_artists(id, query.limit).await?))
+    Ok(Json(state.hub.similar_artists(id, query.limit).await?))
 }
 
 // ----------------------------------------------------------------- playback
@@ -211,7 +210,7 @@ async fn file_url(
     Query(query): Query<FormatQuery>,
 ) -> Reply<StreamUrl> {
     Ok(Json(StreamUrl {
-        url: state.local.file_url(id, query.format).await?,
+        url: state.hub.file_url(id, query.format).await?,
     }))
 }
 
@@ -233,7 +232,7 @@ async fn export_playlist(
 ) -> Reply<Created> {
     Ok(Json(Created {
         id: state
-            .local
+            .hub
             .export_playlist(&body.name, &body.track_ids)
             .await?,
     }))
@@ -264,20 +263,20 @@ async fn embed(
     Json(body): Json<EmbedBody>,
 ) -> Reply<Embedding> {
     Ok(Json(Embedding {
-        embedding: state.local.embed(&body.phrase).await?,
+        embedding: state.hub.embed(&body.phrase).await?,
     }))
 }
 
 async fn embed_available(State(state): State<AppState>, _: PlayAuth) -> Reply<Steering> {
     Ok(Json(Steering {
-        available: state.local.can_steer().await.unwrap_or(false),
+        available: state.hub.can_steer().await.unwrap_or(false),
     }))
 }
 
 // ------------------------------------------------------------------- hiding
 
 async fn blocked(State(state): State<AppState>, _: PlayAuth) -> Reply<Vec<BlockedArtist>> {
-    Ok(Json(state.local.blocked_artists().await?))
+    Ok(Json(state.hub.blocked_artists().await?))
 }
 
 #[derive(Deserialize)]
@@ -294,7 +293,7 @@ async fn block(
     _: PlayAuth,
     Json(body): Json<BlockBody>,
 ) -> Reply<serde_json::Value> {
-    state.local.block_artist(body.artist_id, &body.name).await?;
+    state.hub.block_artist(body.artist_id, &body.name).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -303,7 +302,7 @@ async fn unblock(
     _: PlayAuth,
     Path(id): Path<i64>,
 ) -> Reply<serde_json::Value> {
-    state.local.unblock_artist(id).await?;
+    state.hub.unblock_artist(id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -321,7 +320,7 @@ async fn fetch_album(
     Path(id): Path<String>,
 ) -> Reply<Fetched> {
     Ok(Json(Fetched {
-        count: state.local.fetch_album(&id).await?,
+        count: state.hub.fetch_album(&id).await?,
     }))
 }
 
@@ -331,18 +330,18 @@ async fn fetch_artist(
     Path(id): Path<i64>,
 ) -> Reply<Fetched> {
     Ok(Json(Fetched {
-        count: state.local.fetch_artist(id).await?,
+        count: state.hub.fetch_artist(id).await?,
     }))
 }
 
 async fn corpus(State(state): State<AppState>, _: PlayAuth) -> Reply<Corpus> {
-    Ok(Json(state.local.corpus().await?))
+    Ok(Json(state.hub.corpus().await?))
 }
 
 // ----------------------------------------------------------------- crawling
 
 async fn crawl_status(State(state): State<AppState>, _: PlayAuth) -> Reply<CrawlStatus> {
-    Ok(Json(state.local.crawl_status().await?))
+    Ok(Json(state.hub.crawl_status().await?))
 }
 
 #[derive(Deserialize)]
@@ -352,7 +351,7 @@ struct CrawlBody {
 }
 
 fn default_distance() -> i64 {
-    two_khz::crawl::DEFAULT_MAX_DISTANCE
+    two_khz::api::DEFAULT_MAX_DISTANCE
 }
 
 /// Unbounded, so `pipeline`: this runs until the frontier empties.
@@ -361,19 +360,19 @@ async fn crawl_start(
     _: PipelineAuth,
     Json(body): Json<CrawlBody>,
 ) -> Reply<serde_json::Value> {
-    state.local.crawl_start(body.max_distance).await?;
+    state.hub.crawl_start(body.max_distance).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn crawl_stop(State(state): State<AppState>, _: PipelineAuth) -> Reply<serde_json::Value> {
-    state.local.crawl_stop().await?;
+    state.hub.crawl_stop().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ----------------------------------------------------------------- pipeline
 
 async fn pipeline_status(State(state): State<AppState>, _: PlayAuth) -> Reply<PipelineStatus> {
-    Ok(Json(state.local.pipeline_status().await?))
+    Ok(Json(state.hub.pipeline_status().await?))
 }
 
 #[derive(Deserialize)]
@@ -386,7 +385,7 @@ async fn pipeline_start(
     _: PipelineAuth,
     Json(body): Json<StageBody>,
 ) -> Reply<serde_json::Value> {
-    state.local.pipeline_start(body.stage).await?;
+    state.hub.pipeline_start(body.stage).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -394,12 +393,12 @@ async fn pipeline_start_full(
     State(state): State<AppState>,
     _: PipelineAuth,
 ) -> Reply<serde_json::Value> {
-    state.local.pipeline_start_full().await?;
+    state.hub.pipeline_start_full().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn pipeline_stop(State(state): State<AppState>, _: PipelineAuth) -> Reply<serde_json::Value> {
-    state.local.pipeline_stop().await?;
+    state.hub.pipeline_stop().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -410,12 +409,12 @@ async fn pipeline_stop(State(state): State<AppState>, _: PipelineAuth) -> Reply<
 /// connecting client gets the retained buffer first.
 async fn pipeline_log(State(state): State<AppState>, _: PlayAuth) -> impl IntoResponse {
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(256);
-    let local = state.local.clone();
+    let hub = state.hub.clone();
 
     tokio::spawn(async move {
         let mut cursor = 0u64;
         loop {
-            let Ok(slice) = local.pipeline_log_since(cursor).await else {
+            let Ok(slice) = hub.pipeline_log_since(cursor).await else {
                 return;
             };
             for line in slice.lines {
@@ -457,7 +456,7 @@ async fn sync_manifest(State(state): State<AppState>, _: PlayAuth) -> Reply<Sync
     }
 
     Ok(Json(SyncManifest {
-        generation: state.local.pipeline_status().await?.generation,
+        generation: state.hub.pipeline_status().await?.generation,
         files,
     }))
 }

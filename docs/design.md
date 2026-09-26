@@ -12,23 +12,48 @@ been frozen since Jul 2022. So the acoustic half of every vector is computed
 from the audio itself, which a Qobuz subscription makes possible via
 `track/getFileUrl`.
 
-## Extract once, extract generously
+## Extract once, keep what cannot be recomputed
 
-Audio excerpts are discarded after analysis, so the first pass stores
-everything: raw descriptors, the full 512-d CLAP embedding, the 400 style
-activations, and the 1280-d EffNet embedding. Any future classification head can
-be run later without re-downloading anything. Rebuilding the space after a
-weight change costs seconds and zero network.
+Audio excerpts are disposable, so analysis stores what would cost a download
+to get back: the descriptors and the full 512-d CLAP embedding. Everything else
+is derived at `build-space` time, which costs seconds and no network, the
+mood and style blocks included, since they are computed from the stored
+embedding (see below). Changing a label, a weight or the PCA is a rebuild,
+never a re-analysis.
 
-## Why crawling moved to Rust
+## One binary, client and server
 
-It is pure HTTP and SQLite (no Essentia, no numpy) and this way the app can
-extend the catalogue itself instead of queueing a row and waiting for a CLI run.
-`crawl.py` still works and writes the same tables; either can resume what the
-other started.
+Everything that is not the screen is `two-khz-server`: the Qobuz client and
+its credentials, the SQLite corpus, the crawl, `analyse`, `build-space`,
+`layout`, the CLAP models. The desktop and Android apps are both clients of it
+and hold nothing but a synced copy of the space and the slim catalogue. There
+is no local mode; a desktop user runs the server on the same machine and
+pairs with it like any other device.
 
-Python keeps what only Python can do: Essentia's descriptors and classifier
-heads, CLAP, and UMAP.
+The pipeline used to be Python, Essentia's descriptors and EffNet heads, CLAP
+under torch, UMAP, driven as `uv run` subprocesses. It was ported so that
+deploying meant one binary instead of a multi-GB x86-only image with its own
+Python, torch, TensorFlow and ffmpeg. The port made three substitutions:
+
+- **CLAP runs in ONNX Runtime.** Xenova's export of the same checkpoint, pinned
+  by revision and checked by hash on download. The Rust mel front end matches
+  transformers' `ClapFeatureExtractor` to within 0.01 dB, and the embedding's
+  cosine to the torch model's is above 0.9999.
+- **Essentia is gone entirely.** Its mood and style classifiers are replaced by
+  zero-shot scores against CLAP's text tower; its classical descriptors by
+  plain signal processing (`pipeline/descriptors.rs`), EBU R128 loudness, a
+  spectral-flux onset envelope for tempo and onset rate, chroma against
+  Krumhansl-Kessler profiles for key.
+- **UMAP is a port** of the parts of umap-learn the map needs: cosine kNN,
+  fuzzy union, the same curve fit and epoch sampling, PCA rather than spectral
+  initialisation. Deterministic.
+
+What the zero-shot labels cost: Essentia's heads were trained classifiers, and
+a similarity to "sad, melancholic music" is noisier than one. The mood and
+style blocks are also now linear views of the same embedding the semantic
+block holds, so they reweight what CLAP heard rather than adding an
+independent opinion. What they buy: no second model, no second front end,
+labels that are plain text in `pipeline/labels.rs`, and a permissive licence.
 
 ## The space
 
@@ -36,10 +61,10 @@ heads, CLAP, and UMAP.
 |---|---|---|
 | tempo | 2 | folded `log2(bpm)`, onset rate |
 | key | 3 | circle-of-fifths position, scaled by detection strength |
-| dynamics | 3 | loudness, dynamic complexity, loudness range |
+| dynamics | 3 | integrated loudness, dynamic complexity, loudness range |
 | timbre | 4 | spectral centroid, rolloff, flatness, zero-crossing rate |
-| mood | 8 | danceability, happy/sad/aggressive/relaxed/party, approachability, engagement |
-| style | 20 | 400 Discogs style activations → PCA |
+| mood | 8 | CLAP contrasts: energy, valence, aggression, danceability, darkness, acoustic, vocals, complexity |
+| style | 20 | CLAP similarity to 60 style phrases → PCA |
 | era | 1 | release year |
 | semantic | 40 | CLAP audio embedding → PCA |
 
@@ -49,45 +74,51 @@ descriptor swamping its neighbours, and row normalisation stops the 40-d
 semantic block silently dominating the 2-d tempo block regardless of any weight
 you set.
 
-Weights are applied in Rust at query time, which is what makes the sliders live.
+Weights are applied by the client at query time, which is what makes the
+sliders live.
 
-Two decisions worth knowing about:
+Decisions worth knowing about:
 
 - **Tempo is folded into one octave.** Drum & bass detected at 86 instead of 172
-  is a well-known Essentia failure. Folding makes the metric immune to it rather
-  than patching it per genre. Raw BPM is still stored for display.
-- **`approachability` and `engagement` stand in for arousal/valence.** Essentia's
-  emomusic head has no Discogs-EffNet variant, and using its musicnn version
-  would force a second embedding pass per track.
+  is the classic beat-tracker failure. Folding makes the metric immune to it
+  rather than patching it per genre. Raw BPM is still stored for display.
+- **A mood is a contrast, not a similarity.** Each is scored as similarity to
+  one phrase minus similarity to its opposite ("energetic, intense music" against
+  "calm, gentle music"). Raw similarity to a single mood phrase mostly measures
+  how much a track sounds like music at all.
 
 **Checkpoint choice.** `laion/clap-htsat-unfused`, deliberately not
 `laion/larger_clap_music`, the latter's text tower returns near-constant
-embeddings (mean pairwise cosine ≈ 0.999), which would destroy text steering.
+embeddings (mean pairwise cosine ≈ 0.999), which would destroy text steering
+and, now, every mood and style score with it.
 
 ## How fast `analyse` goes
 
-Extraction costs about **19 core-seconds per track** (Essentia 7.8, CLAP 10.8),
-so it is worth spreading over the machine. `analyse` runs two pools: excerpt
-fetching on threads in the main process, sharing the one rate-limited client,
-and extraction in worker processes, because Essentia holds a TensorFlow session
-and CLAP a torch model and neither likes being driven from several threads.
-Only the main process writes to SQLite.
+One 90s excerpt costs about **1.3 core-seconds**: CLAP 0.84s, resampling to
+48kHz 0.41s, the descriptors 0.09s (Ryzen 9 9950X3D, one thread). The Python
+pipeline paid about 19. Giving one ONNX session four threads only brings it to
+0.9s wall, so `analyse` runs several single-threaded workers instead, one per
+four hardware threads, at most four by default, each with its own session,
+fed excerpts fetched on the stage's own thread through the one rate-limited
+client. Only that thread writes to SQLite. A worker holds about 600MB, so four
+is ~2.5GB.
 
 ```sh
-uv run two-khz analyse                        # one worker per 4 hardware threads
-uv run two-khz analyse --workers 12           # override
-uv run two-khz analyse --download-workers 16  # if fetching is the laggard
+two-khz-server analyse                 # one worker per 4 hardware threads, up to 4
+two-khz-server analyse --workers 12    # override, e.g. re-analysing from the cache
+two-khz-server analyse --fetchers 16   # if fetching is the laggard
 ```
 
-Measured on a 32-thread Ryzen 9 9950X3D: **900 → 4,700 tracks/hour**. Past that
-the workers start competing with ffmpeg for cores, so more is not better, 8
-workers beat 12 and 16 in the full pipeline even though 12 wins on extraction
-alone. The ceiling above all of this is Qobuz's rate limit, ~7,200 tracks/hour
-at the default 2 req/s, which is why throwing a cloud at the problem buys very
-little.
+The ceiling is Qobuz's rate limit, not the CPU: one signed URL per track at the
+default 2 req/s is ~7,200 tracks/hour, and three workers already keep up with
+it, measured at ~2 tracks/s from a warm cache with four. The excerpt itself
+comes from the CDN and does not count against the account.
 
-**Analysis uses MP3 320, not FLAC.** Roughly 10× less bandwidth, and both
-Essentia and CLAP resample to 16 to 48 kHz anyway. FLAC is reserved for listening.
+**Analysis uses MP3 320, not FLAC.** Roughly 10× less bandwidth, and CLAP
+resamples to 48kHz anyway. It is also a constant bitrate, which is what makes
+"the middle 90 seconds" a byte range: the analyser requests just that slice,
+finds the first frame boundary itself, and decodes it with symphonia, no
+ffmpeg, and about 3.6MB per track. FLAC is reserved for listening.
 
 ## Crawl ordering
 
@@ -114,35 +145,32 @@ that same window measurably does nothing at any strength.
 
 ## Stopping a stage
 
-**Stop** takes effect within about 200ms, even mid-`layout` when UMAP has been
-silent for minutes, and it signals the stage's whole process group, `uv run`
-spawns the CLI, which spawns its own analysis workers, and killing only the
-first would leave the real work running.
-
-Closing the app does the same, so a locally started stage never outlives the
-window. The exception is SIGKILL, which runs no cleanup anywhere; the stage
-usually still dies when the app's pipes close, but that is luck rather than
-design.
-
-A stage started from a *client* deliberately does outlive it, that is the point
-of starting `analyse` from a phone and walking away.
+Stages run inside the server, each on a thread of its own. **Stop** sets a flag
+the stage checks as it goes: `analyse` between tracks, letting the excerpts
+already in a worker finish (about a second each); `layout` every 25 epochs;
+`build-space` is seconds anyway. A stage started from a client deliberately
+outlives it, that is the point of starting `analyse` from a phone and walking
+away. It does not outlive the server: stopping the server stops the stage, and
+everything stored so far stays stored.
 
 ## Testing
 
 ```sh
-cd pipeline
-uv run python scripts/smoke_test.py    # synthetic corpus, end to end
-uv run python scripts/parity_test.py   # Rust vs Python, exact comparison
+cd server
+cargo test                                         # unit tests, no network
+cargo test --release -- --ignored smoke            # the demo corpus, end to end
 ```
 
-Neither needs Qobuz credentials: both synthesise audio with known properties and
-check the space recovers it.
+Neither needs Qobuz credentials. The smoke test synthesises eight albums with
+known character (beatless drones, 174 BPM breaks, a bright pop pulse) runs
+them through the real analyser, space and layout, and checks tracks from one
+album land together (30 of 32 are each other's nearest neighbour) and that
+tempo comes out where it was put. It fetches the CLAP weights on first run.
 
-The parity test matters more than it looks. The Python path functions are the
-oracle the space was validated against; the Rust port is what users actually
-drive. It has already caught one real bug, the two sides were building
-waypoints from differently scaled vectors, which silently produced different
-drift paths.
+Two more ignored tests need something from outside: `front_end_matches_transformers`
+compares the mel front end and the embedding against reference files written by
+transformers, and `excerpt_from_the_middle_of_a_served_file` runs the byte-range
+fetch against a real MP3 (`TWO_KHZ_MP3_SAMPLE`).
 
 ## Not yet verified
 
@@ -183,8 +211,8 @@ of work on the data layer, not an afternoon of cfg attributes.
 
 ## Licensing
 
-Essentia's pretrained weights are CC BY-NC-SA 4.0, fine personally, blocking
-for anything commercial. CLAP is the permissive one.
+The CLAP checkpoint is Apache-2.0. With Essentia's CC BY-NC-SA 4.0 weights
+gone, nothing in the pipeline restricts commercial use any more.
 
 ## Packaging
 
@@ -194,11 +222,11 @@ own webkit and glibc, a 24.04 build is not safe to hand to a 26.04 machine.
 October to November 2026, which would quietly collapse the matrix into two
 identical legs.
 
-The desktop and server packages are separate because the headless build is
-`--no-default-features --features local`, which keeps dioxus, wry and GTK out of
-it entirely: the desktop `.deb` depends on twelve libraries including webkit,
-the server `.deb` on three. A server box should not be made to install a
-browser engine.
+The desktop and server packages are separate because the server takes the app
+crate with default features off, which keeps dioxus, wry and GTK out of it
+entirely: the desktop `.deb` depends on twelve libraries including webkit, the
+server `.deb` on three. A server box should not be made to install a browser
+engine.
 
 Dependencies are computed by `dpkg-shlibdeps` on the release being built for
 rather than hardcoded, because 24.04's 64-bit `time_t` transition renamed

@@ -1,26 +1,21 @@
-//! Core of 2kHz.
+//! Core of the 2kHz client.
 //!
-//! Reads what the Python pipeline produces, `two_khz.db`, `space.bin`,
-//! `space.json`, and answers navigation queries in process.
+//! Holds a synced copy of what the server builds, `space.bin`, `space.json`,
+//! the slim `catalog.db`, and answers navigation queries in process. Every
+//! thing else, Qobuz included, goes through the server: see `backend`.
 //!
-//! Shared by three binaries, the server and the Android app. What runs behind
-//! HTTP is in `backend`; what a build needs from its machine is the `local`
-//! feature.
+//! Shared by the desktop and Android apps, and by the server for the wire
+//! types and the catalogue shapes.
 
 pub mod api;
 pub mod backend;
-pub mod crawl;
 pub mod db;
+pub mod logbuffer;
 pub mod map;
 pub mod paths;
 pub mod qobuz;
+pub mod schema;
 pub mod space;
-pub mod stages;
-
-/// The CLAP text tower, in this process. `local` only, a phone asks its
-/// server to embed a phrase rather than carrying a 479MB model to do it.
-#[cfg(feature = "local")]
-pub mod text;
 
 /// The window, and everything in it. Shared by every platform that has one.
 #[cfg(feature = "gui")]
@@ -148,47 +143,15 @@ pub fn set_data_dir(dir: PathBuf) {
     let _ = DATA_DIR_OVERRIDE.set(dir);
 }
 
-/// Locate the repo's data directory, allowing an override for tests.
+/// Where the client keeps its synced copy of the space.
 ///
-/// The *server's* copy; a remote client keeps its synced copy elsewhere.
-/// `CARGO_MANIFEST_DIR` is compile-time, so this only means anything where
-/// build and run share a filesystem, never on Android.
-pub fn default_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("TWO_KHZ_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-    // app/ lives next to data/ in the repo.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("data"))
-        .unwrap_or_else(|| PathBuf::from("data"))
-}
-
-pub fn default_db_path() -> PathBuf {
-    default_data_dir().join("two_khz.db")
-}
-
-/// Model weights are shared across corpora, so they do not follow
-/// TWO_KHZ_DATA_DIR. Mirrors `models.MODEL_DIR` on the Python side.
-pub fn default_model_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("TWO_KHZ_MODEL_DIR") {
-        return PathBuf::from(dir);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("data").join("models"))
-        .unwrap_or_else(|| PathBuf::from("data").join("models"))
-}
-
-/// Where a client connected to a server keeps its synced copy of the space.
-///
-/// Not the repo's `data/`, that belongs to the server, and overwriting the
-/// pipeline's own output would be a fine way to lose a corpus.
+/// Never the server's `TWO_KHZ_DATA_DIR`: with both on one machine, a sync
+/// would otherwise write over the corpus it was syncing from.
 pub fn client_data_dir() -> PathBuf {
     if let Some(dir) = DATA_DIR_OVERRIDE.get() {
         return dir.clone();
     }
-    if let Ok(dir) = std::env::var("TWO_KHZ_DATA_DIR") {
+    if let Ok(dir) = std::env::var("TWO_KHZ_CLIENT_DIR") {
         return PathBuf::from(dir);
     }
 
@@ -239,7 +202,7 @@ fn android_files_dir() -> Option<PathBuf> {
 
 // ----------------------------------------------------------------- wiring
 
-/// How this process reaches Qobuz and the pipeline.
+/// The server this client talks to, and where it keeps its synced copy.
 ///
 /// Two environment variables on desktop:
 ///
@@ -248,23 +211,14 @@ fn android_files_dir() -> Option<PathBuf> {
 /// TWO_KHZ_TOKEN=<what `two-khz-server pair` printed>
 /// ```
 ///
-/// With neither set, a `local` build does everything in process. A `mobile`
-/// build reads `server.json` instead, see `Wiring::stored`.
-pub enum Wiring {
-    #[cfg(feature = "local")]
-    Local {
-        data_dir: PathBuf,
-        db_path: PathBuf,
-    },
-    Remote {
-        base: String,
-        token: String,
-        data_dir: PathBuf,
-    },
+/// Without them, whatever the setup screen stored in `server.json`.
+pub struct Wiring {
+    base: String,
+    token: String,
+    data_dir: PathBuf,
 }
 
-/// A server address and a device token, as a mobile client stores them. A
-/// phone has no environment variables, so the setup screen writes them here.
+/// A server address and a device token, as the setup screen stores them.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct ServerConfig {
     pub base: String,
@@ -291,7 +245,8 @@ impl ServerConfig {
 }
 
 impl Wiring {
-    /// Environment first, stored config second, local last.
+    /// Environment first, stored config second. Neither is an error the
+    /// caller answers with the setup screen.
     pub fn from_env() -> Result<Self> {
         if let Ok(base) = std::env::var("TWO_KHZ_SERVER") {
             let token = std::env::var("TWO_KHZ_TOKEN").map_err(|_| {
@@ -309,24 +264,11 @@ impl Wiring {
             return Ok(Wiring::remote(stored.base, stored.token));
         }
 
-        #[cfg(feature = "local")]
-        {
-            Ok(Wiring::Local {
-                data_dir: default_data_dir(),
-                db_path: default_db_path(),
-            })
-        }
-
-        // A mobile build has no local half to fall back to: no Essentia, no
-        // `uv`, no checkout to find a .env in.
-        #[cfg(not(feature = "local"))]
-        {
-            anyhow::bail!("not paired with a server yet")
-        }
+        anyhow::bail!("not paired with a server yet")
     }
 
     pub fn remote(base: String, token: String) -> Self {
-        Wiring::Remote {
+        Wiring {
             base,
             token,
             data_dir: client_data_dir(),
@@ -335,41 +277,16 @@ impl Wiring {
 
     /// Where the engine should load the space from.
     pub fn data_dir(&self) -> &Path {
-        match self {
-            #[cfg(feature = "local")]
-            Wiring::Local { data_dir, .. } => data_dir,
-            Wiring::Remote { data_dir, .. } => data_dir,
-        }
+        &self.data_dir
     }
 
-    /// Which database the catalogue comes from. In remote mode this is the
-    /// slim copy that sync brings down, not the 269MB one the server keeps.
+    /// The slim catalogue sync brings down, not the database the server keeps.
     pub fn db_path(&self) -> PathBuf {
-        match self {
-            #[cfg(feature = "local")]
-            Wiring::Local { db_path, .. } => db_path.clone(),
-            Wiring::Remote { data_dir, .. } => data_dir.join("catalog.db"),
-        }
-    }
-
-    pub fn is_remote(&self) -> bool {
-        matches!(self, Wiring::Remote { .. })
+        self.data_dir.join("catalog.db")
     }
 
     pub fn into_backend(self) -> backend::Backend {
-        match self {
-            #[cfg(feature = "local")]
-            Wiring::Local { db_path, .. } => backend::Backend::Local(backend::Local::new(
-                qobuz::repo_root(),
-                db_path,
-                default_model_dir(),
-            )),
-            Wiring::Remote {
-                base,
-                token,
-                data_dir,
-            } => backend::Backend::Remote(backend::Remote::new(base, token, data_dir)),
-        }
+        backend::Backend::new(self.base, self.token, self.data_dir)
     }
 }
 

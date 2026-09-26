@@ -2,7 +2,7 @@
 //!
 //! Space navigation is deliberately absent: neighbours, radio, paths and drift
 //! stay client-side in both modes. Only `embed` crosses, because the CLAP
-//! tower is 479MB and its answer is 512 floats.
+//! tower is 500MB and its answer is 512 floats.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,14 +31,13 @@ impl Stage {
         }
     }
 
-    /// The `two_khz` subcommand, for the three stages that are Python.
-    /// Crawl is native, so it has none.
-    pub fn command(self) -> Option<&'static str> {
+    /// The `two-khz-server` subcommand that runs the same thing by hand.
+    pub fn command(self) -> &'static str {
         match self {
-            Stage::Crawl => None,
-            Stage::Analyse => Some("analyse"),
-            Stage::BuildSpace => Some("build-space"),
-            Stage::Layout => Some("layout"),
+            Stage::Crawl => "crawl",
+            Stage::Analyse => "analyse",
+            Stage::BuildSpace => "build-space",
+            Stage::Layout => "layout",
         }
     }
 
@@ -89,6 +88,9 @@ pub struct Corpus {
 
 // ---------------------------------------------------------------- the crawl
 
+/// How many similar-artist hops from a favourite the crawl follows by default.
+pub const DEFAULT_MAX_DISTANCE: i64 = 2;
+
 /// A running crawl, as the pipeline view needs to show it. Polled, not pushed,
 /// a server cannot write Dioxus signals.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -131,23 +133,12 @@ pub struct LogSlice {
 
 // --------------------------------------------------------------- the client
 
-/// An artist the user has hidden. Mirrors `db::BlockedArtist`, kept separate
-/// so the row type can grow columns the wire does not need.
+/// An artist the user has hidden.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockedArtist {
     pub artist_id: i64,
     pub name: String,
     pub reason: Option<String>,
-}
-
-impl From<crate::db::BlockedArtist> for BlockedArtist {
-    fn from(row: crate::db::BlockedArtist) -> Self {
-        Self {
-            artist_id: row.artist_id,
-            name: row.name,
-            reason: row.reason,
-        }
-    }
 }
 
 /// What the "fetch" buttons did: an album's tracklist, or an artist's

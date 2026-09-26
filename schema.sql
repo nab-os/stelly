@@ -1,11 +1,9 @@
--- Schema for two_khz.db, the contract between the two halves of the system.
+-- Schema for two_khz.db, the server's database, and for the slim catalog.db it
+-- builds for clients from it.
 --
--- Executed by both: `pipeline/two_khz/db.py` on connect, and
--- `app/src/db.rs::ensure_schema`, which embeds this file at compile time.
---
--- Add columns rather than renaming them, and give each new one an entry in
--- db.py's MIGRATIONS, CREATE TABLE IF NOT EXISTS does nothing to a table
--- that already exists.
+-- Executed by `server/src/db.rs::ensure_schema`, which embeds this file at
+-- compile time, on every connect. CREATE TABLE IF NOT EXISTS does nothing to a
+-- table that already exists, so a changed table needs a migration there too.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -47,12 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id);
 CREATE TABLE IF NOT EXISTS features (
     track_id           INTEGER PRIMARY KEY REFERENCES tracks(id),
     extractor_version  TEXT NOT NULL,
-    essentia_json      TEXT,
-    clap_f32           BLOB,   -- 512 floats, CLAP audio embedding
-    -- 1280 floats, Discogs-EffNet embedding. Kept so that any future
-    -- classification head can be run later without re-downloading audio.
-    effnet_f32         BLOB,
-    genre400_f32       BLOB,   -- 400 floats, Discogs style activations
+    -- Tempo, key, loudness and spectral shape; see pipeline/descriptors.rs.
+    descriptors_json   TEXT,
+    -- 512 floats, the CLAP audio embedding. Moods and styles are scored from
+    -- it at build-space time, so changing a label never means re-analysing.
+    clap_f32           BLOB,
     analysed_at        TEXT
 );
 
@@ -83,9 +80,9 @@ CREATE TABLE IF NOT EXISTS failures (
     failed_at TEXT
 );
 
--- Artists to leave out of everything, honoured by both halves. A filter rather
--- than a delete, so it is reversible and needs no rebuild; see blocklist.purge
--- for the destructive version.
+-- Artists to leave out of everything, honoured by every stage and every client.
+-- A filter rather than a delete, so it is reversible and needs no rebuild; see
+-- `block --purge` for the destructive version.
 CREATE TABLE IF NOT EXISTS blocked_artists (
     artist_id   INTEGER PRIMARY KEY,
     name        TEXT,

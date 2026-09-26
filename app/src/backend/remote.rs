@@ -9,7 +9,7 @@ use crate::api::{
     Stage, SyncManifest,
 };
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
-use crate::stages::LogBuffer;
+use crate::logbuffer::LogBuffer;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;

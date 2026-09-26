@@ -1,5 +1,5 @@
 # The build context is the repo root, but the image only needs app/, server/
-# and pipeline/, everything below would either bloat it or leak into it.
+# and schema.sql, everything below would either bloat it or leak into it.
 
 .git
 .github
@@ -12,9 +12,6 @@ docs
 # Host build output. Copying a host target/ in would also defeat the cache
 # mount in the builder stage.
 **/target
-**/.venv
-**/__pycache__
-**/*.pyc
 .direnv
 
 # The corpus and the weights belong in a volume, not a layer.

@@ -411,7 +411,7 @@
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = "#8b90a3";
       ctx.font = "13px system-ui, sans-serif";
-      ctx.fillText("No layout yet, run: uv run two-khz layout", 20, 30);
+      ctx.fillText("No layout yet, run layout from the pipeline view", 20, 30);
       return;
     }
 

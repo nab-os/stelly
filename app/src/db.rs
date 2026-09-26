@@ -1,8 +1,10 @@
-//! Track metadata, read straight from the SQLite database both halves share.
-//! The schema lives in `schema.sql` at the repo root, see `ensure_schema`.
+//! Track metadata, read from the slim catalogue the server hands out. The
+//! schema lives in `schema.sql` at the repo root, and its typed mirror in
+//! `schema`; only the server writes.
 
+use crate::schema::{albums, artists, blocked_artists, features, layout, tracks};
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use diesel::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -35,60 +37,33 @@ pub struct Catalog {
     pub blocked_artists: HashSet<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct BlockedArtist {
-    pub artist_id: i64,
-    pub name: String,
-    pub reason: Option<String>,
+fn open(db_path: &Path) -> Result<SqliteConnection> {
+    let url = db_path
+        .to_str()
+        .with_context(|| format!("{} is not a UTF-8 path", db_path.display()))?;
+    SqliteConnection::establish(url).with_context(|| format!("opening {}", db_path.display()))
 }
 
-/// The shared schema, embedded at compile time. Both halves create these
-/// tables, so the crawler cannot assume a Python command ran first.
-const SCHEMA: &str = include_str!("../../schema.sql");
-
-/// Create any missing tables and indexes. Cheap and idempotent, every
-/// statement in the schema is `IF NOT EXISTS`.
-pub fn ensure_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA)
-        .context("applying schema.sql")?;
-    Ok(())
-}
-
-/// Open the database for writing, with the schema applied.
-pub fn open_for_write(db_path: &Path) -> Result<Connection> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("opening {}", db_path.display()))?;
-    // The pipeline may be reading or writing the same file.
-    conn.busy_timeout(std::time::Duration::from_secs(30))?;
-    ensure_schema(&conn)?;
-    Ok(conn)
-}
-
-/// Artists the user has blocked. Written by either half; see
-/// `pipeline/two_khz/blocklist.py` for what the pipeline does with it.
-fn load_blocked(conn: &Connection) -> Result<HashSet<i64>> {
-    let mut statement = conn.prepare("SELECT artist_id FROM blocked_artists")?;
-    let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+/// Artists the user has blocked. The server honours the list everywhere; the
+/// client filters what it has already loaded.
+fn load_blocked(conn: &mut SqliteConnection) -> Result<HashSet<i64>> {
+    Ok(blocked_artists::table
+        .select(blocked_artists::artist_id)
+        .load::<i64>(conn)?
+        .into_iter()
+        .collect())
 }
 
 /// Load CLAP embeddings for the given track order.
-fn load_clap(conn: &Connection, track_ids: &[i64]) -> Result<(Option<Vec<f32>>, usize)> {
-    let mut statement =
-        conn.prepare("SELECT track_id, clap_f32 FROM features WHERE clap_f32 IS NOT NULL")?;
-    let mut stored: HashMap<i64, Vec<f32>> = HashMap::new();
-
-    let rows = statement.query_map([], |row| {
-        let id: i64 = row.get(0)?;
-        let blob: Vec<u8> = row.get(1)?;
-        Ok((id, blob))
-    })?;
-    for row in rows {
-        let (id, blob) = row?;
-        if blob.len() % 4 == 0 {
-            stored.insert(id, bytemuck::cast_slice::<u8, f32>(&blob).to_vec());
-        }
-    }
+fn load_clap(conn: &mut SqliteConnection, track_ids: &[i64]) -> Result<(Option<Vec<f32>>, usize)> {
+    let stored: HashMap<i64, Vec<f32>> = features::table
+        .filter(features::clap_f32.is_not_null())
+        .select((features::track_id, features::clap_f32.assume_not_null()))
+        .load::<(i64, Vec<u8>)>(conn)?
+        .into_iter()
+        .filter(|(_, blob)| blob.len() % 4 == 0)
+        .map(|(id, blob)| (id, bytemuck::cast_slice::<u8, f32>(&blob).to_vec()))
+        .collect();
 
     let Some(dims) = stored.values().map(|v| v.len()).next() else {
         return Ok((None, 0));
@@ -105,54 +80,76 @@ fn load_clap(conn: &Connection, track_ids: &[i64]) -> Result<(Option<Vec<f32>>, 
     Ok((Some(matrix), dims))
 }
 
+/// One track and everything joined onto it.
+#[derive(Queryable)]
+struct Row {
+    id: i64,
+    title: String,
+    artist_id: Option<i64>,
+    album_id: Option<String>,
+    seed_distance: i64,
+    artist: Option<String>,
+    album: Option<String>,
+    genre: Option<String>,
+    descriptors: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+impl From<Row> for TrackMeta {
+    fn from(row: Row) -> Self {
+        // BPM lives inside the descriptor blob; pull just that one field.
+        let bpm = row.descriptors.as_deref().and_then(|json| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|v| v.get("bpm").and_then(|b| b.as_f64()))
+                .map(|b| b as f32)
+        });
+        TrackMeta {
+            track_id: row.id,
+            title: row.title,
+            artist_id: row.artist_id.unwrap_or(-1),
+            album_id: row.album_id.unwrap_or_default(),
+            seed_distance: row.seed_distance as i32,
+            artist: row.artist.unwrap_or_default(),
+            album: row.album.unwrap_or_default(),
+            genre: row.genre.unwrap_or_default(),
+            bpm,
+            x: row.x.map(|v| v as f32),
+            y: row.y.map(|v| v as f32),
+        }
+    }
+}
+
 impl Catalog {
     /// Load metadata for the given track ids, in that exact order, so indices
     /// line up with the rows of space.bin.
     pub fn load(db_path: &Path, track_ids: &[i64]) -> Result<Self> {
-        let conn = Connection::open(db_path)
-            .with_context(|| format!("opening {}", db_path.display()))?;
+        let conn = &mut open(db_path)?;
 
-        let mut statement = conn.prepare(
-            "SELECT t.id, t.title, t.artist_id, t.album_id, t.seed_distance,
-                    ar.name, al.title, al.genre,
-                    f.essentia_json, l.x, l.y
-             FROM tracks t
-             LEFT JOIN artists  ar ON ar.id = t.artist_id
-             LEFT JOIN albums   al ON al.id = t.album_id
-             LEFT JOIN features f  ON f.track_id = t.id
-             LEFT JOIN layout   l  ON l.track_id = t.id",
-        )?;
-
-        let mut by_id: HashMap<i64, TrackMeta> = HashMap::new();
-        let rows = statement.query_map([], |row| {
-            let essentia: Option<String> = row.get(8)?;
-            // BPM lives inside the descriptor blob; pull just that one field.
-            let bpm = essentia.as_deref().and_then(|json| {
-                serde_json::from_str::<serde_json::Value>(json)
-                    .ok()
-                    .and_then(|v| v.get("bpm").and_then(|b| b.as_f64()))
-                    .map(|b| b as f32)
-            });
-
-            Ok(TrackMeta {
-                track_id: row.get(0)?,
-                title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                artist_id: row.get::<_, Option<i64>>(2)?.unwrap_or(-1),
-                album_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                seed_distance: row.get::<_, Option<i32>>(4)?.unwrap_or(0),
-                artist: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                album: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                genre: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
-                bpm,
-                x: row.get::<_, Option<f64>>(9)?.map(|v| v as f32),
-                y: row.get::<_, Option<f64>>(10)?.map(|v| v as f32),
-            })
-        })?;
-
-        for row in rows {
-            let meta = row?;
-            by_id.insert(meta.track_id, meta);
-        }
+        let rows: Vec<Row> = tracks::table
+            .left_join(artists::table)
+            .left_join(albums::table)
+            .left_join(features::table)
+            .left_join(layout::table)
+            .select((
+                tracks::id,
+                tracks::title,
+                tracks::artist_id,
+                tracks::album_id,
+                tracks::seed_distance,
+                artists::name.nullable(),
+                albums::title.nullable(),
+                albums::genre.nullable(),
+                features::descriptors_json.nullable(),
+                layout::x.nullable(),
+                layout::y.nullable(),
+            ))
+            .load(conn)?;
+        let mut by_id: HashMap<i64, TrackMeta> = rows
+            .into_iter()
+            .map(|row| (row.id, TrackMeta::from(row)))
+            .collect();
 
         let tracks = track_ids
             .iter()
@@ -165,8 +162,8 @@ impl Catalog {
             })
             .collect();
 
-        let (clap, clap_dims) = load_clap(&conn, track_ids)?;
-        let blocked_artists = load_blocked(&conn)?;
+        let (clap, clap_dims) = load_clap(conn, track_ids)?;
+        let blocked_artists = load_blocked(conn)?;
 
         Ok(Self {
             tracks,
@@ -214,111 +211,7 @@ impl Catalog {
     }
 }
 
-// ------------------------------------------------------------ writing back
-//
-// Mostly this module reads. It writes two things: the block list below, and,
-// via `crate::crawl`, catalogue rows and frontier entries.
-
-/// Hide an artist everywhere. Mirrors the Python side, including dropping them
-/// from the frontier so an in-flight crawl stops expanding them.
-pub fn block_artist(
-    db_path: &Path,
-    artist_id: i64,
-    name: &str,
-    reason: Option<&str>,
-) -> Result<()> {
-    let conn = Connection::open(db_path)
-        .with_context(|| format!("opening {} for writing", db_path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-
-    conn.execute(
-        "INSERT INTO blocked_artists (artist_id, name, reason, blocked_at)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(artist_id) DO UPDATE SET
-             name   = COALESCE(excluded.name, blocked_artists.name),
-             reason = COALESCE(excluded.reason, blocked_artists.reason)",
-        rusqlite::params![artist_id, name, reason, utc_now()],
-    )
-    .with_context(|| format!("blocking artist {artist_id}"))?;
-
-    conn.execute(
-        "DELETE FROM frontier WHERE kind = 'artist' AND ref_id = ?1",
-        rusqlite::params![artist_id.to_string()],
-    )?;
-
-    Ok(())
-}
-
-pub fn unblock_artist(db_path: &Path, artist_id: i64) -> Result<()> {
-    let conn = Connection::open(db_path)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute(
-        "DELETE FROM blocked_artists WHERE artist_id = ?1",
-        rusqlite::params![artist_id],
-    )?;
-    Ok(())
-}
-
-pub fn blocked_artists(db_path: &Path) -> Result<Vec<BlockedArtist>> {
-    let conn = Connection::open(db_path)?;
-    let mut statement = conn.prepare(
-        "SELECT artist_id, name, reason FROM blocked_artists ORDER BY name COLLATE NOCASE",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok(BlockedArtist {
-            artist_id: row.get(0)?,
-            name: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            reason: row.get(2)?,
-        })
-    })?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
-}
-
 /// Just the ids, for refreshing a loaded catalog after a block changes.
 pub fn blocked_artist_ids(db_path: &Path) -> Result<HashSet<i64>> {
-    let conn = Connection::open(db_path)?;
-    load_blocked(&conn)
-}
-
-pub fn utc_now() -> String {
-    // Same shape as the Python side writes: UTC, seconds precision.
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = seconds / 86_400;
-    let (year, month, day) = civil_from_days(days as i64);
-    let rest = seconds % 86_400;
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00",
-        rest / 3600,
-        (rest % 3600) / 60,
-        rest % 60
-    )
-}
-
-/// Howard Hinnant's days-from-civil, inverted. Cheaper than pulling in chrono
-/// for the one timestamp this crate writes.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// How much work the crawler has waiting, for the status line.
-pub fn pending_count(db_path: &Path) -> Result<i64> {
-    let conn = Connection::open(db_path)?;
-    let count = conn.query_row(
-        "SELECT COUNT(*) FROM frontier WHERE state = 'pending'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(count)
+    load_blocked(&mut open(db_path)?)
 }

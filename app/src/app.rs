@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-/// Where the engine loads the space from. Fixed by `bootstrap`: the repo's
-/// `data/` locally, a synced copy when paired.
+/// Where the engine loads the space from: the synced copy. Fixed by
+/// `bootstrap`, or by the setup screen on a first pairing.
 static DATA_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 static DB_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -29,14 +29,13 @@ pub(crate) fn db_path() -> &'static std::path::Path {
     DB_PATH.get().expect("set by bootstrap")
 }
 
-/// Wire up the backend, sync if remote, and load the space. Fallible but not
-/// fatal: a desktop says what to run, a phone shows the setup screen.
+/// Wire up the backend, sync, and load the space. Fallible but not fatal: an
+/// unpaired or unreachable client opens on the setup screen.
 pub fn bootstrap() -> anyhow::Result<()> {
     let wiring = Wiring::from_env()?;
 
     let data_dir = wiring.data_dir().to_path_buf();
     let db_path = wiring.db_path();
-    let remote = wiring.is_remote();
     let _ = DATA_DIR.set(data_dir.clone());
     let _ = DB_PATH.set(db_path.clone());
 
@@ -44,12 +43,10 @@ pub fn bootstrap() -> anyhow::Result<()> {
 
     // Sync before the engine loads: it memory-maps what it finds and will not
     // look again until told to.
-    if remote {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        runtime.block_on(backend().sync_space())?;
-    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(backend().sync_space())?;
 
     crate::init_engine(&data_dir, &db_path)
 }
@@ -113,9 +110,8 @@ pub fn App() -> Element {
     }
 }
 
-/// Pairing, for a device that cannot be configured with environment variables.
-/// A phone has no shell to export a server address in, so it is typed once and
-/// written beside the synced space.
+/// Pairing, for a device not configured through the environment. The address
+/// and token are typed once and written beside the synced space.
 #[component]
 fn Setup(ready: Signal<bool>) -> Element {
     let mut address = use_signal(|| {

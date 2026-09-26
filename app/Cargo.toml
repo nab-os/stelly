@@ -6,8 +6,8 @@ edition = "2021"
 [lib]
 name = "two_khz"
 path = "src/lib.rs"
-# `lib` for the server and helper binaries; `cdylib` so the APK can load it
-# and call `start_app` through JNI.
+# `lib` for the server, which shares the wire types; `cdylib` so the APK can
+# load it and call `start_app` through JNI.
 crate-type = ["lib", "cdylib"]
 
 # Also the Android entry point: dioxus' `start_app` trampoline dlsym's `main`,
@@ -17,32 +17,19 @@ name = "two-khz-app"
 path = "src/main.rs"
 required-features = ["gui"]
 
-# Parity harness: prints the same queries as the Python CLI so the two
-# implementations can be diffed against each other.
-[[bin]]
-name = "parity"
-path = "src/bin/parity.rs"
-required-features = ["local"]
-
-# Headless crawler, the Rust replacement for `uv run two-khz crawl`.
-[[bin]]
-name = "crawl"
-path = "src/bin/crawl.rs"
-required-features = ["local"]
-
 # ---------------------------------------------------------------- features
 #
-#   local:   Qobuz client, SQLite, pipeline subprocesses, CLAP text tower.
-#   desktop: local, plus a dioxus window.
-#   mobile:  a dioxus window and nothing else; a phone asks the server to
-#             embed rather than carrying a 479MB model.
+# Every build is a client of `two-khz-server`: Qobuz, the pipeline and the
+# models live there. Without `gui` this is just the shared library.
+#
+#   desktop: a dioxus window.
+#   mobile:  the same, as an Android app.
 [features]
 default = ["desktop"]
-local = ["dep:ort", "dep:tokenizers", "tokio/process", "tokio/io-util"]
 # Anything with a screen: brings in `app` and `ui`, which desktop and mobile
 # share in full.
 gui = ["dep:dioxus"]
-desktop = ["local", "gui", "dioxus/desktop"]
+desktop = ["gui", "dioxus/desktop"]
 mobile = ["gui", "dioxus/mobile"]
 # Exploratory; see the wasm notes in README.
 web = ["gui", "dioxus/web"]
@@ -56,7 +43,10 @@ memmap2 = "0.9"
 # `stream` is what lets the remote backend hold the pipeline log open as SSE
 # rather than polling it.
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "query", "stream"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# The catalogue, through the tables in `src/schema.rs`, which the server
+# shares. SQLite itself comes from `libsqlite3-sys` below, or on wasm from
+# Diesel's own `sqlite-wasm-rs`.
+diesel = { version = "2.3.13", features = ["sqlite"] }
 # Never named in the source: reqwest takes rustls with default features off,
 # which drops `prefer-post-quantum` and leaves X25519MLKEM768 advertised in
 # `supported_groups` with no matching key share. A server that prefers that
@@ -69,20 +59,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time"] }
 
-# `local` only. ort does ship an aarch64-android build; nothing on a phone
-# would call it.
-ort = { version = "2.0.0-rc.13", features = ["download-binaries"], optional = true }
-tokenizers = { version = "0.23.2", default-features = false, features = ["onig"], optional = true }
-
 [dependencies.dioxus]
 version = "0.7"
 optional = true
 # Defaults carry rsx!, signals, hooks and html, and no platform, that comes
 # from the desktop/mobile features above.
 
-# Only for killing a stage's whole process group; see stages.rs.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# Bundled, so there is no system SQLite to match and Android needs nothing but
+# the NDK's clang. The server names it too: only one crate may link SQLite, so
+# the two have to agree on a version.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 
 # The JNI entry point and logging; see src/mobile.rs.
 [target.'cfg(target_os = "android")'.dependencies]

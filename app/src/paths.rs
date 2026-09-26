@@ -1,7 +1,4 @@
 //! Navigation: neighbours, paths, drift, radio.
-//!
-//! Mirrors `pipeline/two_khz/paths.py`, which is the oracle the `parity`
-//! binary compares against.
 
 use crate::db::{Catalog, TrackMeta};
 use crate::space::{argsort_desc, Space, WeightedSpace};
@@ -105,8 +102,7 @@ impl Navigator {
     }
 
     /// Radio: a greedy walk that jumps to the most similar track not yet
-    /// played. Deterministic, unlike the stochastic `radio` in Python; mirrors
-    /// `paths.Navigator.radio_nearest`, the parity oracle.
+    /// played. Deterministic: the same start gives the same walk.
     ///
     /// `artist_penalty` is subtracted once per time that artist appears in the
     /// walk, so the pull away from a discography grows. It reaches back over

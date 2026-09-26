@@ -316,8 +316,8 @@ pub fn GeneratePanel() -> Element {
 
             if mode == Mode::Drift && !generator.can_steer() {
                 p { class: "muted error",
-                    "Drift needs the exported CLAP text tower. Run: "
-                    code { "uv run python -m two_khz.features.onnx_export" }
+                    "Drift needs the CLAP text tower on the server. Fetch it there with: "
+                    code { "two-khz-server models" }
                 }
             }
 

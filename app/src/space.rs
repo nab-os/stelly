@@ -1,4 +1,4 @@
-//! Loading the vector space written by the Python pipeline.
+//! Loading the vector space the server's `build-space` writes.
 //!
 //! `space.bin` holds per-block normalised but UNWEIGHTED vectors. Weights are
 //! applied here, at query time, so the sliders reshape distances live.
@@ -10,12 +10,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-/// The space format this build understands. Must match `space.SPACE_VERSION`
-/// on the Python side.
+/// The space format this build understands, and the one the server writes.
 ///
-/// Bump it there whenever the block layout changes: a reordered block keeps
-/// the same byte count, so the length check cannot see it.
-pub const SPACE_VERSION: &str = "space-1";
+/// Bump it whenever the block layout changes: a reordered block keeps the same
+/// byte count, so the length check cannot see it.
+pub const SPACE_VERSION: &str = "space-2";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Block {
@@ -67,8 +66,8 @@ impl Space {
 
         anyhow::ensure!(
             manifest.version == SPACE_VERSION,
-            "space.json is format {}, this build reads {}, rebuild it:\n  \
-             cd pipeline && uv run two-khz build-space && uv run two-khz layout",
+            "space.json is format {}, this build reads {}, rebuild it on the server:\n  \
+             two-khz-server build-space && two-khz-server layout",
             manifest.version,
             SPACE_VERSION
         );
@@ -213,7 +212,7 @@ impl WeightedSpace {
     /// The same, into a caller-owned buffer, the kNN build runs this once
     /// per track and a fresh vector each time is pure churn. The arithmetic is
     /// deliberately identical to `similarities`: a different summation order
-    /// can reorder near-ties and break parity.
+    /// can reorder near-ties between the two.
     pub fn similarities_into(&self, query: &[f32], out: &mut [f32]) {
         let norm = query
             .iter()
@@ -233,7 +232,7 @@ impl WeightedSpace {
 ///
 /// Selecting beats sorting when k is small, the graph build wants 16 of
 /// several thousand. The comparator is a total order, so the result is exactly
-/// the prefix a full sort would give, which keeps parity meaningful.
+/// the prefix a full sort would give.
 pub fn top_k(scores: &[f32], k: usize) -> Vec<usize> {
     let mut order: Vec<usize> = (0..scores.len()).collect();
     let cmp = |&a: &usize, &b: &usize| {
@@ -255,7 +254,7 @@ pub fn top_k(scores: &[f32], k: usize) -> Vec<usize> {
 }
 
 /// Sort indices by descending score, breaking ties by index. The tie-break is
-/// what lets Rust and Python be compared for exact equality.
+/// what keeps a ranking stable from one run to the next.
 pub fn argsort_desc(scores: &[f32]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..scores.len()).collect();
     order.sort_by(|&a, &b| {

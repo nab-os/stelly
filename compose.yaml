@@ -1,4 +1,4 @@
-# An example deployment of the server half. Copy it, adjust it, then:
+# An example deployment of the server. Copy it, adjust it, then:
 #
 #   cp .env.example .env                                  # Qobuz credentials
 #   docker compose pull
@@ -18,17 +18,16 @@ services:
     # swap the running server for a release nobody here has tried.
     image: 4gjr3z1t/2khz:v0.6.1
 
-    # Running analyse/layout on this machine as well? That is the other image,
-    # several GB and GHCR-only:
+    # The whole pipeline is in this one image. The CLAP weights (~620MB) are
+    # fetched into the data volume on first use, or up front with:
     #
-    #   image: ghcr.io/nab-os/two-khz-server:v0.6.1-pipeline
+    #   docker compose run --rm server models
     #
     # Building locally instead of pulling: the only way to run uncommitted
     # changes, is this in place of `image:` above:
     #
     #   build:
     #     context: .
-    #     target: server        # or `pipeline`
 
     # Loopback inside the container would be unreachable from outside it, so
     # the bind is 0.0.0.0 and the *published* port is the one restricted to
@@ -46,14 +45,13 @@ services:
         required: false
 
     volumes:
-      - data:/data     # corpus, space, catalog.db, device tokens, back this up
+      - data:/data     # corpus, space, device tokens, models, back this up
       - cache:/cache   # audio excerpts, evicted as analyse runs
       # Weights already on the host? Mount them instead of re-downloading:
       # - /srv/two-khz/models:/data/models
 
     # PID 1 has no default signal dispositions, so without an init a `docker
-    # stop` would leave the server's SIGTERM handler as the only thing between
-    # a running stage and an orphaned pool of Essentia workers.
+    # stop` would wait out the grace period before the server went down.
     init: true
     stop_grace_period: 30s
     restart: unless-stopped

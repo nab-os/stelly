@@ -1,17 +1,15 @@
-//! Driving the whole pipeline, wherever it actually runs.
+//! Driving the whole pipeline, on the server.
 //!
-//! Four stages: crawling is native, the other three are Python subprocesses.
-//!
-//! This view no longer spawns anything, it asks the backend to start a stage
-//! and watches the status and log it publishes. Remotely that means a stage
-//! started here outlives this window, which is the point. **Stop** is the only
-//! way one ends early.
+//! Four stages, crawl, analyse, build space, layout, all run in the
+//! server's process. This view asks it to start one and watches the status and
+//! log it publishes, so a stage started here outlives this window, which is
+//! the point. **Stop** is the only way one ends early.
 
 use super::crawler::Crawler;
 use super::POLL;
 use dioxus::prelude::*;
 use crate::api::{Corpus, Device, PipelineStatus, Scope, Stage};
-use crate::backend::{backend, is_remote};
+use crate::backend::backend;
 
 /// How many status polls pass between corpus recounts. Six SQL aggregates
 /// over the whole catalogue would be the most expensive idle thing the app
@@ -209,10 +207,8 @@ pub fn PipelineView() -> Element {
 
             section { class: "panel",
                 h2 { "Stages" }
-                if is_remote() {
-                    p { class: "muted",
-                        "Running on the server. A stage started here keeps going if you close this window, use stop to end it."
-                    }
+                p { class: "muted",
+                    "Running on the server. A stage started here keeps going if you close this window, use stop to end it."
                 }
                 div { class: "actions",
                     button {
@@ -290,15 +286,13 @@ pub fn PipelineView() -> Element {
                 }
             }
 
-            if is_remote() {
-                Devices {}
-            }
+            Devices {}
         }
     }
 }
 
-/// Paired devices, and a way to add or revoke one. Remote mode only, and
-/// needs the `pipeline` scope itself, a `play` phone cannot mint itself a
+/// Paired devices, and a way to add or revoke one. Needs the `pipeline`
+/// scope itself, a `play` phone cannot mint itself a
 /// promotion.
 #[component]
 fn Devices() -> Element {

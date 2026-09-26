@@ -8,7 +8,7 @@ use super::POLL;
 use dioxus::prelude::*;
 use crate::api::CrawlStatus;
 use crate::backend::backend;
-use crate::crawl::DEFAULT_MAX_DISTANCE;
+use crate::api::DEFAULT_MAX_DISTANCE;
 
 #[derive(Clone, Copy)]
 pub struct Crawler {
