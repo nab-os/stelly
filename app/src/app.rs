@@ -892,8 +892,6 @@ fn Shell() -> Element {
                 // each time it would have opened and closed.
                 if explore() {
                     SearchBox {}
-                } else {
-                    span { class: "spacer" }
                 }
                 // Pipeline switches the whole window to a different screen,
                 // `.nav-btn`, not a plain filter chip, because it means

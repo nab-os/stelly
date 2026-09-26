@@ -37,6 +37,10 @@ header {
 }
 
 header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+/* Pipeline and settings sit at the far end whatever comes before them: the
+   search box is capped in width, and on a phone it wraps to a row of its
+   own, so a spacer between them never had any room left to take. */
+header .nav-btn { margin-left: auto; }
 
 .panel {
   background: var(--panel);
@@ -1055,7 +1059,6 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
     margin-bottom: 8px;
   }
   header h1 { font-size: 15px; white-space: nowrap; }
-  header .spacer { display: none; }
 
   /* The browse list is the whole column now, nothing left to switch away
      from it to. The map still overlays it on purpose, at every width. */

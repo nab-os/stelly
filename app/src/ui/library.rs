@@ -137,6 +137,9 @@ pub struct Library {
     /// searches are for something new, not a re-check of what is already
     /// kept.
     pub liked_only: Signal<bool>,
+    /// Keeps a search to the space: no round trip to Qobuz, only what has
+    /// already been analysed. Sticks across searches, like `liked_only`.
+    pub space_only: Signal<bool>,
     /// The three favourited-id sets a search result is checked against, or
     /// `None` before the first time `liked_only` turns on, the fetch that
     /// fills this is not worth paying for a session that never asks.
@@ -173,6 +176,7 @@ impl Library {
             notice: Signal::new(None),
             tracks_view: Signal::new(TracksView::Grid),
             liked_only: Signal::new(false),
+            space_only: Signal::new(false),
             liked: Signal::new(None),
             epoch: Signal::new(0),
         }
@@ -325,6 +329,22 @@ impl Library {
         }
     }
 
+    /// Whether the "In your space" section is part of this view. Only for a
+    /// search: the tracks chip is the liked tracks, and the space holds
+    /// everything the crawl reached from them, liked albums' tracks included,
+    /// which is not what that chip is asking for.
+    fn shows_space(&self) -> bool {
+        match &*self.view.read() {
+            View::Search { scope, .. } => scope.tracks() || *self.space_only.read(),
+            _ => false,
+        }
+    }
+
+    /// Whether a search is skipping Qobuz and showing only the space.
+    fn searching_space_only(&self) -> bool {
+        matches!(&*self.view.read(), View::Search { .. }) && *self.space_only.read()
+    }
+
     /// Ask for a view. The fetch happens in `LibraryPanel`, not here.
     ///
     /// Called from the row handlers, and clearing the shelf unmounts those
@@ -347,10 +367,11 @@ impl Library {
         let Some(target) = target else { return };
         self.pending.set(None);
         let epoch = *self.epoch.peek();
+        let space_only = *self.space_only.peek();
 
         spawn(async move {
             let mut library = self;
-            let loaded = load(target).await;
+            let loaded = load(target, space_only).await;
 
             // Someone asked for a different view while this was in flight.
             // Writing now would put these rows under that view's heading, and
@@ -380,12 +401,13 @@ pub fn open_initial(library: Library) {
     library.show(View::FavouriteTracks);
 }
 
-async fn load(view: View) -> anyhow::Result<Shelf> {
+async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
     let mut shelf = Shelf::default();
 
     match view {
         // Clicking the search tab before typing anything is not a query.
         View::Search { query, .. } if query.trim().is_empty() => {}
+        View::Search { .. } if space_only => {}
         View::Search { query, scope } => {
             let found = backend().search(&query, SEARCH_LIMIT).await?;
             if scope.tracks() {
@@ -458,16 +480,14 @@ pub fn LibraryPanel() -> Element {
     let view = library.view.read().clone();
     let searching = matches!(view, View::Search { .. });
     let scope = view.scope();
-    // The space has no album or artist grouping of its own, it is a flat
+    // Only while searching, see `Library::shows_space`. The space has no
+    // album or artist grouping of its own, it is a flat
     // set of analysed tracks, so it only has anything to say for the two
     // views that are about tracks. Showing it regardless of which chip was
     // picked was the gap that made the source-row filter look like it only
     // applied to the Qobuz half of the list.
-    let show_space = match view {
-        View::FavouriteTracks => true,
-        View::Search { scope, .. } => scope.tracks(),
-        _ => false,
-    };
+    let show_space = library.shows_space();
+    let space_only = library.searching_space_only();
     let shelf = library.shelf.read().clone();
     let tracks_view = *library.tracks_view.read();
 
@@ -480,7 +500,7 @@ pub fn LibraryPanel() -> Element {
     // tracks, including ones the space section happens to be showing.
     let shelf_tracks = shelf.visible_tracks(&blocklist);
     let (liked_only, liked) = library.liked_state();
-    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&space));
+    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&library, &space));
     let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
         tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
     } else {
@@ -550,7 +570,9 @@ pub fn LibraryPanel() -> Element {
             // the first three narrow it instead, and a second tap on the lit
             // one widens it back to everything; playlists are not something
             // a search returns, so that chip goes.
-            if searching {
+            if space_only {
+                // The space is tracks only, so there is nothing to narrow.
+            } else if searching {
                 div { class: "actions",
                     for (label, chip) in [
                         ("tracks", Scope::Tracks),
@@ -629,6 +651,23 @@ pub fn LibraryPanel() -> Element {
                 // a second "liked" filter on top of them would filter
                 // favourites by whether they are favourited.
                 if searching {
+                    // Toggling re-runs the search rather than hiding the
+                    // Qobuz half: a hidden shelf would still be what "play
+                    // all" plays.
+                    button {
+                        class: if space_only { "chip active" } else { "chip" },
+                        title: "only search what's already in your space",
+                        onclick: move |_| {
+                            let mut space_only = library.space_only;
+                            let now = space_only();
+                            space_only.set(!now);
+                            let view = library.view.peek().clone();
+                            library.show(view);
+                        },
+                        "space"
+                    }
+                }
+                if searching && !space_only {
                     button {
                         class: if liked_only { "chip active" } else { "chip" },
                         title: "only show what you've already liked",
@@ -714,8 +753,12 @@ pub fn LibraryPanel() -> Element {
     }
 }
 
-/// Track ids already listed under "In your space".
-fn space_ids(matches: &SpaceMatches) -> std::collections::HashSet<i64> {
+/// Track ids already listed under "In your space", none when that section
+/// is not showing, or the Qobuz list would drop them with nowhere to go.
+fn space_ids(library: &Library, matches: &SpaceMatches) -> std::collections::HashSet<i64> {
+    if !library.shows_space() {
+        return Default::default();
+    }
     matches.0.read().0.iter().map(|row| row.track_id).collect()
 }
 
@@ -890,7 +933,7 @@ fn TrackRows() -> Element {
     // reach. A different release of the same song stays, because fetching
     // that one is a real thing to want.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
-    let tracks = qobuz_only(tracks, &space_ids(&matches));
+    let tracks = qobuz_only(tracks, &space_ids(&library, &matches));
     let (liked_only, liked) = library.liked_state();
     let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
         tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
