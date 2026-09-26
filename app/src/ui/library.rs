@@ -140,9 +140,9 @@ pub(crate) fn names_track(terms: &[String], title: &str) -> bool {
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
     Search { query: String, scope: Scope },
-    FavouriteTracks,
-    FavouriteAlbums,
-    FavouriteArtists,
+    /// The home view: what the account has liked. Mixed, like a search,
+    /// and narrowed by the same chips.
+    Favourites { scope: Scope },
     Playlists,
     Playlist { id: i64, name: String },
     /// The full object, not just its id and title, carried over from
@@ -160,9 +160,7 @@ impl View {
     fn label(&self) -> String {
         match self {
             View::Search { query, .. } => format!("results for “{query}”"),
-            View::FavouriteTracks => "favourite tracks".into(),
-            View::FavouriteAlbums => "favourite albums".into(),
-            View::FavouriteArtists => "favourite artists".into(),
+            View::Favourites { .. } => "favourites".into(),
             View::Playlists => "your playlists".into(),
             View::Playlist { name, .. } => name.clone(),
             View::Album(album) => album.title.clone(),
@@ -185,6 +183,15 @@ impl View {
         match self {
             View::Search { scope, .. } => *scope,
             _ => Scope::Everything,
+        }
+    }
+
+    /// The narrowing the tracks/albums/artists chips light up for. Only the
+    /// two mixed views have one; anywhere else, a chip goes home.
+    fn filter(&self) -> Option<Scope> {
+        match self {
+            View::Search { scope, .. } | View::Favourites { scope } => Some(*scope),
+            _ => None,
         }
     }
 }
@@ -268,7 +275,7 @@ pub(crate) struct Liked {
 impl Library {
     pub fn new() -> Self {
         Self {
-            view: Signal::new(View::FavouriteTracks),
+            view: Signal::new(View::Favourites { scope: Scope::Everything }),
             shelf: Signal::new(Shelf::default()),
             loaded: Signal::new(Shelf::default()),
             sort: Signal::new(Sort::default()),
@@ -410,12 +417,17 @@ impl Library {
         }
     }
 
-    /// Re-run the current search over a different kind of result. Replaces
-    /// rather than pushes, the same as refining the query does.
-    fn rescope(self, scope: Scope) {
+    /// A tracks/albums/artists chip. In a mixed view it narrows to that
+    /// kind, or widens back to everything if it was already the one lit;
+    /// replacing rather than pushing, the same as refining a query does.
+    /// Anywhere else it goes home, narrowed to that kind.
+    fn filter(self, chip: Scope) {
         let current = self.view.peek().clone();
-        if let View::Search { query, .. } = current {
-            self.show(View::Search { query, scope });
+        let scope = if current.filter() == Some(chip) { Scope::Everything } else { chip };
+        match current {
+            View::Search { query, .. } => self.show(View::Search { query, scope }),
+            View::Favourites { .. } => self.show(View::Favourites { scope }),
+            _ => self.go(View::Favourites { scope: chip }),
         }
     }
 
@@ -426,7 +438,7 @@ impl Library {
             return;
         }
         if self.history.peek().is_empty() {
-            self.show(View::FavouriteTracks);
+            self.show(View::Favourites { scope: Scope::Everything });
         } else {
             self.back();
         }
@@ -512,7 +524,7 @@ impl Default for Library {
 /// First load, so the app shell does not have to reach into navigation.
 /// Favourites, because that is also what the crawl seeds from.
 pub fn open_initial(library: Library) {
-    library.show(View::FavouriteTracks);
+    library.show(View::Favourites { scope: Scope::Everything });
 }
 
 async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
@@ -535,10 +547,11 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
             if scope.tracks() {
                 shelf.tracks = found.tracks;
             }
-            // Only what the artist's or album's name brought in. Qobuz
-            // matches more loosely than a substring test (accents, for one),
-            // so a track this test cannot place at all stays.
-            if scope == Scope::Tracks {
+            // Only what the artist's or album's name brought in: those are
+            // the artist and album tiles' to show. Qobuz matches more loosely
+            // than a substring test (accents, for one), so a track this test
+            // cannot place at all stays.
+            if scope.tracks() {
                 let terms: Vec<String> =
                     query.to_lowercase().split_whitespace().map(str::to_string).collect();
                 shelf.tracks.retain(|track| {
@@ -558,9 +571,48 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
                 shelf.artists = found.artists;
             }
         }
-        View::FavouriteTracks => shelf.tracks = backend().favourite_tracks(LIST_CAP).await?,
-        View::FavouriteAlbums => shelf.albums = backend().favourite_albums(LIST_CAP).await?,
-        View::FavouriteArtists => shelf.artists = backend().favourite_artists(LIST_CAP).await?,
+        View::Favourites { scope } => {
+            let (tracks, albums, artists) = tokio::join!(
+                async {
+                    if scope.tracks() {
+                        backend().favourite_tracks(LIST_CAP).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+                async {
+                    if scope.albums() {
+                        backend().favourite_albums(LIST_CAP).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+                async {
+                    if scope.artists() {
+                        backend().favourite_artists(LIST_CAP).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+            );
+            shelf.tracks = tracks?;
+            shelf.albums = albums?;
+            shelf.artists = artists?;
+
+            // A liked album or artist is shown as its tile, not again as
+            // every liked track inside it. Only when mixed: narrowed to
+            // tracks, there is no tile to stand in for them.
+            if scope == Scope::Everything {
+                let albums: std::collections::HashSet<&str> =
+                    shelf.albums.iter().map(|album| album.id.as_str()).collect();
+                let artists: std::collections::HashSet<i64> =
+                    shelf.artists.iter().map(|artist| artist.id).collect();
+                shelf.tracks.retain(|track| {
+                    !track.album_id.as_deref().is_some_and(|id| albums.contains(id))
+                        && !track.artist_id.is_some_and(|id| artists.contains(&id))
+                });
+            }
+        }
         View::Playlists => shelf.playlists = backend().playlists(LIST_CAP).await?,
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
         View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
@@ -689,7 +741,6 @@ pub fn LibraryPanel() -> Element {
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
     let searching = matches!(view, View::Search { .. });
-    let scope = view.scope();
     // Only while searching, see `Library::shows_space`. The space has no
     // album or artist grouping of its own, it is a flat
     // set of analysed tracks, so it only has anything to say for the two
@@ -772,47 +823,25 @@ pub fn LibraryPanel() -> Element {
                 h2 { class: "ellipsis", "{view.label()}" }
             }
 
-            // What kind of thing you are browsing. Search used to be a tab
-            // here too, sharing a row with library/playlists; it is a header
-            // icon now (see `app.rs`'s `SearchBox`), so this row only ever
-            // has to say what four sources look like, not decide between
-            // finding something and browsing it. While a search is showing
-            // the first three narrow it instead, and a second tap on the lit
-            // one widens it back to everything; playlists are not something
-            // a search returns, so that chip goes.
-            if searching {
-                div { class: "actions",
-                    for (label, chip) in [
-                        ("tracks", Scope::Tracks),
-                        ("albums", Scope::Albums),
-                        ("artists", Scope::Artists),
-                    ] {
-                        button {
-                            class: if scope == chip { "chip active" } else { "chip" },
-                            onclick: move |_| {
-                                library.rescope(if scope == chip { Scope::Everything } else { chip })
-                            },
-                            "{label}"
-                        }
+            // What kind of thing you are looking at. Home and a search are
+            // both mixed, liked or found tracks, albums and artists together,
+            // and the first three chips narrow either one: a tap narrows, a
+            // second tap on the lit one widens back. Playlists is a place of
+            // its own rather than a narrowing, and not something a search
+            // returns, so it only shows outside one.
+            div { class: "actions",
+                for (label, chip) in [
+                    ("tracks", Scope::Tracks),
+                    ("albums", Scope::Albums),
+                    ("artists", Scope::Artists),
+                ] {
+                    button {
+                        class: if view.filter() == Some(chip) { "chip active" } else { "chip" },
+                        onclick: move |_| library.filter(chip),
+                        "{label}"
                     }
                 }
-            } else {
-                div { class: "actions",
-                    button {
-                        class: if view == View::FavouriteTracks { "chip active" } else { "chip" },
-                        onclick: move |_| library.go(View::FavouriteTracks),
-                        "tracks"
-                    }
-                    button {
-                        class: if view == View::FavouriteAlbums { "chip active" } else { "chip" },
-                        onclick: move |_| library.go(View::FavouriteAlbums),
-                        "albums"
-                    }
-                    button {
-                        class: if view == View::FavouriteArtists { "chip active" } else { "chip" },
-                        onclick: move |_| library.go(View::FavouriteArtists),
-                        "artists"
-                    }
+                if !searching {
                     button {
                         class: if view.is_playlists() { "chip active" } else { "chip" },
                         onclick: move |_| library.go(View::Playlists),
