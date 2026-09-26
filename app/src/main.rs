@@ -14,8 +14,15 @@ fn main() {
         let _ = err;
     }
 
+    // Release builds of dioxus-desktop cancel every `contextmenu` from the
+    // document. On Android that is also the long press that brings up a text
+    // field's Paste, so a token could only be typed out by hand. Rows lose
+    // nothing: their menus come from their own handlers and long-press.js,
+    // which still see the event.
     #[cfg(feature = "mobile")]
-    dioxus::launch(two_khz::app::App);
+    dioxus::LaunchBuilder::mobile()
+        .with_cfg(dioxus::mobile::Config::new().with_disable_context_menu(false))
+        .launch(two_khz::app::App);
 
     // Three columns plus a map need room; the default window collapses them.
     // TWO_KHZ_WINDOW=WxH overrides it, mostly to check the responsive layout
