@@ -4,6 +4,7 @@
 //! a URL and gets track-boundary events back.
 
 use super::Cover;
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::{
@@ -112,7 +113,7 @@ pub fn play_list(mut player: Player, queue: Vec<RemoteTrack>, index: usize) {
         .unwrap_or(0);
 
     player.queue.set(queue);
-    spawn(async move { play_at(player, start).await });
+    spawn_forever(async move { play_at(player, start).await });
 }
 
 /// Append to the queue, starting playback if nothing is going.
@@ -127,7 +128,7 @@ pub fn enqueue(mut player: Player, tracks: Vec<RemoteTrack>) {
 
     player.queue.write().extend(tracks);
     if was_empty {
-        spawn(async move { play_at(player, start).await });
+        spawn_forever(async move { play_at(player, start).await });
     }
 }
 
@@ -156,7 +157,7 @@ pub fn play_next(mut player: Player, tracks: Vec<RemoteTrack>) {
     }
 
     if length == 0 {
-        spawn(async move { play_at(player, 0).await });
+        spawn_forever(async move { play_at(player, 0).await });
     }
 }
 
@@ -189,7 +190,7 @@ pub fn remove_at(mut player: Player, at: usize) {
         player.index.set(current - 1);
     } else if at == current {
         if at < length - 1 {
-            spawn(async move { play_at(player, at).await });
+            spawn_forever(async move { play_at(player, at).await });
         } else {
             player.index.set(at.saturating_sub(1));
             player.position.set((0.0, 0.0));
@@ -315,7 +316,7 @@ pub fn step(player: Player, delta: isize) {
     if next < 0 || next >= length {
         return;
     }
-    spawn(async move { play_at(player, next as usize).await });
+    spawn_forever(async move { play_at(player, next as usize).await });
 }
 
 fn toggle(player: Player) {
@@ -326,7 +327,7 @@ fn toggle(player: Player) {
     } else if !player.queue.peek().is_empty() {
         // Queued but never started.
         let start = *player.index.peek();
-        spawn(async move { play_at(player, start).await });
+        spawn_forever(async move { play_at(player, start).await });
     }
 }
 

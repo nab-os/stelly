@@ -18,6 +18,7 @@ use super::{Blocklist, LocalIds, MapView, Selection};
 use crate::backend::backend;
 use crate::engine;
 use crate::qobuz::RemoteTrack;
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 /// What the menu was opened on.
@@ -316,7 +317,7 @@ fn ShelfAlbumItems(index: usize) -> Element {
             .map(|album| album.id.clone());
         let Some(id) = id else { return };
 
-        spawn(async move {
+        spawn_forever(async move {
             if let Ok(tracks) = backend().album_tracks(&id).await {
                 then(player, tracks);
             }
@@ -495,7 +496,7 @@ fn QueueItems(index: usize) -> Element {
             button {
                 class: "menu-item",
                 onclick: move |_| {
-                    spawn(async move { play_at(player, index).await });
+                    spawn_forever(async move { play_at(player, index).await });
                     menu.set(None);
                 },
                 "Play now"

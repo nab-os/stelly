@@ -10,6 +10,7 @@
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{play_list, Player};
 use super::{MapView, Selection};
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::paths::{Constraints, Step};
@@ -154,7 +155,10 @@ impl Generator {
             }),
         };
 
-        spawn(async move {
+        // Forever, not scoped: `request` is called from the row menu, which
+        // closes in the same click, and a scoped task dies with it before it
+        // is ever polled, leaving `busy` set and the button on "working…".
+        spawn_forever(async move {
             let produced = match mode {
                 Mode::Neighbours => selected.map(|id| {
                     crate::engine()
