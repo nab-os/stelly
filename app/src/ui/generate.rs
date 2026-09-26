@@ -7,8 +7,10 @@
 //!   - **path**: A to B, shortest route or evenly paced.
 //!   - **drift**: away from a track, towards a phrase.
 
+use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{play_list, Player};
-use super::Selection;
+use super::{MapView, Selection};
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::paths::{Constraints, Step};
@@ -34,14 +36,6 @@ impl Mode {
         }
     }
 
-    /// Whether the selection is this mode's only input, and so whether it can
-    /// follow it instead of waiting for the generate button. Same split as
-    /// `Generator::ready`, derived from the same question so the two cannot
-    /// disagree.
-    fn follows_selection(self) -> bool {
-        matches!(self, Mode::Neighbours | Mode::Radio)
-    }
-
     fn blurb(self) -> &'static str {
         match self {
             Mode::Neighbours => "The most similar tracks to the selection.",
@@ -52,10 +46,35 @@ impl Mode {
     }
 }
 
+/// What produced the result currently on screen.
+///
+/// Generation used to follow the selection, so a result was never older than
+/// the last click and needed no label. Now that it is asked for, it outlives
+/// both the selection and the mode that made it, and twenty unlabelled
+/// tracks under a tab that no longer matches them is a puzzle, not a list.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Recipe {
+    Neighbours { seed: i64 },
+    Radio { seed: i64 },
+    Path { a: i64, b: i64, even: bool },
+    Drift { seed: i64, phrase: String },
+}
+
 #[derive(Clone, Copy)]
 pub struct Generator {
     pub mode: Signal<Mode>,
     pub result: Signal<Vec<Step>>,
+    /// What produced `result`, for its heading. `None` when there is none.
+    pub produced_by: Signal<Option<Recipe>>,
+    /// A walk is running. Set before the task is spawned so one paint gets
+    /// through: the walk itself takes the engine lock and holds it, and on
+    /// the desktop's single-threaded runtime that blocks the UI outright.
+    /// Radio is the one that shows, it scans the corpus once per step.
+    pub busy: Signal<bool>,
+    /// The weights moved since `result` was produced, so the distances behind
+    /// it no longer hold. Kept separate from clearing: the rows stay on
+    /// screen and say they are out of date, rather than vanishing.
+    pub stale: Signal<bool>,
     /// How many tracks to produce, for the modes that take a count.
     pub count: Signal<usize>,
     /// Similarity subtracted per prior use of an artist, in radio mode.
@@ -76,6 +95,9 @@ impl Generator {
         Self {
             mode: Signal::new(Mode::Neighbours),
             result: Signal::new(Vec::new()),
+            produced_by: Signal::new(None),
+            busy: Signal::new(false),
+            stale: Signal::new(false),
             count: Signal::new(20),
             // 0.10 measured out as 19.4 distinct artists per 20 tracks
             // against 14.8 unpenalised, for 0.786 similarity against 0.796.
@@ -109,6 +131,7 @@ impl Generator {
     pub fn run(self, selected: Option<i64>) {
         let mut generator = self;
         generator.status.set(None);
+        generator.busy.set(true);
 
         let count = *self.count.peek();
         let mode = *self.mode.peek();
@@ -117,7 +140,25 @@ impl Generator {
         let phrase = self.phrase.peek().clone();
         let (from, to) = (*self.from.peek(), *self.to.peek());
 
-        spawn(async move {
+        // Built from the same peeked inputs the walk uses, so the label can
+        // never describe a different run than the rows below it.
+        let recipe = match mode {
+            Mode::Neighbours => selected.map(|seed| Recipe::Neighbours { seed }),
+            Mode::Radio => selected.map(|seed| Recipe::Radio { seed }),
+            Mode::Path => match (from, to) {
+                (Some(a), Some(b)) => Some(Recipe::Path { a, b, even }),
+                _ => None,
+            },
+            Mode::Drift => selected.map(|seed| Recipe::Drift {
+                seed,
+                phrase: phrase.clone(),
+            }),
+        };
+
+        // Forever, not scoped: `request` is called from the row menu, which
+        // closes in the same click, and a scoped task dies with it before it
+        // is ever polled, leaving `busy` set and the button on "working…".
+        spawn_forever(async move {
             let produced = match mode {
                 Mode::Neighbours => selected.map(|id| {
                     crate::engine()
@@ -171,20 +212,108 @@ impl Generator {
                 },
             };
 
-            let Some(produced) = produced else { return };
+            let Some(produced) = produced else {
+                generator.busy.set(false);
+                return;
+            };
             if produced.is_empty() {
                 generator
                     .status
                     .set(Some("nothing found, try a different start".into()));
             }
             generator.result.set(produced);
+            generator.produced_by.set(recipe);
+            generator.stale.set(false);
+            generator.busy.set(false);
         });
     }
 
+    /// Run a mode directly, rather than whichever one the panel happens to be
+    /// showing. Switches the panel to match, so its inputs describe the rows
+    /// that just appeared.
+    pub fn request(self, mode: Mode, seed: i64) {
+        let mut generator = self;
+        generator.mode.set(mode);
+        generator.run(Some(seed));
+    }
+
+    /// Set one end of a path. Runs once both ends are known, two deliberate
+    /// acts, so nothing is produced by accident, but naming the second end
+    /// does not then need a third click to be worth anything.
+    pub fn set_path_end(self, end: PathEnd, id: i64) {
+        let mut generator = self;
+        generator.mode.set(Mode::Path);
+        match end {
+            PathEnd::A => generator.from.set(Some(id)),
+            PathEnd::B => generator.to.set(Some(id)),
+        }
+        if generator.from.peek().is_some() && generator.to.peek().is_some() {
+            generator.run(None);
+        }
+    }
+
+    /// Show drift's inputs without running it. Drift seeds from the selection,
+    /// which the caller sets; what it still lacks is the phrase, and guessing
+    /// one would be inventing the user's intent.
+    pub fn aim_drift(self) {
+        let mut generator = self;
+        generator.mode.set(Mode::Drift);
+    }
+
+    /// Run a recipe again, restoring the inputs that produced it. Re-running
+    /// "whatever the panel is showing now" would quietly answer a different
+    /// question, since the mode and the selection have both been free to move
+    /// since the result was made.
+    pub fn rerun(self, recipe: &Recipe) {
+        let mut generator = self;
+        match recipe {
+            Recipe::Neighbours { seed } => {
+                generator.mode.set(Mode::Neighbours);
+                generator.run(Some(*seed));
+            }
+            Recipe::Radio { seed } => {
+                generator.mode.set(Mode::Radio);
+                generator.run(Some(*seed));
+            }
+            Recipe::Path { a, b, even } => {
+                generator.mode.set(Mode::Path);
+                generator.from.set(Some(*a));
+                generator.to.set(Some(*b));
+                generator.even.set(*even);
+                generator.run(None);
+            }
+            Recipe::Drift { seed, phrase } => {
+                generator.mode.set(Mode::Drift);
+                generator.phrase.set(phrase.clone());
+                generator.run(Some(*seed));
+            }
+        }
+    }
+
+    /// The weights moved, so the distances that produced this result no longer
+    /// hold. Say so and keep the rows: silently emptying the list was the old
+    /// behaviour of `clear`, and it read as the app discarding your work.
+    pub fn invalidate(mut self) {
+        if !self.result.peek().is_empty() {
+            self.stale.set(true);
+        }
+    }
+
+    /// Throw the result away. Only for when the user asks, or when the ids in
+    /// it have genuinely stopped existing.
     pub fn clear(mut self) {
         self.result.set(Vec::new());
+        self.produced_by.set(None);
+        self.stale.set(false);
         self.status.set(None);
     }
+}
+
+/// Which end of a path a track is being named as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PathEnd {
+    A,
+    B,
 }
 
 impl Default for Generator {
@@ -193,8 +322,26 @@ impl Default for Generator {
     }
 }
 
+/// The result's heading. Says what made these rows, because with generation
+/// explicit they outlive the selection and the tab that produced them.
+fn describe(recipe: &Recipe, label: impl Fn(Option<i64>) -> String) -> String {
+    match recipe {
+        Recipe::Neighbours { seed } => format!("Neighbours of {}", label(Some(*seed))),
+        Recipe::Radio { seed } => format!("Radio from {}", label(Some(*seed))),
+        Recipe::Path { a, b, even } => format!(
+            "Path {} → {}{}",
+            label(Some(*a)),
+            label(Some(*b)),
+            if *even { ", evenly paced" } else { "" }
+        ),
+        Recipe::Drift { seed, phrase } => {
+            format!("Drift from {} towards “{phrase}”", label(Some(*seed)))
+        }
+    }
+}
+
 /// Present a space track to the player, which speaks in Qobuz terms.
-fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
+pub(crate) fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
     RemoteTrack {
         id: meta.track_id,
         title: meta.title.clone(),
@@ -205,6 +352,9 @@ fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
         duration: None,
         streamable: true,
         hires: false,
+        // The space stores no art, so the cover is derived from the album id.
+        image: crate::qobuz::cover_url(&meta.album_id),
+        isrc: meta.isrc.clone(),
     }
 }
 
@@ -219,6 +369,8 @@ pub fn GeneratePanel() -> Element {
     let player = use_context::<Player>();
     let selection = use_context::<Selection>();
     let mut selected = selection.0;
+    let mut menu = use_context::<ContextMenu>().0;
+    let map = use_context::<MapView>();
 
     let mode = *generator.mode.read();
     let result = generator.result.read().clone();
@@ -247,15 +399,11 @@ pub fn GeneratePanel() -> Element {
         }
     });
 
-    // Modes whose only input is the selection follow it; the others need a
-    // second endpoint or a phrase, so they stay deliberate. Clicking a result
-    // row re-runs from that track.
-    use_effect(move || {
-        let current = selected();
-        if current.is_some() && generator.mode.read().follows_selection() {
-            generator.run(current);
-        }
-    });
+    // Nothing generates on its own. Selecting a track used to re-run two of
+    // the four modes, which meant looking at something destroyed the list you
+    // were reading, and made the generate button a no-op in exactly those
+    // modes, so the panel showed one affordance that worked half the time
+    // while the real trigger was an unlabelled click somewhere else.
 
     rsx! {
         section { class: "panel generate",
@@ -266,10 +414,13 @@ pub fn GeneratePanel() -> Element {
                     button {
                         key: "{option.label()}",
                         class: if mode == option { "tab active" } else { "tab" },
+                        // Switching tabs changes which inputs are shown, and
+                        // nothing else. It used to clear the result, which the
+                        // auto-run effect then immediately undid; now the
+                        // result stays, labelled with what actually made it.
                         onclick: move |_| {
                             let mut mode = generator.mode;
                             mode.set(option);
-                            generator.clear();
                         },
                         "{option.label()}"
                     }
@@ -374,9 +525,9 @@ pub fn GeneratePanel() -> Element {
             div { class: "actions",
                 button {
                     class: "primary",
-                    disabled: !generator.ready(selected()),
+                    disabled: !generator.ready(selected()) || *generator.busy.read(),
                     onclick: move |_| generator.run(selected()),
-                    "generate"
+                    if *generator.busy.read() { "working…" } else { "generate" }
                 }
                 button {
                     disabled: empty,
@@ -423,6 +574,31 @@ pub fn GeneratePanel() -> Element {
             }
 
             // ----------------------------------------------------- result
+            if let Some(recipe) = generator.produced_by.read().clone() {
+                div { class: "shelf-head result-head",
+                    span { class: "ellipsis", "{describe(&recipe, label_for)}" }
+                    span { class: "spacer" }
+                    // The one action that dims the map: here the route is the
+                    // point, so everything not on it drops back.
+                    button {
+                        class: "chip",
+                        title: "trace this on the map",
+                        onclick: move |_| map.show_route(),
+                        "on the map"
+                    }
+                    if *generator.stale.read() {
+                        button {
+                            class: "chip notice",
+                            title: "the weights moved since these were chosen",
+                            onclick: {
+                                let recipe = recipe.clone();
+                                move |_| generator.rerun(&recipe)
+                            },
+                            "regenerate"
+                        }
+                    }
+                }
+            }
             ol { class: "list",
                 for step in result {
                     li {
@@ -432,11 +608,20 @@ pub fn GeneratePanel() -> Element {
                             let id = step.track.track_id;
                             move |_| selected.set(Some(id))
                         },
+                        "data-menu": MenuTarget::SpaceTrack(step.track.track_id).tag(),
+                        oncontextmenu: {
+                            let id = step.track.track_id;
+                            move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                            }
+                        },
                         span { class: "artist", "{step.track.artist}" }
                         span { class: "title", "{step.track.title}" }
                         span { class: "muted",
                             {step.similarity.map(|s| format!("{s:.3}")).unwrap_or_default()}
                         }
+                        {menu_button(menu, MenuTarget::SpaceTrack(step.track.track_id))}
                     }
                 }
             }

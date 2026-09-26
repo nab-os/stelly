@@ -182,9 +182,19 @@ bandwidth story changes. Ten-minute test: mint a URL on the server, then
 
 ## Android: the open questions
 
-- **The layout is still desktop-shaped.** Three columns and a canvas map do not
-  belong on a 1080px-wide screen; it is usable but not designed. The panels are
-  ordinary flexbox, so this is CSS work, not architecture.
+- **The layout was desktop-shaped, and has been redesigned.** It used to be
+  three columns and a permanent canvas map, which did not belong on a
+  1080px-wide screen. Now: one browse list holding the analysed space and
+  Qobuz as two headed sections, a detail pane for the selected track, and the
+  map as an overlay opened on purpose. One search box drives both halves, the
+  space filters as you type, Qobuz is asked once you stop. Two panes remain on
+  a narrow screen, *browse* and *tools*, with the map and the menu overlaying
+  whichever is showing. Row actions live in one context menu, reachable by
+  right-click or a 500ms long press.
+
+  What is still missing on a phone: the detail pane is a third panel in the
+  tools column rather than a sheet that slides over the browse list, so on a
+  393px screen it costs a pane switch to reach.
 - **Background playback.** Audio is an `<audio>` element in a WebView, which
   Android throttles when backgrounded, with no MediaSession, lockscreen controls
   or audio focus. For a music app that is the product, not a rough edge, it

@@ -309,6 +309,105 @@ impl Navigator {
         &self.knn.as_ref().unwrap().1
     }
 
+    /// Order tracks so that consecutive ones sit close together in the space:
+    /// a greedy nearest-neighbour tour, then 2-opt until it stops improving.
+    ///
+    /// An *open* path, not a tour, a playlist ends rather than returning to
+    /// where it began, so the last point has no outgoing edge and reversing
+    /// the final segment re-hangs one edge instead of two.
+    ///
+    /// `from` anchors the walk to a track already playing: it is measured from
+    /// but never returned. Ids the space does not hold are dropped, since
+    /// there is no distance to place them by; the caller decides where those
+    /// end up.
+    pub fn shortest_path_order(&self, track_ids: &[i64], from: Option<i64>) -> Vec<i64> {
+        /// Above this the pairwise matrix stops being worth its memory and
+        /// 2-opt stops being worth its time. `LIST_CAP` keeps a queue an order
+        /// of magnitude under it in practice.
+        const SORT_CAP: usize = 1024;
+
+        // Positions, not rows: a queue may hold the same track twice, and both
+        // copies have to come out the other side.
+        let placeable: Vec<(usize, usize)> = track_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, id)| self.index_of.get(id).map(|&row| (pos, row)))
+            .collect();
+
+        if placeable.len() < 3 || placeable.len() > SORT_CAP {
+            return placeable.iter().map(|&(pos, _)| track_ids[pos]).collect();
+        }
+
+        // Node 0 is the anchor when there is one, so it can be pinned at the
+        // front and stripped at the end without a second bookkeeping pass.
+        let anchor = from.and_then(|id| self.index_of.get(&id).copied());
+        let mut rows: Vec<usize> = Vec::with_capacity(placeable.len() + 1);
+        rows.extend(anchor);
+        rows.extend(placeable.iter().map(|&(_, row)| row));
+
+        // Cosine distance, over rows the weighted space already normalised.
+        let n = rows.len();
+        let mut dist = vec![0.0f32; n * n];
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let (x, y) = (self.space.row(rows[a]), self.space.row(rows[b]));
+                let d = 1.0 - x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+                dist[a * n + b] = d;
+                dist[b * n + a] = d;
+            }
+        }
+        let d = |a: usize, b: usize| dist[a * n + b];
+
+        // Greedy nearest neighbour. Without an anchor the first node stays
+        // first, so sorting does not also change what plays next.
+        let mut tour: Vec<usize> = vec![0];
+        let mut left: Vec<usize> = (1..n).collect();
+        while !left.is_empty() {
+            let last = *tour.last().unwrap();
+            let pick = left
+                .iter()
+                .enumerate()
+                .min_by(|a, b| d(last, *a.1).total_cmp(&d(last, *b.1)))
+                .map(|(i, _)| i)
+                .unwrap();
+            tour.push(left.remove(pick));
+        }
+
+        // 2-opt, leaving tour[0] alone. Bounded rather than run to a fixed
+        // point: the epsilon already rules out cycling on near-equal edges,
+        // and this keeps a pathological queue from stalling the UI thread.
+        for _ in 0..32 {
+            let mut improved = false;
+            for i in 1..n - 1 {
+                for j in (i + 1)..n {
+                    let prev = tour[i - 1];
+                    let (head, tail) = (tour[i], tour[j]);
+                    let (removed, added) = if j + 1 < n {
+                        let next = tour[j + 1];
+                        (d(prev, head) + d(tail, next), d(prev, tail) + d(head, next))
+                    } else {
+                        (d(prev, head), d(prev, tail))
+                    };
+
+                    if added + 1e-6 < removed {
+                        tour[i..=j].reverse();
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+
+        // Node k > 0 is placeable[k - 1] when an anchor took node 0.
+        let offset = usize::from(anchor.is_some());
+        tour.into_iter()
+            .filter(|&node| !(anchor.is_some() && node == 0))
+            .map(|node| track_ids[placeable[node - offset].0])
+            .collect()
+    }
+
     /// Dijkstra over the kNN graph. Usually better than `interpolate`: a
     /// straight line through a high-dimensional space crosses empty regions,
     /// whereas this stays on the data manifold.
@@ -495,5 +594,115 @@ impl Ord for Entry {
 impl PartialOrd for Entry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Points on a unit circle, one per track id. Cosine distance between two
+    /// of them grows with the angle between them, so the shortest route
+    /// through a set of them is simply angle order, which makes the expected
+    /// answer something the test can state rather than recompute.
+    fn navigator(angles_deg: &[(i64, f32)]) -> Navigator {
+        let mut unit = Vec::new();
+        let mut tracks = Vec::new();
+        let mut index_of = HashMap::new();
+
+        for (row, &(id, degrees)) in angles_deg.iter().enumerate() {
+            let radians = degrees.to_radians();
+            unit.push(radians.cos());
+            unit.push(radians.sin());
+            tracks.push(TrackMeta {
+                track_id: id,
+                ..Default::default()
+            });
+            index_of.insert(id, row);
+        }
+
+        Navigator {
+            space: WeightedSpace {
+                unit,
+                n_tracks: angles_deg.len(),
+                n_dims: 2,
+                scale: vec![1.0, 1.0],
+            },
+            catalog: Catalog {
+                tracks,
+                clap: None,
+                clap_dims: 0,
+                blocked_artists: HashSet::new(),
+            },
+            index_of,
+            knn: None,
+        }
+    }
+
+    fn fixture() -> Navigator {
+        navigator(&[
+            (10, 0.0),
+            (11, 10.0),
+            (12, 20.0),
+            (13, 30.0),
+            (14, 40.0),
+            (15, 50.0),
+        ])
+    }
+
+    #[test]
+    fn orders_by_distance_from_the_anchor() {
+        let nav = fixture();
+        // Shuffled, and not starting at the track nearest the anchor, so
+        // input order and the answer cannot coincide by luck.
+        assert_eq!(
+            nav.shortest_path_order(&[13, 11, 15, 12, 14], Some(10)),
+            vec![11, 12, 13, 14, 15]
+        );
+    }
+
+    #[test]
+    fn without_an_anchor_the_first_track_stays_first() {
+        let nav = fixture();
+        let ordered = nav.shortest_path_order(&[13, 11, 15, 12, 14], None);
+        assert_eq!(ordered[0], 13, "the anchorless start is held in place");
+
+        // Whatever route it picks from there, nothing may be lost or repeated.
+        let mut seen = ordered.clone();
+        seen.sort();
+        assert_eq!(seen, vec![11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn drops_ids_the_space_does_not_hold() {
+        let nav = fixture();
+        assert_eq!(
+            nav.shortest_path_order(&[14, 999, 12, 998, 11], Some(10)),
+            vec![11, 12, 14]
+        );
+    }
+
+    #[test]
+    fn returns_every_placeable_input_even_when_repeated() {
+        // A queue cannot hold the same recording twice, so this should not
+        // come up, but ordering is a pure reshuffle and must not be the
+        // thing that silently drops a track if it ever does.
+        let nav = fixture();
+        let ordered = nav.shortest_path_order(&[14, 12, 14, 11], Some(10));
+
+        let mut seen = ordered.clone();
+        seen.sort();
+        assert_eq!(seen, vec![11, 12, 14, 14], "nothing in, nothing lost");
+
+        // Two copies sit at zero distance, so nothing can come between them.
+        let first = ordered.iter().position(|&id| id == 14).unwrap();
+        assert_eq!(ordered[first + 1], 14);
+    }
+
+    #[test]
+    fn too_few_to_reorder_passes_through() {
+        let nav = fixture();
+        assert_eq!(nav.shortest_path_order(&[14, 11], Some(10)), vec![14, 11]);
+        assert!(nav.shortest_path_order(&[], Some(10)).is_empty());
     }
 }

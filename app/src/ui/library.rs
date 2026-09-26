@@ -3,11 +3,16 @@
 //! Navigation is explicit rather than reactive: every move sets the view and
 //! spawns its own load. One `Shelf` holds whatever the view returned.
 
-use super::player::{enqueue, play_list, Player};
-use super::{Blocklist, LocalIds, Selection, LIST_CAP, SEARCH_LIMIT};
+use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
+use super::player::{enqueue, play_list, play_next, Player};
+use super::{Blocklist, Cover, LocalIds, Search, Selection, SpaceMatches, LIST_CAP, SEARCH_LIMIT};
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
+
+/// How many space rows the list opens with. Enough to fill the column on any
+/// screen; "show more" triples it.
+const FIRST_SHOWN: usize = 80;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
@@ -71,12 +76,18 @@ pub struct Library {
     pub shelf: Signal<Shelf>,
     pub loading: Signal<bool>,
     pub error: Signal<Option<String>>,
-    pub query: Signal<String>,
     /// Views visited on the way here, for the back button.
     pub history: Signal<Vec<View>>,
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
+    /// Bumped by every `show`. A fetch carries the value it started with and
+    /// discards its result if it no longer matches, because `pending` is a
+    /// single slot but the tasks it spawns are not: two views asked for in
+    /// quick succession race, and the slower one would otherwise land last
+    /// and win. Latent while navigation was a click at a time; a search that
+    /// fires as you type makes it routine.
+    epoch: Signal<u64>,
 }
 
 impl Library {
@@ -86,15 +97,15 @@ impl Library {
             shelf: Signal::new(Shelf::default()),
             loading: Signal::new(true),
             error: Signal::new(None),
-            query: Signal::new(String::new()),
             history: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
+            epoch: Signal::new(0),
         }
     }
 
     /// Navigate, remembering where we came from.
-    fn go(mut self, target: View) {
+    pub(crate) fn go(mut self, target: View) {
         let previous = self.view.peek().clone();
         if previous != target {
             self.history.write().push(previous);
@@ -106,6 +117,33 @@ impl Library {
         let previous = self.history.write().pop();
         if let Some(view) = previous {
             self.show(view);
+        }
+    }
+
+    /// Navigate to a search result, refining in place.
+    ///
+    /// The first search from an album or artist pushes that view, so back
+    /// returns to what you were reading. Every refinement after it replaces:
+    /// a query that fires as you type would otherwise leave one history entry
+    /// per character, and "back" would walk you through your own spelling.
+    pub(crate) fn search_to(self, query: String) {
+        if matches!(&*self.view.peek(), View::Search(_)) {
+            self.show(View::Search(query));
+        } else {
+            self.go(View::Search(query));
+        }
+    }
+
+    /// Emptying the box should put back whatever the search covered up,
+    /// rather than leaving an empty shelf with no way out but the tabs.
+    pub(crate) fn leave_search(self) {
+        if !matches!(&*self.view.peek(), View::Search(_)) {
+            return;
+        }
+        if self.history.peek().is_empty() {
+            self.show(View::FavouriteTracks);
+        } else {
+            self.back();
         }
     }
 
@@ -121,6 +159,7 @@ impl Library {
         self.notice.set(None);
         self.loading.set(true);
         self.pending.set(Some(target));
+        *self.epoch.write() += 1;
     }
 
     /// Fetch whatever `show` last asked for. Runs in `LibraryPanel`, which is
@@ -129,10 +168,20 @@ impl Library {
         let target = self.pending.read().clone();
         let Some(target) = target else { return };
         self.pending.set(None);
+        let epoch = *self.epoch.peek();
 
         spawn(async move {
             let mut library = self;
-            match load(target).await {
+            let loaded = load(target).await;
+
+            // Someone asked for a different view while this was in flight.
+            // Writing now would put these rows under that view's heading, and
+            // clearing `loading` would call it finished.
+            if *library.epoch.peek() != epoch {
+                return;
+            }
+
+            match loaded {
                 Ok(shelf) => library.shelf.set(shelf),
                 Err(err) => library.error.set(Some(format!("{err:#}"))),
             }
@@ -188,7 +237,7 @@ async fn load(view: View) -> anyhow::Result<Shelf> {
 /// Fetch an artist or album into the catalogue, here and now. An album's
 /// tracklist lands immediately and a discography is queued; only feature
 /// extraction still belongs to the pipeline.
-fn request_analysis(library: Library, kind: &str, id: &str, label: &str) {
+pub(crate) fn request_analysis(library: Library, kind: &str, id: &str, label: &str) {
     let mut library = library;
     let (kind, id, label) = (kind.to_string(), id.to_string(), label.to_string());
 
@@ -218,8 +267,9 @@ async fn fetch_into_catalog(kind: &str, id: &str) -> anyhow::Result<usize> {
 
 #[component]
 pub fn LibraryPanel() -> Element {
-    let mut library = use_context::<Library>();
+    let library = use_context::<Library>();
     let player = use_context::<Player>();
+    let search = use_context::<Search>();
 
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
@@ -228,38 +278,44 @@ pub fn LibraryPanel() -> Element {
 
     // Every emptiness test below asks about what is *visible*: no heading over
     // nothing, and the bulk actions must not reach past the filter.
-    let tracks = shelf.visible_tracks(&blocklist);
+    // Tracks the space section is already showing do not count towards the
+    // Qobuz section being non-empty, or its heading would stand over nothing.
+    let space = use_context::<SpaceMatches>();
+    // The whole shelf, for the bulk actions: "play all" means the view's
+    // tracks, including ones the space section happens to be showing.
+    let shelf_tracks = shelf.visible_tracks(&blocklist);
+    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&space));
     let albums = shelf.visible_albums(&blocklist);
     let artists = shelf.visible_artists(&blocklist, false);
     let similar = shelf.visible_artists(&blocklist, true);
-    let nothing_visible = tracks.is_empty()
+    let nothing_from_qobuz = tracks.is_empty()
         && albums.is_empty()
         && artists.is_empty()
         && similar.is_empty()
         && shelf.playlists.is_empty();
+    // "Nothing here" belongs to the whole list, not to the Qobuz half of it:
+    // with matches in the space above, the list is plainly not empty.
+    let nothing_visible = nothing_from_qobuz && space.0.read().1 == 0;
     let has_history = !library.history.read().is_empty();
 
     // Drives every navigation. Deliberately here rather than in `show`: see
     // the comment there.
     use_effect(move || library.drive());
 
-    let submit = move || {
-        let text = library.query.peek().trim().to_string();
-        if !text.is_empty() {
-            library.go(View::Search(text));
-        }
-    };
-
     rsx! {
         aside { class: "panel library",
-            h2 { "Qobuz" }
+            // Named for what you are looking at, not for where the rows came
+            // from. "Qobuz" as a column heading was half of what made this
+            // feel like two rival lists; it survives below as a section badge,
+            // which is the honest scope for it.
+            h2 { class: "ellipsis", "{view.label()}" }
 
             div { class: "tabs",
                 button {
                     class: if tab == Tab::Search { "tab active" } else { "tab" },
                     onclick: move |_| {
-                        let text = library.query.peek().trim().to_string();
-                        library.go(View::Search(text));
+                        let text = search.text.peek().trim().to_string();
+                        library.search_to(text);
                     },
                     "search"
                 }
@@ -273,18 +329,6 @@ pub fn LibraryPanel() -> Element {
                     onclick: move |_| library.go(View::Playlists),
                     "playlists"
                 }
-            }
-
-            input {
-                class: "search",
-                placeholder: "search the Qobuz catalogue",
-                value: "{library.query}",
-                oninput: move |event| library.query.set(event.value()),
-                onkeydown: move |event| {
-                    if event.key() == Key::Enter {
-                        submit();
-                    }
-                },
             }
 
             if tab == Tab::Library {
@@ -311,9 +355,8 @@ pub fn LibraryPanel() -> Element {
                 if has_history {
                     button { class: "chip", onclick: move |_| library.back(), "‹ back" }
                 }
-                span { class: "muted", "{view.label()}" }
                 span { class: "spacer" }
-                if !tracks.is_empty() {
+                if !shelf_tracks.is_empty() {
                     button {
                         class: "chip",
                         onclick: move |_| {
@@ -321,6 +364,14 @@ pub fn LibraryPanel() -> Element {
                             play_list(player, queue, 0);
                         },
                         "play all"
+                    }
+                    button {
+                        class: "chip",
+                        onclick: move |_| {
+                            let queue = library.shelf.peek().visible_tracks(&blocklist);
+                            play_next(player, queue);
+                        },
+                        "next"
                     }
                     button {
                         class: "chip",
@@ -343,6 +394,21 @@ pub fn LibraryPanel() -> Element {
                 p { class: "muted error", "{message}" }
             } else {
                 div { class: "shelf",
+                    // What you already have, first: it needs no round trip,
+                    // it is what the space can actually navigate, and it is
+                    // usually what you were looking for.
+                    SpaceRows {}
+
+                    if !nothing_from_qobuz {
+                        h3 { class: "shelf-head source-head",
+                            "On Qobuz"
+                            span { class: "spacer" }
+                            if tracks.len() >= SEARCH_LIMIT {
+                                span { class: "muted", "first {SEARCH_LIMIT}" }
+                            }
+                        }
+                    }
+
                     if !artists.is_empty() {
                         ArtistRows { heading: "Artists".to_string(), similar: false }
                     }
@@ -365,6 +431,114 @@ pub fn LibraryPanel() -> Element {
             }
 
             HiddenArtists {}
+        }
+    }
+}
+
+/// Track ids already listed under "In your space".
+fn space_ids(matches: &SpaceMatches) -> std::collections::HashSet<i64> {
+    matches.0.read().0.iter().map(|row| row.track_id).collect()
+}
+
+/// Shelf tracks that the space section is not already showing, each paired
+/// with its index into `visible_tracks`.
+///
+/// The index is the row's address: `menu.rs` re-reads `visible_tracks` when an
+/// item is chosen, so it must survive the filter. Enumerating before filtering
+/// is what keeps it correct, renumbering after would point every menu at a
+/// different track, which is the bug `visible_tracks` itself was introduced to
+/// fix.
+fn qobuz_only(
+    tracks: Vec<RemoteTrack>,
+    in_space: &std::collections::HashSet<i64>,
+) -> Vec<(usize, RemoteTrack)> {
+    tracks
+        .into_iter()
+        .enumerate()
+        .filter(|(_, track)| !in_space.contains(&track.id))
+        .collect()
+}
+
+/// Tracks the space already holds, as the first section of the one list.
+///
+/// Addressed by track id, not by position: these rows come from the space's
+/// own scan rather than from `Shelf`, so they must not share the shelf's
+/// index space. That separation is the point, one list to read, two
+/// independently addressed sections underneath, so the menu cannot act on a
+/// neighbour of the row you opened it on.
+#[component]
+fn SpaceRows() -> Element {
+    let matches = use_context::<SpaceMatches>().0;
+    let mut selection = use_context::<Selection>().0;
+    let mut menu = use_context::<ContextMenu>().0;
+    let search = use_context::<Search>();
+
+    // Grows on request rather than rendering 720 rows nobody scrolled to.
+    let mut shown = use_signal(|| FIRST_SHOWN);
+
+    let (rows, total) = matches();
+    let searching = !search.text.read().trim().is_empty();
+    let visible = shown().min(rows.len());
+
+    if total == 0 {
+        return rsx! {
+            if searching {
+                h3 { class: "shelf-head source-head", "In your space" }
+                p { class: "muted", "Nothing matches. Every word has to appear somewhere." }
+            }
+        };
+    }
+
+    rsx! {
+        h3 { class: "shelf-head source-head",
+            "In your space"
+            span { class: "spacer" }
+            span { class: "muted",
+                if visible < total { "{visible} of {total}" } else { "{total}" }
+            }
+        }
+
+        ul { class: "list",
+            for row in rows.iter().take(visible) {
+                li {
+                    key: "{row.track_id}",
+                    class: if selection.read().as_ref() == Some(&row.track_id) {
+                        "row selected"
+                    } else {
+                        "row"
+                    },
+                    onclick: {
+                        let id = row.track_id;
+                        move |_| selection.set(Some(id))
+                    },
+                    "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
+                    oncontextmenu: {
+                        let id = row.track_id;
+                        move |event: Event<MouseData>| {
+                            event.prevent_default();
+                            open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                        }
+                    },
+                    // The space stores no art, so this is derived from the
+                    // album id. A guess that misses leaves the placeholder
+                    // tint, which is why it is worth guessing at all.
+                    Cover { url: crate::qobuz::cover_url(&row.album_id), class: "thumb" }
+                    span { class: "artist", "{row.artist}" }
+                    span { class: "title", "{row.title}" }
+                    {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
+                }
+            }
+        }
+
+        if visible < total {
+            button {
+                class: "chip more-rows",
+                onclick: move |_| {
+                    let next = shown() * 3;
+                    shown.set(next);
+                },
+                "show more"
+            }
         }
     }
 }
@@ -454,17 +628,28 @@ impl Shelf {
 fn TrackRows() -> Element {
     let library = use_context::<Library>();
     let player = use_context::<Player>();
-    let mut selection = use_context::<Selection>();
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
 
+    let matches = use_context::<SpaceMatches>();
+
+    // Matched on the Qobuz track id: that is the same recording *and* the
+    // same release, so suppressing it hides nothing you could not already
+    // reach. A different release of the same song stays, because fetching
+    // that one is a real thing to want.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
+    let tracks = qobuz_only(tracks, &space_ids(&matches));
     let now_playing = player.current().map(|t| t.id);
+
+    if tracks.is_empty() {
+        return rsx! {};
+    }
 
     rsx! {
         h3 { class: "shelf-head", "Tracks" }
         ul { class: "list",
-            for (index, track) in tracks.into_iter().enumerate() {
+            for (index, track) in tracks {
                 li {
                     key: "{index}-{track.id}",
                     class: if now_playing == Some(track.id) { "row playing" } else { "row" },
@@ -476,43 +661,25 @@ fn TrackRows() -> Element {
                         let queue = library.shelf.peek().visible_tracks(&blocklist);
                         play_list(player, queue, index);
                     },
+                    "data-menu": MenuTarget::ShelfTrack(index).tag(),
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
+                    },
+                    Cover { url: track.image.clone(), class: "thumb" }
                     span { class: "artist", "{track.artist}" }
                     span { class: "title", "{track.title}" }
                     if !track.streamable {
                         span { class: "muted tag", "-" }
                     }
-                    if let Some(artist_id) = track.artist_id {
-                        button {
-                            class: "chip danger",
-                            title: "hide this artist everywhere",
-                            onclick: move |event| {
-                                event.stop_propagation();
-                                let name = library
-                                    .shelf
-                                    .peek()
-                                    .tracks
-                                    .iter()
-                                    .find(|t| t.artist_id == Some(artist_id))
-                                    .map(|t| t.artist.clone())
-                                    .unwrap_or_default();
-
-                                blocklist.block.call((artist_id, name));
-                            },
-                            "hide"
-                        }
-                    }
                     if local.0.read().contains(&track.id) {
-                        // Analysed: this one exists as a point on the map.
-                        button {
-                            class: "chip",
-                            onclick: move |event| {
-                                event.stop_propagation();
-                                selection.0.set(Some(track.id));
-                            },
-                            "in space"
-                        }
+                        // A mark, not a button: that this track is a point on
+                        // the map is something to know while scanning the
+                        // list, and the menu is where you act on it.
+                        span { class: "in-space-dot", title: "analysed, on the map", "•" }
                     }
                     span { class: "muted", "{track.duration_label()}" }
+                    {menu_button(menu, MenuTarget::ShelfTrack(index))}
                 }
             }
         }
@@ -522,18 +689,17 @@ fn TrackRows() -> Element {
 #[component]
 fn AlbumRows() -> Element {
     let library = use_context::<Library>();
-    let player = use_context::<Player>();
-
     let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
     let albums = library.shelf.read().visible_albums(&blocklist);
 
     rsx! {
         h3 { class: "shelf-head", "Albums" }
-        ul { class: "list",
+        ul { class: "tiles",
             for (index, album) in albums.into_iter().enumerate() {
                 li {
                     key: "{index}-{album.id}",
-                    class: "row",
+                    class: "tile",
                     onclick: move |_| {
                         let target = library
                             .shelf
@@ -548,46 +714,15 @@ fn AlbumRows() -> Element {
                             library.go(target);
                         }
                     },
-                    span { class: "artist", "{album.artist}" }
+                    "data-menu": MenuTarget::ShelfAlbum(index).tag(),
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
+                    },
+                    Cover { url: album.image.clone() }
                     span { class: "title", "{album.title}" }
-                    span { class: "muted", "{album.year()}" }
-                    button {
-                        class: "chip",
-                        title: "play this album",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let id = library
-                                .shelf
-                                .peek()
-                                .visible_albums(&blocklist)
-                                .get(index)
-                                .map(|a| a.id.clone());
-                            let Some(id) = id else { return };
-                            spawn(async move {
-                                if let Ok(tracks) = backend().album_tracks(&id).await {
-                                    play_list(player, tracks, 0);
-                                }
-                            });
-                        },
-                        "▶"
-                    }
-                    button {
-                        class: "chip",
-                        title: "fetch this tracklist into the catalogue",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let found = library
-                                .shelf
-                                .peek()
-                                .visible_albums(&blocklist)
-                                .get(index)
-                                .map(|a| (a.id.clone(), a.title.clone()));
-                            if let Some((id, title)) = found {
-                                request_analysis(library, "album", &id, &title);
-                            }
-                        },
-                        "fetch"
-                    }
+                    span { class: "artist", "{album.artist}" }
+                    {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                 }
             }
         }
@@ -597,17 +732,17 @@ fn AlbumRows() -> Element {
 #[component]
 fn ArtistRows(heading: String, similar: bool) -> Element {
     let library = use_context::<Library>();
-
     let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
     let artists = library.shelf.read().visible_artists(&blocklist, similar);
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
-        ul { class: "list",
+        ul { class: "tiles",
             for (index, artist) in artists.into_iter().enumerate() {
                 li {
                     key: "{index}-{artist.id}",
-                    class: "row",
+                    class: "tile",
                     onclick: move |_| {
                         let target = library
                             .shelf
@@ -622,36 +757,17 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                             library.go(target);
                         }
                     },
+                    "data-menu": MenuTarget::ShelfArtist { index, similar }.tag(),
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar });
+                    },
+                    Cover { url: artist.image.clone(), class: "round" }
                     span { class: "title", "{artist.name}" }
                     if let Some(count) = artist.albums_count {
-                        span { class: "muted", "{count} albums" }
+                        span { class: "artist", "{count} albums" }
                     }
-                    button {
-                        class: "chip",
-                        title: "fetch this discography into the catalogue",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            let found = library
-                                .shelf
-                                .peek()
-                                .visible_artists(&blocklist, similar)
-                                .get(index)
-                                .map(|a| (a.id, a.name.clone()));
-                            if let Some((id, name)) = found {
-                                request_analysis(library, "artist", &id.to_string(), &name);
-                            }
-                        },
-                        "fetch"
-                    }
-                    button {
-                        class: "chip danger",
-                        title: "hide this artist everywhere",
-                        onclick: move |event| {
-                            event.stop_propagation();
-                            blocklist.block.call((artist.id, artist.name.clone()));
-                        },
-                        "hide"
-                    }
+                    {menu_button(menu, MenuTarget::ShelfArtist { index, similar })}
                 }
             }
         }

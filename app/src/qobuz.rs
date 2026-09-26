@@ -30,6 +30,37 @@ pub struct RemoteTrack {
     /// round trip that would fail with a confusing signature error.
     pub streamable: bool,
     pub hires: bool,
+    /// The album's cover; a track has no art of its own. See `image`.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// The recording, as opposed to this particular catalogue entry. One
+    /// song reached through a single, an album and a deluxe reissue is three
+    /// track ids but one ISRC, which is what `identity` dedupes on.
+    #[serde(default)]
+    pub isrc: Option<String>,
+}
+
+impl RemoteTrack {
+    /// What makes two queue entries "the same music".
+    ///
+    /// The ISRC when Qobuz reports one, since that names the recording rather
+    /// than the release. Falling back to the track id means an untagged track
+    /// is only ever a duplicate of itself, which is the safe direction: a
+    /// missed duplicate is a nuisance, a wrongly dropped track is a bug.
+    pub fn identity(&self) -> TrackIdentity {
+        match self.isrc.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(isrc) => TrackIdentity::Recording(isrc.to_ascii_uppercase()),
+            None => TrackIdentity::Entry(self.id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TrackIdentity {
+    /// An ISRC, upper-cased, Qobuz is not consistent about the case.
+    Recording(String),
+    /// A Qobuz track id, for the tracks that carry no ISRC.
+    Entry(i64),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -41,6 +72,8 @@ pub struct RemoteAlbum {
     pub released: Option<String>,
     pub genre: Option<String>,
     pub tracks_count: Option<i64>,
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -48,6 +81,8 @@ pub struct RemoteArtist {
     pub id: i64,
     pub name: String,
     pub albums_count: Option<i64>,
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -74,6 +109,59 @@ fn as_i64(value: &Value, key: &str) -> Option<i64> {
         Some(Value::String(s)) => s.parse().ok(),
         _ => None,
     }
+}
+
+/// Sizes to accept from an image bag, smallest usable first. A row thumbnail
+/// and the player's cover are both served by `small` (230px for an album);
+/// `thumbnail` is 50px and only worth having when nothing else is offered.
+const IMAGE_SIZES: [&str; 6] = ["small", "medium", "large", "thumbnail", "extralarge", "mega"];
+
+/// A cover or portrait URL. Qobuz nests these under `image` as a bag of named
+/// sizes, and the names differ between albums (thumbnail/small/large) and
+/// artists (small/medium/large/extralarge/mega). Newer artist payloads drop
+/// `image` for an `images.portrait` hash, which has to be assembled by hand.
+///
+/// Everything returned points at `static.qobuz.com`, which serves unsigned,
+/// so these go straight into an `<img>` with no proxy and no credentials.
+fn image(value: &Value) -> Option<String> {
+    match value.get("image") {
+        Some(Value::String(url)) if !url.is_empty() => return Some(url.clone()),
+        Some(bag @ Value::Object(_)) => {
+            for size in IMAGE_SIZES {
+                if let Some(url) = text(bag, size) {
+                    return Some(url);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let hash = text(value.get("images")?.get("portrait")?, "hash")?;
+    Some(format!(
+        "https://static.qobuz.com/images/artists/covers/medium/{hash}.jpg"
+    ))
+}
+
+/// The cover for an album id, assembled rather than looked up.
+///
+/// Qobuz files covers under a path derived from the id: the last two
+/// characters, then the two before those, then the id. Worth the guess because
+/// a track that came out of the space carries only an album id, generated
+/// sequences would otherwise be the one list in the app with no art at all.
+/// `Cover` hides an image that fails to load, so guessing wrong costs nothing.
+pub fn cover_url(album_id: &str) -> Option<String> {
+    let id: String = album_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if id.len() < 4 {
+        return None;
+    }
+    let tail = &id[id.len() - 2..];
+    let mid = &id[id.len() - 4..id.len() - 2];
+    Some(format!(
+        "https://static.qobuz.com/images/covers/{tail}/{mid}/{id}_230.jpg"
+    ))
 }
 
 fn as_id_string(value: &Value, key: &str) -> Option<String> {
@@ -136,6 +224,10 @@ impl RemoteTrack {
             album_id,
             duration: as_i64(value, "duration"),
             streamable,
+            // A track carries no art; the cover comes from whichever album
+            // description reached it, nested or passed down.
+            image: image(&album).or_else(|| context.and_then(|parent| parent.image.clone())),
+            isrc: text(value, "isrc"),
             hires: value
                 .get("hires_streamable")
                 .or_else(|| value.get("hires"))
@@ -174,6 +266,7 @@ impl RemoteAlbum {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             tracks_count: as_i64(value, "tracks_count"),
+            image: image(value),
         })
     }
 
@@ -193,6 +286,7 @@ impl RemoteArtist {
             id: as_i64(value, "id")?,
             name: text(value, "name").unwrap_or_else(|| "Unknown Artist".into()),
             albums_count: as_i64(value, "albums_count"),
+            image: image(value),
         })
     }
 }
@@ -218,4 +312,75 @@ pub struct SearchResults {
     pub tracks: Vec<RemoteTrack>,
     pub albums: Vec<RemoteAlbum>,
     pub artists: Vec<RemoteArtist>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: i64, isrc: Option<&str>) -> RemoteTrack {
+        RemoteTrack {
+            id,
+            isrc: isrc.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_recording_across_two_releases_is_one_identity() {
+        // The point of the whole exercise: a single and a deluxe reissue are
+        // different catalogue entries carrying the same recording.
+        assert_eq!(
+            track(111, Some("GBAAA9100123")).identity(),
+            track(222, Some("GBAAA9100123")).identity()
+        );
+    }
+
+    #[test]
+    fn isrc_case_does_not_make_a_second_identity() {
+        assert_eq!(
+            track(111, Some("gbaaa9100123")).identity(),
+            track(222, Some("GBAAA9100123")).identity()
+        );
+    }
+
+    #[test]
+    fn an_untagged_track_is_only_ever_a_duplicate_of_itself() {
+        // The safe direction: a missed duplicate is a nuisance, a wrongly
+        // dropped track is a bug.
+        assert_eq!(track(111, None).identity(), track(111, None).identity());
+        assert_ne!(track(111, None).identity(), track(222, None).identity());
+    }
+
+    #[test]
+    fn a_blank_isrc_counts_as_absent() {
+        // Qobuz sends "" rather than null often enough to matter; taking it at
+        // face value would collapse every untagged track into one.
+        assert_eq!(track(111, Some("   ")).identity(), TrackIdentity::Entry(111));
+        assert_ne!(
+            track(111, Some("")).identity(),
+            track(222, Some("")).identity()
+        );
+    }
+
+    #[test]
+    fn a_tagged_and_an_untagged_track_never_collide() {
+        assert_ne!(
+            track(111, Some("GBAAA9100123")).identity(),
+            track(111, None).identity()
+        );
+    }
+
+    #[test]
+    fn cover_url_follows_the_two_by_two_tail_convention() {
+        // Qobuz nests covers under the last two characters of the id, then the
+        // two before those.
+        assert_eq!(
+            cover_url("3610159663848").as_deref(),
+            Some("https://static.qobuz.com/images/covers/48/38/3610159663848_230.jpg")
+        );
+        // Too short to split, so there is nothing to guess from.
+        assert_eq!(cover_url("12"), None);
+        assert_eq!(cover_url(""), None);
+    }
 }

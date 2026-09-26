@@ -322,7 +322,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     };
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async move {
+    let served = runtime.block_on(async move {
         // The slim catalogue has to follow the space: a client syncing new
         // vectors against an old catalogue draws the right points with the
         // wrong labels.
@@ -335,9 +335,12 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
             .with_graceful_shutdown(shutdown())
             .await?;
         Ok::<(), anyhow::Error>(())
-    })?;
+    });
 
-    Ok(())
+    // Dropping the runtime would wait on its blocking threads, and a stage
+    // runs on one of those until it finishes.
+    runtime.shutdown_background();
+    served
 }
 
 /// Rebuild `catalog.db` whenever a stage has rewritten the space.
@@ -368,4 +371,11 @@ async fn watch_generation(hub: Arc<Hub>, db_path: PathBuf, data_dir: PathBuf) {
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     println!("\nshutting down; a running stage stops with the process");
+
+    // Graceful shutdown still waits on requests in flight; a second ctrl-c
+    // stops waiting.
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        std::process::exit(130);
+    });
 }

@@ -5,16 +5,22 @@
 //! space is the exception, always answered in-process.
 
 pub mod crawler;
+pub mod detail;
 pub mod generate;
 pub mod library;
+pub mod menu;
 pub mod pipeline;
 pub mod player;
+pub mod queue;
 
 pub use crawler::Crawler;
 pub use generate::{GeneratePanel, Generator};
 pub use library::{open_initial, Library, LibraryPanel};
+pub use detail::DetailPane;
+pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
 pub use pipeline::{Pipeline, PipelineView};
 pub use player::{use_transport, Player, PlayerBar};
+pub use queue::QueueView;
 
 use dioxus::prelude::*;
 use crate::api::BlockedArtist;
@@ -44,6 +50,83 @@ pub struct LocalIds(pub Memo<Rc<HashSet<i64>>>);
 #[derive(Clone, Copy)]
 pub struct Selection(pub Signal<Option<i64>>);
 
+/// The one search box. There used to be two, one filtering the analysed
+/// space as you typed, one asking Qobuz on Enter, which made "where do I
+/// type the name of a song" a question with two answers.
+///
+/// They stay two *queries*, because they are genuinely different: the local
+/// one is a scan of memory and can run per keystroke, the remote one is a
+/// network round trip and must not. What they no longer are is two inputs.
+#[derive(Clone, Copy)]
+pub struct Search {
+    /// What is in the box. The local filter reads this directly.
+    pub text: Signal<String>,
+    /// What the remote has actually been asked for. Compared against `text`
+    /// to decide whether a round trip is owed; also what stops the debounce
+    /// from re-firing a query it has already run.
+    pub submitted: Signal<String>,
+}
+
+impl Search {
+    pub fn new() -> Self {
+        Self {
+            text: Signal::new(String::new()),
+            submitted: Signal::new(String::new()),
+        }
+    }
+}
+
+impl Default for Search {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The map overlay's state, so anything that wants to show something on the
+/// map can open it without the shell threading callbacks down to it.
+#[derive(Clone, Copy)]
+pub struct MapView {
+    pub map_open: Signal<bool>,
+    /// Showing a route, and therefore dimming everything that is not on it.
+    pub map_route: Signal<bool>,
+}
+
+impl MapView {
+    /// Open the map to look around. Nothing is dimmed: there is no route in
+    /// question, and a corpus at 18% is not a thing you can browse.
+    pub fn browse(mut self) {
+        self.map_route.set(false);
+        self.map_open.set(true);
+    }
+
+    /// Open the map to show a produced sequence, dimming the rest so the line
+    /// through it can be read.
+    pub fn show_route(mut self) {
+        self.map_route.set(true);
+        self.map_open.set(true);
+    }
+}
+
+/// A track in the analysed space, reduced to what a row needs. Carries
+/// `album_id` because a space track has no stored art and its cover is
+/// derived from that id.
+#[derive(Clone, PartialEq)]
+pub struct SpaceRow {
+    pub track_id: i64,
+    pub artist: String,
+    pub title: String,
+    pub album_id: String,
+}
+
+/// Tracks in the space matching the search box, and how many matched in all.
+///
+/// A context rather than a prop: the shell owns the scan, but the column that
+/// draws the results is `LibraryPanel`, and threading a list through every
+/// intervening component to get there is how the two lists ended up in two
+/// different columns in the first place.
+#[derive(Clone, Copy)]
+pub struct SpaceMatches(pub Memo<(Vec<SpaceRow>, usize)>);
+
 /// Artists the user has hidden, and the actions that change that. A signal
 /// rather than a per-render read: the engine's copy sits behind a mutex the UI
 /// cannot subscribe to.
@@ -67,5 +150,49 @@ impl Blocklist {
     /// someone else's id can still slip through.
     fn hides(&self, track: &RemoteTrack) -> bool {
         track.artist_id.is_some_and(|id| self.contains(id))
+    }
+}
+
+// -------------------------------------------------------------------- covers
+
+/// Artwork, as a background rather than an `<img>`.
+///
+/// Deliberate: a URL that 404s, and `qobuz::cover_url` guesses some of them,
+/// leaves the placeholder showing instead of a broken-image glyph, with no
+/// `onerror` handler to install. Sizing is the caller's, via `class`.
+#[component]
+pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
+    // Single quotes and parens would break out of `url('…')`. Qobuz sends
+    // neither, so a URL containing one is corrupt rather than merely unusual.
+    let art = url.filter(|u| !u.contains(['\'', '(', ')']));
+    let class = class.unwrap_or_default();
+
+    // The URL rides as a data attribute and `covers.js` promotes it to a
+    // background when the box nears the viewport. Setting it inline here
+    // fetched every cover the moment it painted, which for a 500-row shelf is
+    // 500 requests at once, and asking WebKitGTK for that is how scrolling
+    // stops being smooth.
+    //
+    // An `<img loading="lazy">` would get the laziness for free but not the
+    // failure behaviour: `cover_url` *guesses* the album art path, so a 404 is
+    // expected, and a background leaves the placeholder tint where an `<img>`
+    // shows a broken glyph. Recovering that would need an `onerror` hook per
+    // cover, thousands per shelf.
+    //
+    // `eager` opts out, for the few covers that are always on screen.
+    let eager = class.split_whitespace().any(|c| c == "eager");
+
+    rsx! {
+        div {
+            class: "cover {class}",
+            "data-cover": match (&art, eager) {
+                (Some(url), false) => url.clone(),
+                _ => String::new(),
+            },
+            style: match (&art, eager) {
+                (Some(url), true) => format!("background-image:url('{url}')"),
+                _ => String::new(),
+            },
+        }
     }
 }

@@ -29,7 +29,9 @@ body {
 
 header {
   display: flex;
-  align-items: baseline;
+  /* Centred, not baseline: the header now holds an input, and a text baseline
+     shared with a bordered box sits the box visibly low. */
+  align-items: center;
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -68,13 +70,32 @@ code {
 
 .spacer { flex: 1; }
 
-/* Qobuz on the left, the map in the middle, space tools on the right. */
-.body { display: flex; gap: 12px; flex: 1; min-height: 0; }
+/* One browse column and the space tools beside it. `relative` because the map
+   overlays this box rather than sitting in it. */
+.body { display: flex; gap: 12px; flex: 1; min-height: 0; position: relative; }
 
+/* The browse column is now the primary surface, one list holding both what
+   the space has and what Qobuz will sell you, so it takes the room the map
+   used to. */
 .library {
-  width: 360px;
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 380px;
   min-height: 0;
+}
+
+/* Source headings. Louder than a plain shelf heading, because they are what
+   tells you why a row is where it is. */
+.source-head {
+  color: var(--text);
+  border-bottom: 1px solid var(--row);
+  padding-bottom: 4px;
+  margin-top: 14px;
+}
+.source-head:first-child { margin-top: 0; }
+
+.more-rows {
+  align-self: flex-start;
+  margin: 6px 0 2px 7px;
 }
 
 .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -136,20 +157,129 @@ code {
 .shelf .list { overflow-y: visible; flex: none; }
 
 .notice { color: var(--accent); }
+
+/* The result's heading names what produced it. A sentence, not a section
+   label, so it drops `shelf-head`'s uppercasing and tracking. */
+.result-head {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  gap: 8px;
+}
+.result-head .ellipsis { min-width: 0; }
+.result-head .chip { flex: none; }
 .tag { flex: none; }
 
 .row.playing { color: var(--accent); }
 .row.playing .title { font-weight: 600; }
 
+/* ------------------------------------------------------------------ covers */
+
+/* Artwork is a background rather than an <img>, so a URL that 404s, and
+   `qobuz::cover_url` guesses some of them, leaves the placeholder tint
+   instead of a broken-image glyph. */
+/* Size-agnostic: `.cover` is the artwork itself, and the variants below place
+   it. It used to carry the row-specific placement, which a tile cannot use. */
+.cover {
+  background: var(--row-hover) center / cover no-repeat;
+  border-radius: 4px;
+}
+
+/* In a row. Rows align on the baseline, which a box holding no text does not
+   have, hence the explicit centring. */
+.thumb {
+  flex: none;
+  align-self: center;
+  width: 44px;
+  height: 44px;
+}
+.round { border-radius: 50%; }
+.now-art { flex: none; align-self: center; width: 48px; height: 48px; border-radius: 6px; }
+
+/* ------------------------------------------------------------------ tiles
+   Art goes where art is the identity: albums and artists are recognised by
+   their covers, so those sections are grids. Tracks stay rows, fifty
+   identical covers down one tracklist tells you nothing a title would not,
+   and costs the whole column's width to say it. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px 10px;
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  position: relative;
+  min-width: 0;
+}
+
+/* Fixed box, always: a cover that arrives late must not reflow the grid it
+   landed in. `aspect-ratio` alone would not do it, the width has to be
+   settled before the image exists. */
+.tile .cover {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+}
+.tile .round { border-radius: 50%; }
+
+.tile .title, .tile .artist {
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile .title { flex: none; }
+.tile .artist { min-width: 0; }
+
+/* The tile's own menu button, over the art rather than beside the text. */
+.tile .more {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tile .chip { visibility: hidden; }
+  .tile:hover .chip { visibility: visible; }
+  .tile:hover .cover { outline: 2px solid var(--accent); outline-offset: 1px; }
+}
+
+/* An overlay over the body rather than a column in it.
+
+   The background must stay opaque and must stay `--panel`: map.js reads
+   `getComputedStyle(canvas.parentElement).backgroundColor` and premultiplies
+   the rasterised point cloud against it. A translucent backdrop, the
+   obvious thing to reach for on an overlay, would tint 28k points wrong.
+   For the same reason, and because this is Cairo, no backdrop-filter and no
+   large shadows. */
 .map-wrap {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 20;
   background: var(--panel);
   border-radius: 8px;
   overflow: hidden;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-#map { width: 100%; height: 100%; display: block; cursor: grab; }
+.map-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  flex: none;
+}
+
+#map { width: 100%; flex: 1; min-height: 0; display: block; cursor: grab; }
 
 /* Each panel takes its natural height and the column scrolls as a whole.
    A fixed grid squeezed the lists into a sliver once the weights panel grew
@@ -166,6 +296,38 @@ code {
 
 .side .panel { flex: none; }
 .side .list { max-height: 260px; }
+
+/* ----------------------------------------------------------------- detail
+   Where the selection landed once selecting stopped generating. The cover is
+   the largest thing in the window on purpose: it is the one place artwork is
+   the subject rather than a label. */
+.detail { gap: 10px; }
+
+.detail-art {
+  width: 100%;
+  max-width: 240px;
+  aspect-ratio: 1;
+  align-self: center;
+  border-radius: 8px;
+}
+
+.detail-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.detail-title { font-size: 15px; font-weight: 600; }
+.detail-badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+
+/* Two rows: what to do with the track, then where to go from it. Wrapping
+   rather than scrolling, because a hidden verb is a verb nobody uses. */
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+.detail-actions button { flex: 1 1 auto; white-space: nowrap; }
+
+/* Keeps its height with nothing selected, so picking a track does not shove
+   the column's contents down the page. */
+.detail-empty { min-height: 120px; justify-content: center; }
 
 .search {
   background: var(--row);
@@ -201,6 +363,18 @@ ol.list .row::before {
   padding: 5px 7px;
   border-radius: 5px;
   cursor: pointer;
+}
+
+/* Anything a long press can open a menu on. Without this the platform's own
+   text-selection UI engages mid-press, the magnifier on Android, the
+   selection handles in WebKitGTK, and the gesture becomes a fight over what
+   is being held. `pan-y` keeps vertical scrolling working while the timer
+   runs, so a press that turns into a scroll still scrolls. */
+[data-menu] {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-y;
 }
 .row.selected { background: var(--accent); color: #12131a; }
 .row.selected .artist, .row.selected .muted { color: #12131a; }
@@ -241,6 +415,154 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .slider label { font-size: 12px; }
 .slider input { width: 100%; }
+
+/* ---------------------------------------------------------- context menus */
+
+/* Invisible, full-window, and under the menu: one click anywhere dismisses,
+   which is what makes the menu safe to open from a row that is itself
+   clickable. */
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.context-menu {
+  position: fixed;
+  min-width: 190px;
+  max-width: min(280px, calc(100vw - 16px));
+  /* Long menus (an album's) must not run off a short window. */
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--row);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+
+/* Which row this menu belongs to, opened from a list, the pointer has
+   usually moved away from it by the time the menu is read. */
+.menu-head {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--row);
+  margin-bottom: 4px;
+}
+.menu-head .title { font-weight: 600; }
+.menu-head .title, .menu-head .muted {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border-radius: 5px;
+  padding: 7px 10px;
+  font: inherit;
+}
+.menu-item:hover:not(:disabled) { background: var(--row-hover); }
+.menu-item.danger { color: #f7768e; }
+.menu-item:disabled { opacity: 0.35; }
+
+.menu-rule {
+  height: 1px;
+  background: var(--row);
+  margin: 4px 6px;
+}
+
+/* The one button a row keeps. Dim until the row is touched, so a long list
+   reads as text rather than as a column of controls. */
+.chip.more {
+  padding: 2px 6px;
+  line-height: 1;
+  opacity: 0.45;
+}
+.row:hover .chip.more { opacity: 1; }
+
+/* No hover on a touch screen, so it would never light up. */
+@media (hover: none) {
+  .chip.more { opacity: 0.8; }
+}
+
+.in-space-dot { color: var(--accent); font-size: 14px; line-height: 1; }
+
+/* ----------------------------------------------------------------- modals */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 20;
+}
+
+.modal {
+  /* `.setup` centres itself in a page; inside a backdrop it is already
+     centred, and needs to stop growing instead. */
+  margin: 0;
+  width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  cursor: default;
+}
+
+.modal .actions { align-items: center; }
+
+/* ----------------------------------------------------------- queue drawer */
+
+/* Sits between the body and the player bar, so it pushes the layout up rather
+   than floating over it, an overlay would cover the list you queue from. */
+.queue-drawer {
+  flex: none;
+  margin-top: 12px;
+  max-height: 40vh;
+}
+
+.queue-drawer h2 { gap: 8px; }
+.queue-list { max-height: 34vh; }
+
+/* The drag handle. `touch-action: none` is what makes a drag here reorder
+   instead of scrolling, and why it is on the grip alone, so dragging
+   anywhere else on the row still scrolls the list. */
+.queue-grip {
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+  padding: 0 4px;
+  color: var(--muted);
+  opacity: 0.45;
+  line-height: 1;
+}
+.row:hover .queue-grip { opacity: 1; }
+@media (hover: none) {
+  .queue-grip { opacity: 0.8; }
+}
+
+/* Lifted out of the list while it is being dragged, and above the rows it is
+   sliding past. `position: relative` is what gives it a z-index to use. */
+.queue-list li.dragging {
+  position: relative;
+  z-index: 2;
+  cursor: grabbing;
+  background: var(--row-hover);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* Rows animate into the gap; the dragged one follows the pointer and must
+   not lag behind it. */
+.queue-list li { transition: transform 120ms ease; }
+.queue-list li.dragging { transition: none; }
 
 /* ------------------------------------------------------------- player bar */
 
@@ -312,7 +634,12 @@ button.danger:hover:not(:disabled) { background: #f7768e; color: #12131a; }
 
 .hidden-artists {
   border-top: 1px solid var(--row);
-  margin-top: 8px;
+  /* `auto`, not a fixed gap: this has to sit at the bottom of the column
+     whatever precedes it. Relying on the shelf's `flex: 1` to push it there
+     works only while the shelf is what is rendered, the loading and error
+     placeholders are plain paragraphs, and a short result list left this
+     riding up under the last row. */
+  margin-top: auto;
   padding-top: 6px;
   flex: none;
 }
@@ -470,10 +797,10 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   }
   .panes .tab { flex: 1; padding: 9px 4px; }
 
-  /* One pane at a time. */
+  /* One pane at a time. The map is not one of them, it overlays whichever
+     pane is showing, at every width, so it is left out of this entirely. */
   .body { flex-direction: column; gap: 0; }
   .body > .library,
-  .body > .map-wrap,
   .body > .side {
     display: none;
     width: auto;
@@ -481,7 +808,6 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
     min-height: 0;
   }
   .body.pane-library > .library { display: flex; }
-  .body.pane-map > .map-wrap { display: block; }
   .body.pane-tools > .side { display: flex; }
 
   /* ------------------------------------------------- one scroller per pane
@@ -499,7 +825,7 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
 
   .shelf,
   .shelf .list,
-  .side .list:not(.in-space),
+  .side .list,
   .hidden-artists,
   .hidden-artists .list {
     overflow: visible;
@@ -535,6 +861,10 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   .search { font-size: 16px; padding: 10px; }
   .search-wrap .search { padding-right: 40px; }
   .clear-search { height: 42px; width: 38px; font-size: 20px; }
+
+  /* The search box gets its own line rather than fighting the title and the
+     view tabs for a 393px row. */
+  .header-search { flex: 1 1 100%; max-width: none; order: 1; }
 
   /* Sliders are the fiddliest thing on a touch screen; give the thumb room. */
   .slider { grid-template-columns: 64px 1fr 32px; }
@@ -598,24 +928,34 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
 
   /* An artist name and a title on one 393px line leaves room for neither. */
   .artist { min-width: 30%; }
+
+  /* Three across a 393px screen rather than two and a gap. */
+  .tiles { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px 8px; }
+  /* No hover on a touch screen, so the tile's menu button has to stay put. */
+  .tile .chip { visibility: visible; }
 }
 
-/* Phones in portrait, where the map needs to be worth switching to. */
+/* Phones in portrait. The browse column's desktop minimum would overflow a
+   393px screen. */
 @media (max-width: 560px) {
-  .body.pane-map > .map-wrap { min-height: 60vh; }
-  .list.in-space { height: 38vh; }
+  .library { min-width: 0; }
 }
 
-/* ------------------------------------------------------- in-space search
+/* --------------------------------------------------------------- search
    A clear button inside the field, so emptying a long query does not mean
-   selecting the text first.
-
-   The list keeps one height rather than growing and shrinking with the
-   result count. It sits above Generate and Weights in a shared column, so a
-   list that resized on every keystroke dragged both panels up and down the
-   page while you were still typing. */
+   selecting the text first. */
 .search-wrap { position: relative; display: flex; flex-direction: column; }
 .search-wrap .search { padding-right: 30px; }
+
+/* The one search box, in the header because it drives both columns. Wide
+   enough to be the obvious place to start typing, capped so it does not push
+   the selected-track label off the end of the bar. */
+.header-search {
+  flex: 1 1 320px;
+  max-width: 420px;
+  min-width: 180px;
+}
+.header-search .search { margin-bottom: 0; }
 
 .clear-search {
   position: absolute;
@@ -636,18 +976,6 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
    "this is interactive" rather than the text caret a bare canvas gets. */
 #map { cursor: crosshair; }
 #map:active { cursor: grabbing; }
-
-.list.in-space {
-  height: 258px;
-  max-height: none;
-  overflow-y: auto;
-  flex: none;
-}
-.list.in-space .empty {
-  color: var(--muted);
-  padding: 6px 7px;
-  cursor: default;
-}
 
 /* ---------------------------------------------------------------- volume
    Independent of the device's own level, so the phone's hardware keys still
