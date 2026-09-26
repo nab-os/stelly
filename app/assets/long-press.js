@@ -1,4 +1,4 @@
-// Long press opens the row menu, on a touch screen and with the mouse.
+// Long press opens the row menu on a touch screen.
 //
 // Right-click covers the pointer case and is handled in Rust, per row. Touch
 // has no right-click, which left every row action unreachable on a phone,
@@ -25,7 +25,11 @@
 // swappable so a re-run replaces the channel instead of stacking a second
 // copy of every listener.
 (() => {
-  const HOLD_MS = 500;
+  // Under Android's own long-press timeout (400ms by default): at that point
+  // the WebView starts its native gesture and can cancel the pointer, and a
+  // timer still waiting for 500ms never fired, so on a phone holding a row
+  // could do nothing at all.
+  const HOLD_MS = 350;
   // Enough slack for a thumb that is not perfectly still, tight enough that a
   // deliberate scroll cancels.
   const SLOP_PX = 10;
@@ -41,6 +45,8 @@
 
   let timer = null;
   let origin = null;
+  // The row being held, while the timer runs.
+  let pressed = null;
   // Set when the menu opens, so the click that ends the press does not also
   // activate the row underneath it.
   let swallowNextClick = false;
@@ -49,34 +55,38 @@
     if (timer !== null) clearTimeout(timer);
     timer = null;
     origin = null;
+    pressed = null;
+  };
+
+  const open = () => {
+    const row = pressed;
+    const at = origin;
+    cancel();
+    if (!row) return;
+    swallowNextClick = true;
+    if (window.twoKhzLongPressSend) {
+      window.twoKhzLongPressSend({
+        target: row.dataset.menu,
+        x: at ? at.x : 0,
+        y: at ? at.y : 0,
+      });
+    }
   };
 
   document.addEventListener(
     "pointerdown",
     (event) => {
-      // A mouse gets it too, on the main button: right-click still works,
-      // but holding a row is the same gesture everywhere, which is easier
-      // to remember than which input device wants which.
-      if (event.pointerType === "mouse" && event.button !== 0) return;
+      // A mouse keeps the native path: right-click is instant, and a mouse
+      // held still over a row should not sprout a menu.
+      if (event.pointerType === "mouse") return;
 
       const row = event.target.closest && event.target.closest("[data-menu]");
       if (!row) return;
-      // A held grip is the start of a queue drag, not a request for a menu.
-      if (event.target.closest(".queue-grip")) return;
 
+      cancel();
+      pressed = row;
       origin = { x: event.clientX, y: event.clientY };
-      timer = setTimeout(() => {
-        timer = null;
-        swallowNextClick = true;
-        if (window.twoKhzLongPressSend) {
-          window.twoKhzLongPressSend({
-            target: row.dataset.menu,
-            x: origin ? origin.x : 0,
-            y: origin ? origin.y : 0,
-          });
-        }
-        origin = null;
-      }, HOLD_MS);
+      timer = setTimeout(open, HOLD_MS);
     },
     { passive: true }
   );
@@ -103,7 +113,14 @@
   // to next is the thing to drop, on a row or not.
   document.addEventListener(
     "contextmenu",
-    () => {
+    (event) => {
+      // The platform's own long press beat the timer: open now, before the
+      // pointercancel that usually follows it throws the press away.
+      if (pressed) {
+        event.preventDefault();
+        open();
+        return;
+      }
       swallowNextClick = true;
       // In case WebKit does not follow this contextmenu with a click after
       // all (behaviour that motivated this fix has not been seen on every
