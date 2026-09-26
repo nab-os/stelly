@@ -17,9 +17,9 @@ use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 /// screen; "show more" triples it.
 const FIRST_SHOWN: usize = 80;
 
-/// Which kinds of result a search shows. Taken from the chip that was lit
-/// when typing started: filtering from "tracks" and getting albums and
-/// artists back as well read as the filter being ignored.
+/// Which kinds of result a search shows. Every search starts with all of
+/// them; the tracks/albums/artists chips narrow it, and tapping the lit one
+/// again widens it back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
     Everything,
@@ -46,9 +46,11 @@ impl Scope {
 /// sorting the tracks by title and leaving the albums beside them as they came
 /// would read as the sort half working. A key a section has nothing for
 /// (duration, for an album) leaves that section as it came.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SortKey {
-    #[default]
+    /// When it was favourited. Only favourites know, so anywhere else this
+    /// leaves the order as it came.
+    Liked,
     Default,
     Title,
     Artist,
@@ -58,7 +60,8 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    const ALL: [SortKey; 6] = [
+    const ALL: [SortKey; 7] = [
+        SortKey::Liked,
         SortKey::Default,
         SortKey::Title,
         SortKey::Artist,
@@ -69,7 +72,8 @@ impl SortKey {
 
     fn label(self) -> &'static str {
         match self {
-            SortKey::Default => "default",
+            SortKey::Liked => "liked date",
+            SortKey::Default => "original order",
             SortKey::Title => "title",
             SortKey::Artist => "artist",
             SortKey::Album => "album",
@@ -79,10 +83,18 @@ impl SortKey {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Sort {
     pub key: SortKey,
     pub descending: bool,
+}
+
+/// Most recently liked first: home is a mixed list, and liked date is the one
+/// order that puts its tracks, albums and artists into a single timeline.
+impl Default for Sort {
+    fn default() -> Self {
+        Sort { key: SortKey::Liked, descending: true }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -140,9 +152,9 @@ pub(crate) fn names_track(terms: &[String], title: &str) -> bool {
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
     Search { query: String, scope: Scope },
-    FavouriteTracks,
-    FavouriteAlbums,
-    FavouriteArtists,
+    /// The home view: what the account has liked. Mixed, like a search,
+    /// and narrowed by the same chips.
+    Favourites { scope: Scope },
     Playlists,
     Playlist { id: i64, name: String },
     /// The full object, not just its id and title, carried over from
@@ -160,9 +172,7 @@ impl View {
     fn label(&self) -> String {
         match self {
             View::Search { query, .. } => format!("results for “{query}”"),
-            View::FavouriteTracks => "favourite tracks".into(),
-            View::FavouriteAlbums => "favourite albums".into(),
-            View::FavouriteArtists => "favourite artists".into(),
+            View::Favourites { .. } => "favourites".into(),
             View::Playlists => "your playlists".into(),
             View::Playlist { name, .. } => name.clone(),
             View::Album(album) => album.title.clone(),
@@ -178,14 +188,22 @@ impl View {
         matches!(self, View::Playlists | View::Playlist { .. })
     }
 
-    /// What a search started from here should be narrowed to.
+    /// What the current search is narrowed to. Anything else is not a
+    /// search, and the one it starts is mixed: the chip lit while browsing
+    /// names a list of favourites, not a filter to carry into a search.
     pub(crate) fn scope(&self) -> Scope {
         match self {
             View::Search { scope, .. } => *scope,
-            View::FavouriteTracks => Scope::Tracks,
-            View::FavouriteAlbums => Scope::Albums,
-            View::FavouriteArtists => Scope::Artists,
             _ => Scope::Everything,
+        }
+    }
+
+    /// The narrowing the tracks/albums/artists chips light up for. Only the
+    /// two mixed views have one; anywhere else, a chip goes home.
+    fn filter(&self) -> Option<Scope> {
+        match self {
+            View::Search { scope, .. } | View::Favourites { scope } => Some(*scope),
+            _ => None,
         }
     }
 }
@@ -269,7 +287,7 @@ pub(crate) struct Liked {
 impl Library {
     pub fn new() -> Self {
         Self {
-            view: Signal::new(View::FavouriteTracks),
+            view: Signal::new(View::Favourites { scope: Scope::Everything }),
             shelf: Signal::new(Shelf::default()),
             loaded: Signal::new(Shelf::default()),
             sort: Signal::new(Sort::default()),
@@ -411,12 +429,17 @@ impl Library {
         }
     }
 
-    /// Re-run the current search over a different kind of result. Replaces
-    /// rather than pushes, the same as refining the query does.
-    fn rescope(self, scope: Scope) {
+    /// A tracks/albums/artists chip. In a mixed view it narrows to that
+    /// kind, or widens back to everything if it was already the one lit;
+    /// replacing rather than pushing, the same as refining a query does.
+    /// Anywhere else it goes home, narrowed to that kind.
+    fn filter(self, chip: Scope) {
         let current = self.view.peek().clone();
-        if let View::Search { query, .. } = current {
-            self.show(View::Search { query, scope });
+        let scope = if current.filter() == Some(chip) { Scope::Everything } else { chip };
+        match current {
+            View::Search { query, .. } => self.show(View::Search { query, scope }),
+            View::Favourites { .. } => self.show(View::Favourites { scope }),
+            _ => self.go(View::Favourites { scope: chip }),
         }
     }
 
@@ -427,7 +450,7 @@ impl Library {
             return;
         }
         if self.history.peek().is_empty() {
-            self.show(View::FavouriteTracks);
+            self.show(View::Favourites { scope: Scope::Everything });
         } else {
             self.back();
         }
@@ -513,7 +536,7 @@ impl Default for Library {
 /// First load, so the app shell does not have to reach into navigation.
 /// Favourites, because that is also what the crawl seeds from.
 pub fn open_initial(library: Library) {
-    library.show(View::FavouriteTracks);
+    library.show(View::Favourites { scope: Scope::Everything });
 }
 
 async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
@@ -536,10 +559,11 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
             if scope.tracks() {
                 shelf.tracks = found.tracks;
             }
-            // Only what the artist's or album's name brought in. Qobuz
-            // matches more loosely than a substring test (accents, for one),
-            // so a track this test cannot place at all stays.
-            if scope == Scope::Tracks {
+            // Only what the artist's or album's name brought in: those are
+            // the artist and album tiles' to show. Qobuz matches more loosely
+            // than a substring test (accents, for one), so a track this test
+            // cannot place at all stays.
+            if scope.tracks() {
                 let terms: Vec<String> =
                     query.to_lowercase().split_whitespace().map(str::to_string).collect();
                 shelf.tracks.retain(|track| {
@@ -559,9 +583,48 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
                 shelf.artists = found.artists;
             }
         }
-        View::FavouriteTracks => shelf.tracks = backend().favourite_tracks(LIST_CAP).await?,
-        View::FavouriteAlbums => shelf.albums = backend().favourite_albums(LIST_CAP).await?,
-        View::FavouriteArtists => shelf.artists = backend().favourite_artists(LIST_CAP).await?,
+        View::Favourites { scope } => {
+            let (tracks, albums, artists) = tokio::join!(
+                async {
+                    if scope.tracks() {
+                        backend().favourite_tracks(LIST_CAP).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+                async {
+                    if scope.albums() {
+                        backend().favourite_albums(LIST_CAP).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+                async {
+                    if scope.artists() {
+                        backend().favourite_artists(LIST_CAP).await
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+            );
+            shelf.tracks = tracks?;
+            shelf.albums = albums?;
+            shelf.artists = artists?;
+
+            // A liked album or artist is shown as its tile, not again as
+            // every liked track inside it. Only when mixed: narrowed to
+            // tracks, there is no tile to stand in for them.
+            if scope == Scope::Everything {
+                let albums: std::collections::HashSet<&str> =
+                    shelf.albums.iter().map(|album| album.id.as_str()).collect();
+                let artists: std::collections::HashSet<i64> =
+                    shelf.artists.iter().map(|artist| artist.id).collect();
+                shelf.tracks.retain(|track| {
+                    !track.album_id.as_deref().is_some_and(|id| albums.contains(id))
+                        && !track.artist_id.is_some_and(|id| artists.contains(&id))
+                });
+            }
+        }
         View::Playlists => shelf.playlists = backend().playlists(LIST_CAP).await?,
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
         View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
@@ -690,7 +753,9 @@ pub fn LibraryPanel() -> Element {
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
     let searching = matches!(view, View::Search { .. });
-    let scope = view.scope();
+    // Home or a search with no chip lit: tracks, albums and artists in one
+    // list, sorted together, rather than a section for each.
+    let mixed = view.filter() == Some(Scope::Everything);
     // Only while searching, see `Library::shows_space`. The space has no
     // album or artist grouping of its own, it is a flat
     // set of analysed tracks, so it only has anything to say for the two
@@ -773,47 +838,25 @@ pub fn LibraryPanel() -> Element {
                 h2 { class: "ellipsis", "{view.label()}" }
             }
 
-            // What kind of thing you are browsing. Search used to be a tab
-            // here too, sharing a row with library/playlists; it is a header
-            // icon now (see `app.rs`'s `SearchBox`), so this row only ever
-            // has to say what four sources look like, not decide between
-            // finding something and browsing it. While a search is showing
-            // the first three narrow it instead, and a second tap on the lit
-            // one widens it back to everything; playlists are not something
-            // a search returns, so that chip goes.
-            if searching {
-                div { class: "actions",
-                    for (label, chip) in [
-                        ("tracks", Scope::Tracks),
-                        ("albums", Scope::Albums),
-                        ("artists", Scope::Artists),
-                    ] {
-                        button {
-                            class: if scope == chip { "chip active" } else { "chip" },
-                            onclick: move |_| {
-                                library.rescope(if scope == chip { Scope::Everything } else { chip })
-                            },
-                            "{label}"
-                        }
+            // What kind of thing you are looking at. Home and a search are
+            // both mixed, liked or found tracks, albums and artists together,
+            // and the first three chips narrow either one: a tap narrows, a
+            // second tap on the lit one widens back. Playlists is a place of
+            // its own rather than a narrowing, and not something a search
+            // returns, so it only shows outside one.
+            div { class: "actions",
+                for (label, chip) in [
+                    ("tracks", Scope::Tracks),
+                    ("albums", Scope::Albums),
+                    ("artists", Scope::Artists),
+                ] {
+                    button {
+                        class: if view.filter() == Some(chip) { "chip active" } else { "chip" },
+                        onclick: move |_| library.filter(chip),
+                        "{label}"
                     }
                 }
-            } else {
-                div { class: "actions",
-                    button {
-                        class: if view == View::FavouriteTracks { "chip active" } else { "chip" },
-                        onclick: move |_| library.go(View::FavouriteTracks),
-                        "tracks"
-                    }
-                    button {
-                        class: if view == View::FavouriteAlbums { "chip active" } else { "chip" },
-                        onclick: move |_| library.go(View::FavouriteAlbums),
-                        "albums"
-                    }
-                    button {
-                        class: if view == View::FavouriteArtists { "chip active" } else { "chip" },
-                        onclick: move |_| library.go(View::FavouriteArtists),
-                        "artists"
-                    }
+                if !searching {
                     button {
                         class: if view.is_playlists() { "chip active" } else { "chip" },
                         onclick: move |_| library.go(View::Playlists),
@@ -936,21 +979,29 @@ pub fn LibraryPanel() -> Element {
                     // the thing picked above, ignoring that filter entirely
                     // and reading as a second list bolted onto the one the
                     // chips claimed to control.
-                    if show_space {
+                    // A space-only mixed search puts the space's tracks in the
+                    // one list with its albums and artists, see `MixedRows`.
+                    if show_space && !(mixed && space_only) {
                         SpaceRows {}
                     }
 
-                    if !artists.is_empty() {
-                        ArtistRows { heading: "Artists".to_string(), similar: false }
-                    }
-                    if !albums.is_empty() {
-                        AlbumRows {}
-                    }
-                    if !shelf.playlists.is_empty() {
-                        PlaylistRows {}
-                    }
-                    if !tracks.is_empty() {
-                        TrackRows {}
+                    if mixed {
+                        if !nothing_from_qobuz || space_only {
+                            MixedRows {}
+                        }
+                    } else {
+                        if !artists.is_empty() {
+                            ArtistRows { heading: "Artists".to_string(), similar: false }
+                        }
+                        if !albums.is_empty() {
+                            AlbumRows {}
+                        }
+                        if !shelf.playlists.is_empty() {
+                            PlaylistRows {}
+                        }
+                        if !tracks.is_empty() {
+                            TrackRows {}
+                        }
                     }
                     if !similar.is_empty() {
                         ArtistRows { heading: "Similar artists".to_string(), similar: true }
@@ -1022,6 +1073,248 @@ fn SortMenu() -> Element {
                             "{label}"
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// One entry of a mixed view's single list. Shelf entries carry their index
+/// into the matching `visible_*` list, which is how their menus and "play
+/// from here" address them, the same as in the per-kind sections.
+#[derive(Clone, PartialEq)]
+enum Item {
+    Track(usize, RemoteTrack),
+    Album(usize, RemoteAlbum),
+    Artist(usize, RemoteArtist),
+    Space(SpaceRow),
+}
+
+impl Item {
+    /// What the sort compares, across kinds: "title" is an artist's name,
+    /// "artist" an album's artist. A key a kind has nothing for (an artist's
+    /// release date) puts it after everything that has one.
+    fn sort_value(&self, key: SortKey) -> Option<SortValue> {
+        match (self, key) {
+            (Item::Track(_, track), SortKey::Liked) => track.liked_at.map(SortValue::Number),
+            (Item::Album(_, album), SortKey::Liked) => album.liked_at.map(SortValue::Number),
+            (Item::Artist(_, artist), SortKey::Liked) => artist.liked_at.map(SortValue::Number),
+            (Item::Track(_, track), SortKey::Title) => text(&track.title),
+            (Item::Track(_, track), SortKey::Artist) => text(&track.artist),
+            (Item::Track(_, track), SortKey::Album) => text(&track.album),
+            (Item::Track(_, track), SortKey::Released) => track.released.as_deref().and_then(text),
+            (Item::Track(_, track), SortKey::Duration) => track.duration.map(SortValue::Number),
+            (Item::Album(_, album), SortKey::Title | SortKey::Album) => text(&album.title),
+            (Item::Album(_, album), SortKey::Artist) => text(&album.artist),
+            (Item::Album(_, album), SortKey::Released) => album.released.as_deref().and_then(text),
+            (Item::Artist(_, artist), SortKey::Title | SortKey::Artist) => text(&artist.name),
+            (Item::Space(row), SortKey::Title) => text(&row.title),
+            (Item::Space(row), SortKey::Artist) => text(&row.artist),
+            (Item::Space(row), SortKey::Album) => text(&row.album),
+            _ => None,
+        }
+    }
+}
+
+/// A mixed view's list: tracks, albums and artists together, in one order.
+/// "Default" is artists, then albums, then tracks, each as they came; any
+/// other sort interleaves them.
+#[component]
+fn MixedRows() -> Element {
+    let library = use_context::<Library>();
+    let player = use_context::<Player>();
+    let local = use_context::<LocalIds>();
+    let blocklist = use_context::<Blocklist>();
+    let selection = use_context::<Selection>().0;
+    let mut detail = use_context::<Detail>().0;
+    let mut menu = use_context::<ContextMenu>().0;
+    let reach = use_context::<SpaceReach>().0;
+    let matches = use_context::<SpaceMatches>();
+
+    let (liked_only, liked) = library.liked_state();
+    let space_only = library.searching_space_only();
+    let searching = matches!(&*library.view.read(), View::Search { .. });
+    let grid = *library.tracks_view.read() == TracksView::Grid;
+    let now_playing = player.current().map(|t| t.id);
+
+    let mut items: Vec<Item> = Vec::new();
+    {
+        let shelf = library.shelf.read();
+        items.extend(
+            shelf
+                .visible_artists(&blocklist, false)
+                .into_iter()
+                .enumerate()
+                .filter(|(_, a)| !liked_only || liked.artists.contains(&a.id))
+                .map(|(index, artist)| Item::Artist(index, artist)),
+        );
+        items.extend(
+            shelf
+                .visible_albums(&blocklist)
+                .into_iter()
+                .enumerate()
+                .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
+                .map(|(index, album)| Item::Album(index, album)),
+        );
+        items.extend(
+            qobuz_only(shelf.visible_tracks(&blocklist), &space_ids(&library, &matches))
+                .into_iter()
+                .filter(|(_, t)| !liked_only || liked.tracks.contains(&t.id))
+                .map(|(index, track)| Item::Track(index, track)),
+        );
+    }
+    if space_only {
+        items.extend(
+            matches
+                .0
+                .read()
+                .0
+                .iter()
+                .filter(|row| !liked_only || liked.tracks.contains(&row.track_id))
+                .cloned()
+                .map(Item::Space),
+        );
+    }
+    let sort = *library.sort.read();
+    let items = sort.apply(items, |item, key| item.sort_value(key));
+
+    if items.is_empty() {
+        return rsx! {};
+    }
+
+    let tile = if grid { "tile" } else { "row" };
+
+    rsx! {
+        // Under the space's own section in a search, so the two lists say
+        // where each came from. Home is all Qobuz, and a space-only search
+        // is all space, so neither needs it.
+        if searching && !space_only {
+            h3 { class: "shelf-head source-head", "Qobuz" }
+        }
+        ul { class: if grid { "tiles" } else { "list" },
+            for item in items {
+                match item {
+                    Item::Track(index, track) => rsx! {
+                        li {
+                            key: "track-{index}-{track.id}",
+                            class: if now_playing == Some(track.id) { "{tile} playing" } else { "{tile}" },
+                            onclick: move |_| {
+                                let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                play_list(player, queue, index);
+                            },
+                            "data-menu": MenuTarget::ShelfTrack(index).tag(),
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
+                            },
+                            Cover {
+                                url: track.image.clone(),
+                                class: if grid { String::new() } else { "thumb".to_string() },
+                            }
+                            if grid {
+                                {space_mark(local.0.read().contains(&track.id))}
+                                span { class: "title", "{track.title}" }
+                                {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                            } else {
+                                {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                                span { class: "title", "{track.title}" }
+                                if local.0.read().contains(&track.id) {
+                                    span { class: "in-space-dot", title: "analysed, on the map", "•" }
+                                }
+                                span { class: "muted", "{track.duration_label()}" }
+                            }
+                            {menu_button(menu, MenuTarget::ShelfTrack(index))}
+                        }
+                    },
+                    Item::Album(index, album) => rsx! {
+                        li {
+                            key: "album-{index}-{album.id}",
+                            class: "{tile}",
+                            onclick: {
+                                let album = album.clone();
+                                move |_| library.go(View::Album(album.clone()))
+                            },
+                            "data-menu": MenuTarget::ShelfAlbum(index).tag(),
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
+                            },
+                            Cover {
+                                url: album.image.clone(),
+                                class: if grid { String::new() } else { "thumb".to_string() },
+                            }
+                            if grid {
+                                span { class: "kind", "album" }
+                                {space_mark(reach.read().0.contains(&album.id))}
+                                span { class: "title", "{album.title}" }
+                                {artist_link(detail, album.artist_id, album.artist.clone(), "artist")}
+                            } else {
+                                {artist_link(detail, album.artist_id, album.artist.clone(), "artist")}
+                                span { class: "title", "{album.title}" }
+                                span { class: "muted", "album" }
+                            }
+                            {menu_button(menu, MenuTarget::ShelfAlbum(index))}
+                        }
+                    },
+                    Item::Artist(index, artist) => rsx! {
+                        li {
+                            key: "artist-{index}-{artist.id}",
+                            class: "{tile}",
+                            onclick: {
+                                let artist = artist.clone();
+                                move |_| detail.set(Some(DetailSubject::Artist(artist.clone())))
+                            },
+                            "data-menu": MenuTarget::ShelfArtist { index, similar: false }.tag(),
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar: false });
+                            },
+                            Cover {
+                                url: artist.image.clone(),
+                                class: if grid { "round".to_string() } else { "thumb round".to_string() },
+                            }
+                            if grid {
+                                {space_mark(reach.read().1.contains(&artist.id))}
+                                span { class: "title", "{artist.name}" }
+                                span { class: "artist", "artist" }
+                            } else {
+                                span { class: "artist", "{artist.name}" }
+                                span { class: "title" }
+                                span { class: "muted", "artist" }
+                            }
+                            {menu_button(menu, MenuTarget::ShelfArtist { index, similar: false })}
+                        }
+                    },
+                    Item::Space(row) => rsx! {
+                        li {
+                            key: "space-{row.track_id}",
+                            class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
+                            onclick: {
+                                let id = row.track_id;
+                                move |_| open_track(selection, detail, id)
+                            },
+                            "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
+                            oncontextmenu: {
+                                let id = row.track_id;
+                                move |event: Event<MouseData>| {
+                                    event.prevent_default();
+                                    open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                                }
+                            },
+                            Cover {
+                                url: crate::qobuz::cover_url(&row.album_id),
+                                class: if grid { String::new() } else { "thumb".to_string() },
+                            }
+                            if grid {
+                                span { class: "title", "{row.title}" }
+                                {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                            } else {
+                                {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                                span { class: "title", "{row.title}" }
+                            }
+                            {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
+                        }
+                    },
                 }
             }
         }
@@ -1177,12 +1470,14 @@ fn SpaceRows() -> Element {
 impl Shelf {
     fn sorted(self, sort: Sort) -> Shelf {
         let artist = |artist: &RemoteArtist, key: SortKey| match key {
+            SortKey::Liked => artist.liked_at.map(SortValue::Number),
             SortKey::Title | SortKey::Artist => text(&artist.name),
             _ => None,
         };
         Shelf {
             tracks: sort.apply(self.tracks, |track, key| match key {
                 SortKey::Default => None,
+                SortKey::Liked => track.liked_at.map(SortValue::Number),
                 SortKey::Title => text(&track.title),
                 SortKey::Artist => text(&track.artist),
                 SortKey::Album => text(&track.album),
@@ -1190,6 +1485,7 @@ impl Shelf {
                 SortKey::Duration => track.duration.map(SortValue::Number),
             }),
             albums: sort.apply(self.albums, |album, key| match key {
+                SortKey::Liked => album.liked_at.map(SortValue::Number),
                 SortKey::Title | SortKey::Album => text(&album.title),
                 SortKey::Artist => text(&album.artist),
                 SortKey::Released => album.released.as_deref().and_then(text),

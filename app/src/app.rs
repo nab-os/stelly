@@ -11,7 +11,7 @@ use crate::ui::{
     PlayerBar, QueueView, Search, Selection, SpaceMatches, SpaceReach, SpaceRow, Weights,
 };
 use crate::{engine, map, ServerConfig, Wiring};
-use crate::ui::library::{names_track, Scope, Sort};
+use crate::ui::library::{names_track, Sort};
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
 use std::rc::Rc;
@@ -28,6 +28,7 @@ struct Haystack {
     album: String,
 }
 
+#[cfg(test)]
 impl Haystack {
     fn contains(&self, term: &str) -> bool {
         self.artist.contains(term) || self.title.contains(term) || self.album.contains(term)
@@ -831,7 +832,6 @@ fn Shell() -> Element {
         };
 
         let sort = *library.sort.read();
-        let tracks_only = library.view.read().scope() == Scope::Tracks;
 
         if terms.is_empty() {
             let total = catalog.visible().count();
@@ -856,12 +856,9 @@ fn Shell() -> Element {
                     // run again with matching rows.
                     continue;
                 };
-                let matched = if tracks_only {
-                    names_track(&terms, &haystack.title)
-                } else {
-                    terms.iter().all(|term| haystack.contains(term))
-                };
-                if !matched {
+                // Title only: a track found through its artist's or album's
+                // name is that artist's or album's tile to show.
+                if !names_track(&terms, &haystack.title) {
                     continue;
                 }
                 // Something starting with what was typed is far likelier to
@@ -888,7 +885,9 @@ fn Shell() -> Element {
     use_context_provider(|| SpaceMatches(filtered));
 
     rsx! {
-        div { class: "app",
+        // `queue-open` lets a phone give the queue the list's whole height,
+        // see `.queue-drawer` in style.css.
+        div { class: if (player.queue_open)() { "app queue-open" } else { "app" },
             header {
                 h1 { "2kHz" }
                 span { class: "muted", "{total_tracks} tracks" }

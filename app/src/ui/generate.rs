@@ -392,6 +392,7 @@ pub(crate) fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
         // carried a credit string at all.
         released: None,
         performers: None,
+        liked_at: None,
     }
 }
 

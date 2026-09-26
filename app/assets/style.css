@@ -674,6 +674,22 @@ button:disabled { opacity: 0.4; cursor: default; }
    this lands on the circle's edge whatever size the tile is. */
 .tile .round ~ .space-mark { top: 0; left: 0; margin: 12% 0 0 12%; }
 
+/* In a mixed list an album tile and a track tile are the same square, so the
+   album says what it is. Tracks, the most common entry, go unmarked, and an
+   artist is already round. */
+.tile .kind {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  pointer-events: none;
+}
+.tile .kind ~ .space-mark { top: 24px; }
+
 /* ----------------------------------------------------------------- modals */
 
 .modal-backdrop {
@@ -1186,7 +1202,16 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
   }
   .pipeline > .panel { flex: none; min-width: 0; }
   .pipeline .log-panel { min-height: 220px; }
-  .pipeline .log-panel .log { min-height: 170px; }
+  /* Capped, or a natural-height panel grows to every buffered line and the
+     rest of the pipeline is a long scroll away below it. */
+  .pipeline .log-panel .log { min-height: 170px; max-height: 40vh; }
+
+  /* The queue takes the list's place rather than a strip under it: 40vh of
+     a phone is a handful of rows. The list is only hidden, not unmounted,
+     so closing the queue puts it back where it was. */
+  .app.queue-open .body { display: none; }
+  .queue-drawer { flex: 1; max-height: none; margin-top: 0; }
+  .queue-list { flex: 1; max-height: none; }
 
   /* A flex row that cannot wrap sets its container's min-content width. The
      device form, a text input and three buttons, was doing exactly that,
