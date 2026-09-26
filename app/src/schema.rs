@@ -2,6 +2,10 @@
 //! creates the tables, and this is only its shape, so a column added there
 //! needs adding here too, the compiler then finds every query it affects.
 //!
+//! Here rather than in the server so both sides of the catalogue read it
+//! through the same definitions: the server writes `two_khz.db`, the client
+//! reads the slim `catalog.db` built from it.
+//!
 //! SQLite's INTEGER is 64-bit, so every integer column is `BigInt`.
 
 diesel::table! {
@@ -83,18 +87,7 @@ diesel::table! {
     }
 }
 
-// Created by `auth`, not `schema.sql`; see `AuthStore::ensure_schema`.
-diesel::table! {
-    devices (id) {
-        id -> BigInt,
-        name -> Text,
-        scope -> Text,
-        token_hash -> Text,
-        created_at -> Text,
-        last_seen -> Nullable<Text>,
-    }
-}
-
+diesel::joinable!(tracks -> artists (artist_id));
 diesel::joinable!(tracks -> albums (album_id));
 diesel::joinable!(features -> tracks (track_id));
 diesel::joinable!(failures -> tracks (track_id));
@@ -109,5 +102,4 @@ diesel::allow_tables_to_appear_in_same_query!(
     layout,
     failures,
     blocked_artists,
-    devices,
 );

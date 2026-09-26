@@ -16,7 +16,7 @@ ARG DEBIAN_SUITE=trixie
 
 FROM rust:${RUST_VERSION}-${DEBIAN_SUITE} AS builder
 
-# rusqlite is `bundled` and tokenizers brings onig, so both want a C compiler.
+# SQLite is `bundled` and tokenizers brings onig, so both want a C compiler.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential pkg-config \
  && rm -rf /var/lib/apt/lists/*

@@ -43,7 +43,10 @@ memmap2 = "0.9"
 # `stream` is what lets the remote backend hold the pipeline log open as SSE
 # rather than polling it.
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "query", "stream"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# The catalogue, through the tables in `src/schema.rs`, which the server
+# shares. SQLite itself comes from `libsqlite3-sys` below, or on wasm from
+# Diesel's own `sqlite-wasm-rs`.
+diesel = { version = "2.3.13", features = ["sqlite"] }
 # Never named in the source: reqwest takes rustls with default features off,
 # which drops `prefer-post-quantum` and leaves X25519MLKEM768 advertised in
 # `supported_groups` with no matching key share. A server that prefers that
@@ -61,6 +64,12 @@ version = "0.7"
 optional = true
 # Defaults carry rsx!, signals, hooks and html, and no platform, that comes
 # from the desktop/mobile features above.
+
+# Bundled, so there is no system SQLite to match and Android needs nothing but
+# the NDK's clang. The server names it too: only one crate may link SQLite, so
+# the two have to agree on a version.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 
 # The JNI entry point and logging; see src/mobile.rs.
 [target.'cfg(target_os = "android")'.dependencies]

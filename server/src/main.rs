@@ -23,7 +23,8 @@ mod login;
 mod pipeline;
 mod qobuz;
 mod routes;
-mod schema;
+// Shared with the client, which reads the slim copy through the same tables.
+use two_khz::schema;
 mod stages;
 mod text;
 

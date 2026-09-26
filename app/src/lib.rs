@@ -14,6 +14,7 @@ pub mod logbuffer;
 pub mod map;
 pub mod paths;
 pub mod qobuz;
+pub mod schema;
 pub mod space;
 
 /// The window, and everything in it. Shared by every platform that has one.

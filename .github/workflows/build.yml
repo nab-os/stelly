@@ -413,7 +413,7 @@ jobs:
           target: server
           platforms: linux/amd64
           # A second arch here would only build under emulation, which for
-          # ort and rusqlite-bundled is most of an hour.
+          # ort and the bundled SQLite is most of an hour.
           push: ${{ github.ref_type == 'tag' }}
           load: ${{ github.ref_type != 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}

@@ -7,7 +7,6 @@
 //! and a `--purge` that deletes rows. `play` still needs a token: a stream URL
 //! is minted against the user's account, so handing those out is sharing it.
 
-use crate::schema::devices;
 use anyhow::Result;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -21,6 +20,19 @@ use std::time::Duration;
 
 /// 32 bytes, hex-encoded. Long enough that guessing is not a threat model.
 const TOKEN_BYTES: usize = 32;
+
+// Not in the shared `two_khz::schema`: clients have no business knowing the
+// table exists, and it is created here rather than by `schema.sql`.
+diesel::table! {
+    devices (id) {
+        id -> BigInt,
+        name -> Text,
+        scope -> Text,
+        token_hash -> Text,
+        created_at -> Text,
+        last_seen -> Nullable<Text>,
+    }
+}
 
 pub struct AuthStore {
     db_path: PathBuf,

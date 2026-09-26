@@ -379,6 +379,14 @@ mod tests {
         let qobuz: Option<String> = tracks::table.find(2).select(tracks::qobuz_json).first(slim).unwrap();
         assert_eq!(qobuz, None, "the slim copy leaves the payloads behind");
 
+        // And the client reads it back, in the space's row order.
+        let loaded = two_khz::db::Catalog::load(&target, &[99, 2]).unwrap();
+        assert_eq!(loaded.get(0).title, "<missing 99>");
+        let two = loaded.get(1);
+        assert_eq!((two.title.as_str(), two.artist.as_str(), two.bpm), ("Two", "Eight", Some(120.0)));
+        assert_eq!(loaded.clap_dims, 512);
+        assert!(loaded.blocked_artists.contains(&7));
+
         unblock_artist(&db_path, 7).unwrap();
         assert!(blocked_artists(&db_path).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
