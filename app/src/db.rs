@@ -215,6 +215,23 @@ impl Catalog {
     pub fn id_set(&self) -> HashSet<i64> {
         self.visible().map(|i| self.tracks[i].track_id).collect()
     }
+
+    /// Albums and artists with at least one visible track in the space, for
+    /// marking a Qobuz album or artist as one the map already reaches.
+    pub fn reach(&self) -> (HashSet<String>, HashSet<i64>) {
+        let mut albums = HashSet::new();
+        let mut artists = HashSet::new();
+        for i in self.visible() {
+            let track = &self.tracks[i];
+            if !track.album_id.is_empty() {
+                albums.insert(track.album_id.clone());
+            }
+            if track.artist_id >= 0 {
+                artists.insert(track.artist_id);
+            }
+        }
+        (albums, artists)
+    }
 }
 
 /// Just the ids, for refreshing a loaded catalog after a block changes.

@@ -7,14 +7,12 @@
 //!   - **path**: A to B, shortest route or evenly paced.
 //!   - **drift**: away from a track, towards a phrase.
 
-use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
-use super::player::{play_list, Player};
-use super::{MapView, Selection};
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use crate::paths::{Constraints, Step};
 use crate::qobuz::RemoteTrack;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -36,7 +34,7 @@ impl Mode {
         }
     }
 
-    fn blurb(self) -> &'static str {
+    pub(crate) fn blurb(self) -> &'static str {
         match self {
             Mode::Neighbours => "The most similar tracks to the selection.",
             Mode::Radio => "Keep jumping to the nearest track not yet played.",
@@ -112,12 +110,12 @@ impl Generator {
     }
 
     /// Whether drift is offerable at all.
-    fn can_steer(&self) -> bool {
+    pub(crate) fn can_steer(&self) -> bool {
         *self.tower.read() && crate::engine().lock().unwrap().has_audio_embeddings()
     }
 
     /// Whether the current mode has what it needs.
-    fn ready(&self, selected: Option<i64>) -> bool {
+    pub(crate) fn ready(&self, selected: Option<i64>) -> bool {
         match *self.mode.peek() {
             Mode::Neighbours | Mode::Radio => selected.is_some(),
             Mode::Path => self.from.peek().is_some() && self.to.peek().is_some(),
@@ -216,6 +214,7 @@ impl Generator {
                 generator.busy.set(false);
                 return;
             };
+            let produced = dedup_by_recording(produced);
             if produced.is_empty() {
                 generator
                     .status
@@ -324,7 +323,7 @@ impl Default for Generator {
 
 /// The result's heading. Says what made these rows, because with generation
 /// explicit they outlive the selection and the tab that produced them.
-fn describe(recipe: &Recipe, label: impl Fn(Option<i64>) -> String) -> String {
+pub(crate) fn describe(recipe: &Recipe, label: impl Fn(Option<i64>) -> String) -> String {
     match recipe {
         Recipe::Neighbours { seed } => format!("Neighbours of {}", label(Some(*seed))),
         Recipe::Radio { seed } => format!("Radio from {}", label(Some(*seed))),
@@ -338,6 +337,39 @@ fn describe(recipe: &Recipe, label: impl Fn(Option<i64>) -> String) -> String {
             format!("Drift from {} towards “{phrase}”", label(Some(*seed)))
         }
     }
+}
+
+/// Keep the first occurrence of each recording, dropping the rest.
+///
+/// The space has no ISRC-awareness in its distances: a single, an album cut
+/// and a deluxe reissue of the same song are three rows with three track
+/// ids, close enough in the space to plausibly both land in one
+/// neighbours/radio/path/drift result, which reads as "the same track
+/// twice", even though structurally it is not (`radio_nearest`, `interpolate`
+/// and `graph_path` already refuse to revisit the same *row*; this catches
+/// what they cannot see).
+///
+/// A post-processing step here rather than inside `paths.rs`: that module
+/// mirrors `pipeline/two_khz/paths.py`, the parity oracle the Rust port is
+/// checked against, and this filter has no Python equivalent to stay in step
+/// with, adding it to the shared algorithm would make the two disagree
+/// wherever the corpus has a duplicate ISRC.
+fn dedup_by_recording(steps: Vec<Step>) -> Vec<Step> {
+    let mut seen: HashSet<String> = HashSet::new();
+    steps
+        .into_iter()
+        .filter(|step| {
+            let key = step
+                .track
+                .isrc
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_ascii_uppercase)
+                .unwrap_or_else(|| format!("id:{}", step.track.track_id));
+            seen.insert(key)
+        })
+        .collect()
 }
 
 /// Present a space track to the player, which speaks in Qobuz terms.
@@ -355,276 +387,66 @@ pub(crate) fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
         // The space stores no art, so the cover is derived from the album id.
         image: crate::qobuz::cover_url(&meta.album_id),
         isrc: meta.isrc.clone(),
+        // Neither travels through the space, `TrackMeta` carries a release
+        // *year*, folded into the era block, not the full date, and never
+        // carried a credit string at all.
+        released: None,
+        performers: None,
     }
 }
 
-async fn export(track_ids: Vec<i64>) -> anyhow::Result<i64> {
-    let name = format!("two_khz ({} tracks)", track_ids.len());
-    backend().export_playlist(&name, &track_ids).await
-}
 
-#[component]
-pub fn GeneratePanel() -> Element {
-    let generator = use_context::<Generator>();
-    let player = use_context::<Player>();
-    let selection = use_context::<Selection>();
-    let mut selected = selection.0;
-    let mut menu = use_context::<ContextMenu>().0;
-    let map = use_context::<MapView>();
+#[cfg(test)]
+mod tests {
+    use super::dedup_by_recording;
+    use crate::db::TrackMeta;
+    use crate::paths::Step;
 
-    let mode = *generator.mode.read();
-    let result = generator.result.read().clone();
-    let empty = result.is_empty();
-    let has_selection = selected().is_some();
-
-    let label_for = |id: Option<i64>| -> String {
-        let Some(id) = id else { return "-".into() };
-        let guard = crate::engine().lock().unwrap();
-        guard
-            .navigator
-            .catalog
-            .tracks
-            .iter()
-            .find(|t| t.track_id == id)
-            .map(|t| format!("{} - {}", t.artist, t.title))
-            .unwrap_or_else(|| id.to_string())
-    };
-
-    // Asked once: whether the backend has a text tower at all. Locally that
-    // is an exported ONNX file, remotely it is whether the server has one.
-    use_future(move || async move {
-        let mut tower = generator.tower;
-        if let Ok(available) = backend().can_steer().await {
-            tower.set(available);
+    fn step(track_id: i64, isrc: Option<&str>) -> Step {
+        Step {
+            track: TrackMeta {
+                track_id,
+                title: format!("track {track_id}"),
+                artist: "someone".into(),
+                album: String::new(),
+                genre: String::new(),
+                artist_id: 1,
+                album_id: String::new(),
+                bpm: None,
+                seed_distance: 0,
+                isrc: isrc.map(str::to_string),
+                x: None,
+                y: None,
+            },
+            similarity: None,
         }
-    });
+    }
 
-    // Nothing generates on its own. Selecting a track used to re-run two of
-    // the four modes, which meant looking at something destroyed the list you
-    // were reading, and made the generate button a no-op in exactly those
-    // modes, so the panel showed one affordance that worked half the time
-    // while the real trigger was an unlabelled click somewhere else.
+    /// Two different track ids, same recording, a single and an album cut,
+    /// say. The second is what this filter exists to catch.
+    #[test]
+    fn drops_a_second_row_with_the_same_isrc() {
+        let steps = vec![step(1, Some("GBAAA0000001")), step(2, Some("gbaaa0000001"))];
+        let kept = dedup_by_recording(steps);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].track.track_id, 1);
+    }
 
-    rsx! {
-        section { class: "panel generate",
-            h2 { "Generate" }
+    /// No ISRC is not the same as a shared one, two untagged tracks must
+    /// not collapse into each other just because both keys are absent.
+    #[test]
+    fn untagged_tracks_are_never_treated_as_duplicates() {
+        let steps = vec![step(1, None), step(2, None)];
+        assert_eq!(dedup_by_recording(steps).len(), 2);
+    }
 
-            div { class: "tabs",
-                for option in Mode::ALL {
-                    button {
-                        key: "{option.label()}",
-                        class: if mode == option { "tab active" } else { "tab" },
-                        // Switching tabs changes which inputs are shown, and
-                        // nothing else. It used to clear the result, which the
-                        // auto-run effect then immediately undid; now the
-                        // result stays, labelled with what actually made it.
-                        onclick: move |_| {
-                            let mut mode = generator.mode;
-                            mode.set(option);
-                        },
-                        "{option.label()}"
-                    }
-                }
-            }
-            p { class: "muted", "{mode.blurb()}" }
-
-            // ------------------------------------------------ mode inputs
-            if mode == Mode::Path {
-                div { class: "field",
-                    span { class: "muted", "A" }
-                    span { class: "ellipsis", {label_for(*generator.from.read())} }
-                    button {
-                        class: "chip",
-                        disabled: !has_selection,
-                        onclick: move |_| { let mut from = generator.from; from.set(selected()); },
-                        "set"
-                    }
-                }
-                div { class: "field",
-                    span { class: "muted", "B" }
-                    span { class: "ellipsis", {label_for(*generator.to.read())} }
-                    button {
-                        class: "chip",
-                        disabled: !has_selection,
-                        onclick: move |_| { let mut to = generator.to; to.set(selected()); },
-                        "set"
-                    }
-                }
-                div { class: "field",
-                    span { class: "muted", "shape" }
-                    button {
-                        class: if *generator.even.read() { "chip" } else { "chip active" },
-                        onclick: move |_| { let mut even = generator.even; even.set(false); },
-                        "shortest"
-                    }
-                    button {
-                        class: if *generator.even.read() { "chip active" } else { "chip" },
-                        onclick: move |_| { let mut even = generator.even; even.set(true); },
-                        "evenly paced"
-                    }
-                }
-            }
-
-            if mode == Mode::Drift && !generator.can_steer() {
-                p { class: "muted error",
-                    "Drift needs the CLAP text tower on the server. Fetch it there with: "
-                    code { "two-khz-server models" }
-                }
-            }
-
-            if mode == Mode::Drift {
-                input {
-                    class: "search",
-                    placeholder: "darker and slower",
-                    value: "{generator.phrase}",
-                    oninput: move |event| { let mut phrase = generator.phrase; phrase.set(event.value()); },
-                }
-            }
-
-            if mode == Mode::Radio {
-                div { class: "slider",
-                    label { "artist pull" }
-                    input {
-                        r#type: "range",
-                        min: "0",
-                        max: "0.3",
-                        step: "0.01",
-                        value: "{generator.artist_penalty}",
-                        oninput: move |event| {
-                            if let Ok(value) = event.value().parse::<f32>() {
-                                let mut penalty = generator.artist_penalty;
-                                penalty.set(value);
-                            }
-                        },
-                    }
-                    span { class: "muted", {format!("{:.2}", generator.artist_penalty)} }
-                }
-            }
-
-            if mode != Mode::Path || *generator.even.read() {
-                div { class: "slider",
-                    label { "tracks" }
-                    input {
-                        r#type: "range",
-                        min: "5",
-                        max: "60",
-                        step: "1",
-                        value: "{generator.count}",
-                        oninput: move |event| {
-                            if let Ok(value) = event.value().parse::<usize>() {
-                                let mut count = generator.count;
-                                count.set(value);
-                            }
-                        },
-                    }
-                    span { class: "muted", "{generator.count}" }
-                }
-            }
-
-            // ---------------------------------------------------- actions
-            div { class: "actions",
-                button {
-                    class: "primary",
-                    disabled: !generator.ready(selected()) || *generator.busy.read(),
-                    onclick: move |_| generator.run(selected()),
-                    if *generator.busy.read() { "working…" } else { "generate" }
-                }
-                button {
-                    disabled: empty,
-                    onclick: move |_| {
-                        let queue: Vec<RemoteTrack> = generator
-                            .result
-                            .peek()
-                            .iter()
-                            .map(|step| as_remote(&step.track))
-                            .collect();
-                        play_list(player, queue, 0);
-                    },
-                    "play"
-                }
-                button {
-                    disabled: empty,
-                    onclick: move |_| {
-                        let ids: Vec<i64> = generator
-                            .result
-                            .peek()
-                            .iter()
-                            .map(|step| step.track.track_id)
-                            .collect();
-                        let mut status = generator.status;
-                        status.set(Some("exporting…".into()));
-                        spawn(async move {
-                            match export(ids).await {
-                                Ok(id) => status.set(Some(format!("exported as playlist {id}"))),
-                                Err(err) => status.set(Some(format!("{err:#}"))),
-                            }
-                        });
-                    },
-                    "export"
-                }
-                button {
-                    disabled: empty,
-                    onclick: move |_| generator.clear(),
-                    "clear"
-                }
-            }
-
-            if let Some(message) = generator.status.read().clone() {
-                p { class: "muted ellipsis", "{message}" }
-            }
-
-            // ----------------------------------------------------- result
-            if let Some(recipe) = generator.produced_by.read().clone() {
-                div { class: "shelf-head result-head",
-                    span { class: "ellipsis", "{describe(&recipe, label_for)}" }
-                    span { class: "spacer" }
-                    // The one action that dims the map: here the route is the
-                    // point, so everything not on it drops back.
-                    button {
-                        class: "chip",
-                        title: "trace this on the map",
-                        onclick: move |_| map.show_route(),
-                        "on the map"
-                    }
-                    if *generator.stale.read() {
-                        button {
-                            class: "chip notice",
-                            title: "the weights moved since these were chosen",
-                            onclick: {
-                                let recipe = recipe.clone();
-                                move |_| generator.rerun(&recipe)
-                            },
-                            "regenerate"
-                        }
-                    }
-                }
-            }
-            ol { class: "list",
-                for step in result {
-                    li {
-                        key: "{step.track.track_id}",
-                        class: if selected() == Some(step.track.track_id) { "row selected" } else { "row" },
-                        onclick: {
-                            let id = step.track.track_id;
-                            move |_| selected.set(Some(id))
-                        },
-                        "data-menu": MenuTarget::SpaceTrack(step.track.track_id).tag(),
-                        oncontextmenu: {
-                            let id = step.track.track_id;
-                            move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
-                            }
-                        },
-                        span { class: "artist", "{step.track.artist}" }
-                        span { class: "title", "{step.track.title}" }
-                        span { class: "muted",
-                            {step.similarity.map(|s| format!("{s:.3}")).unwrap_or_default()}
-                        }
-                        {menu_button(menu, MenuTarget::SpaceTrack(step.track.track_id))}
-                    }
-                }
-            }
-        }
+    #[test]
+    fn distinct_recordings_all_survive() {
+        let steps = vec![
+            step(1, Some("GBAAA0000001")),
+            step(2, Some("GBAAA0000002")),
+            step(3, None),
+        ];
+        assert_eq!(dedup_by_recording(steps).len(), 3);
     }
 }

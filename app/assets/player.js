@@ -33,9 +33,46 @@
     audio.volume = Math.max(0, Math.min(1, value));
   };
 
+  // What the OS shows as "now playing", and where a hardware or mouse
+  // previous/next button (and a lock screen's transport row) actually comes
+  // from, without this, WebKitGTK has nothing to hand to MPRIS/PipeWire's
+  // media-session bridge, so the app's name and art never reach it and its
+  // buttons have nothing registered to call.
+  window.twoKhzSetMetadata = (title, artist, album, artwork) => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title,
+      artist,
+      album,
+      artwork: artwork ? [{ src: artwork, sizes: "512x512", type: "image/jpeg" }] : [],
+    });
+  };
+
+  if ("mediaSession" in navigator) {
+    // Play/pause stay local, the audio element's own events below already
+    // tell Rust when they fire, the same as a click on the transport bar.
+    navigator.mediaSession.setActionHandler("play", () => audio.play().catch(() => {}));
+    navigator.mediaSession.setActionHandler("pause", () => audio.pause());
+    // Previous/next change *which track*, which only Rust knows how to pick
+    // (the queue, not this element), so these cross back over the channel
+    // rather than touching `audio` directly.
+    navigator.mediaSession.setActionHandler("previoustrack", () => {
+      dioxus.send({ type: "transport", action: "previous" });
+    });
+    navigator.mediaSession.setActionHandler("nexttrack", () => {
+      dioxus.send({ type: "transport", action: "next" });
+    });
+  }
+
   audio.addEventListener("ended", () => dioxus.send({ type: "ended" }));
-  audio.addEventListener("play", () => dioxus.send({ type: "playing", playing: true }));
-  audio.addEventListener("pause", () => dioxus.send({ type: "playing", playing: false }));
+  audio.addEventListener("play", () => {
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+    dioxus.send({ type: "playing", playing: true });
+  });
+  audio.addEventListener("pause", () => {
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+    dioxus.send({ type: "playing", playing: false });
+  });
 
   audio.addEventListener("error", () => {
     // Signed URLs expire, so a late click on a stale queue entry lands here

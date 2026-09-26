@@ -5,26 +5,27 @@
 //! space is the exception, always answered in-process.
 
 pub mod crawler;
-pub mod detail;
 pub mod generate;
 pub mod library;
 pub mod menu;
 pub mod pipeline;
 pub mod player;
 pub mod queue;
+pub mod sheet;
 
 pub use crawler::Crawler;
-pub use generate::{GeneratePanel, Generator};
+pub use generate::Generator;
 pub use library::{open_initial, Library, LibraryPanel};
-pub use detail::DetailPane;
 pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
 pub use pipeline::{Pipeline, PipelineView};
-pub use player::{use_transport, Player, PlayerBar};
+pub use player::{use_transport, FullPlayer, Player, PlayerBar};
 pub use queue::QueueView;
+pub use sheet::{DetailSheet, PathPill};
+pub(crate) use sheet::{AlbumDetail, ArtistDetail};
 
 use dioxus::prelude::*;
 use crate::api::BlockedArtist;
-use crate::qobuz::RemoteTrack;
+use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -45,10 +46,77 @@ pub(crate) const POLL: std::time::Duration = std::time::Duration::from_millis(20
 #[derive(Clone, Copy)]
 pub struct LocalIds(pub Memo<Rc<HashSet<i64>>>);
 
-/// The map/neighbours selection, owned by the app shell. Browsing can drive it
-/// when a Qobuz result turns out to be a track that was analysed.
+/// Album and artist ids with at least one track in `LocalIds`, what an
+/// album or artist tile reads to show the in-space mark. Kept apart from
+/// `LocalIds` because nearly every reader of that one only wants tracks.
+#[derive(Clone, Copy)]
+pub struct SpaceReach(pub Memo<Rc<(HashSet<String>, HashSet<i64>)>>);
+
+/// The in-space mark on a tile: a dot over the cover's corner. A list row
+/// uses the inline `in-space-dot` instead, beside the title.
+pub(crate) fn space_mark(in_space: bool) -> Element {
+    if !in_space {
+        return rsx! {};
+    }
+    rsx! { span { class: "space-mark", title: "in your space" } }
+}
+
+/// The map/generator's notion of "the track in hand", what a neighbours
+/// walk starts from, what the map highlights, what a path's A/B buttons
+/// name. Track-only, and only ever a space track: nothing else has
+/// coordinates to select.
+///
+/// This used to also be the detail sheet's open flag, which is what made
+/// "close the sheet, keep the point highlighted on the map" impossible,
+/// the only way to dim the sheet was to deselect, and deselecting is what
+/// the map reads to know what to highlight. `Detail` is the sheet's own flag
+/// now; the two move together almost everywhere (see `open_track`) except
+/// the one place that needed them not to.
 #[derive(Clone, Copy)]
 pub struct Selection(pub Signal<Option<i64>>);
+
+/// What the detail sheet is showing, if anything, a track (the space's or
+/// Qobuz's; nothing here requires the space), an album, or an artist.
+/// Independent of `Selection`; see its doc comment for why.
+#[derive(Clone, PartialEq)]
+pub enum DetailSubject {
+    Track(RemoteTrack),
+    Album(RemoteAlbum),
+    Artist(RemoteArtist),
+}
+
+#[derive(Clone, Copy)]
+pub struct Detail(pub Signal<Option<DetailSubject>>);
+
+/// A space track, as something to display or play. `None` when the id names
+/// nothing the space currently holds, selected, then the space was rebuilt
+/// without it, or a row's address outlived its target.
+pub(crate) fn space_track(track_id: i64) -> Option<RemoteTrack> {
+    let guard = crate::engine().lock().unwrap();
+    let row = *guard.navigator.index_of.get(&track_id)?;
+    Some(generate::as_remote(guard.navigator.catalog.get(row)))
+}
+
+/// Select a space track for the map and the generator, and open its detail
+/// sheet, the one action several different surfaces (a row, a map point, a
+/// menu item) all mean by "look at this track". Every one of them used to be
+/// a bare `selection.set(Some(id))`, back when that alone opened the sheet.
+///
+/// Not used by the sheet's own "On the map" button, which is the one place
+/// `Selection` and `Detail` are meant to move separately, see `Selection`'s
+/// doc comment.
+pub fn open_track(mut selection: Signal<Option<i64>>, mut detail: Signal<Option<DetailSubject>>, track_id: i64) {
+    selection.set(Some(track_id));
+    if let Some(track) = space_track(track_id) {
+        detail.set(Some(DetailSubject::Track(track)));
+    }
+}
+
+/// The dimension weight sliders' values, keyed by block name. A context
+/// rather than a prop: the shell owns the signal and reacts to the space
+/// being rebuilt, but the sliders themselves live in the track sheet.
+#[derive(Clone, Copy)]
+pub struct Weights(pub Signal<std::collections::HashMap<String, f32>>);
 
 /// The one search box. There used to be two, one filtering the analysed
 /// space as you typed, one asking Qobuz on Enter, which made "where do I
@@ -105,6 +173,19 @@ impl MapView {
         self.map_route.set(true);
         self.map_open.set(true);
     }
+
+    /// For the one persistent map button (the player bar's): open it if it
+    /// is not showing, close it if it is. Every other caller wants `browse`
+    /// or `show_route`'s one-way "definitely open it", asking to see a
+    /// track on the map should never accidentally close a map that was
+    /// already open on something else.
+    pub fn toggle(mut self) {
+        if *self.map_open.read() {
+            self.map_open.set(false);
+        } else {
+            self.browse();
+        }
+    }
 }
 
 /// A track in the analysed space, reduced to what a row needs. Carries
@@ -114,8 +195,54 @@ impl MapView {
 pub struct SpaceRow {
     pub track_id: i64,
     pub artist: String,
+    /// For the artist-name link; `None` where the space stores -1.
+    pub artist_id: Option<i64>,
     pub title: String,
     pub album_id: String,
+}
+
+/// Open an artist's detail from just the id and name a row already carries.
+/// `albums_count` and a portrait are left `None`; `ArtistDetail` renders fine
+/// without them, and the discography it fetches is what the sheet is for.
+pub(crate) fn open_artist(mut detail: Signal<Option<DetailSubject>>, id: i64, name: String) {
+    detail.set(Some(DetailSubject::Artist(RemoteArtist {
+        id,
+        name,
+        ..Default::default()
+    })));
+}
+
+/// An artist's name as a way to their detail sheet, wherever one appears,
+/// a library row or tile, a queue entry, the player. Almost all of those
+/// already have a click of their own (play the row, open the album, open
+/// "now playing"), hence `stop_propagation`: the name does its own thing and
+/// not the row's as well. Plain text when there is no id to go to.
+///
+/// A function, not a component, for the same reason as `menu_button`: no
+/// hooks, and a props struct per row is not worth it.
+pub(crate) fn artist_link(
+    detail: Signal<Option<DetailSubject>>,
+    id: Option<i64>,
+    name: String,
+    class: &'static str,
+) -> Element {
+    match id {
+        Some(id) => rsx! {
+            span {
+                class: "{class} clickable",
+                title: "open {name}",
+                onclick: {
+                    let name = name.clone();
+                    move |event: Event<MouseData>| {
+                        event.stop_propagation();
+                        open_artist(detail, id, name.clone());
+                    }
+                },
+                "{name}"
+            }
+        },
+        None => rsx! { span { class: "{class}", "{name}" } },
+    }
 }
 
 /// Tracks in the space matching the search box, and how many matched in all.
