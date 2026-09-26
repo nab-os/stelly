@@ -685,7 +685,7 @@ impl QobuzClient {
 
         bail!(
             "no configured app secret produced a valid signature (it may have rotated). \
-             Run `two_khz refresh-credentials --write`. Last error: {last_error}"
+             Run `two-khz-server refresh-credentials --write`. Last error: {last_error}"
         )
     }
 
