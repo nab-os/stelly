@@ -7,7 +7,7 @@ use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
 use super::{
     artist_link, open_track, AlbumDetail, ArtistDetail, Blocklist, Cover, Detail, DetailSubject, LocalIds,
-    Search, Selection, SpaceMatches, SpaceReach, space_mark, LIST_CAP, SEARCH_LIMIT,
+    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
 use crate::backend::backend;
@@ -17,9 +17,129 @@ use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 /// screen; "show more" triples it.
 const FIRST_SHOWN: usize = 80;
 
+/// Which kinds of result a search shows. Taken from the chip that was lit
+/// when typing started: filtering from "tracks" and getting albums and
+/// artists back as well read as the filter being ignored.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scope {
+    Everything,
+    Tracks,
+    Albums,
+    Artists,
+}
+
+impl Scope {
+    fn tracks(self) -> bool {
+        matches!(self, Scope::Everything | Scope::Tracks)
+    }
+
+    fn albums(self) -> bool {
+        matches!(self, Scope::Everything | Scope::Albums)
+    }
+
+    fn artists(self) -> bool {
+        matches!(self, Scope::Everything | Scope::Artists)
+    }
+}
+
+/// What every section of the list is ordered by. One choice for them all:
+/// sorting the tracks by title and leaving the albums beside them as they came
+/// would read as the sort half working. A key a section has nothing for
+/// (duration, for an album) leaves that section as it came.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SortKey {
+    #[default]
+    Default,
+    Title,
+    Artist,
+    Album,
+    Released,
+    Duration,
+}
+
+impl SortKey {
+    const ALL: [SortKey; 6] = [
+        SortKey::Default,
+        SortKey::Title,
+        SortKey::Artist,
+        SortKey::Album,
+        SortKey::Released,
+        SortKey::Duration,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SortKey::Default => "default",
+            SortKey::Title => "title",
+            SortKey::Artist => "artist",
+            SortKey::Album => "album",
+            SortKey::Released => "release date",
+            SortKey::Duration => "duration",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Sort {
+    pub key: SortKey,
+    pub descending: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SortValue {
+    Text(String),
+    Number(i64),
+}
+
+fn text(value: &str) -> Option<SortValue> {
+    Some(SortValue::Text(value.to_lowercase()))
+}
+
+impl Sort {
+    /// `items` in this order. "Default" is the order they came in, which
+    /// descending just reverses. Anything without a value for the key goes
+    /// last whichever way round, and ties keep the order they came in.
+    pub fn apply<T>(self, items: Vec<T>, value: impl Fn(&T, SortKey) -> Option<SortValue>) -> Vec<T> {
+        if self.key == SortKey::Default {
+            let mut items = items;
+            if self.descending {
+                items.reverse();
+            }
+            return items;
+        }
+        let mut keyed: Vec<(Option<SortValue>, T)> =
+            items.into_iter().map(|item| (value(&item, self.key), item)).collect();
+        keyed.sort_by(|(a, _), (b, _)| match (a, b) {
+            (Some(a), Some(b)) if self.descending => b.cmp(a),
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        keyed.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// The space's own rows, which know no release date or duration.
+    pub(crate) fn space_rows(self, rows: Vec<SpaceRow>) -> Vec<SpaceRow> {
+        self.apply(rows, |row, key| match key {
+            SortKey::Title => text(&row.title),
+            SortKey::Artist => text(&row.artist),
+            SortKey::Album => text(&row.album),
+            _ => None,
+        })
+    }
+}
+
+/// Whether every term turns up in a track's title, what a tracks search asks
+/// for. Artist and album are left out: every track by a band, or on an
+/// album, whose name happens to match is not a search for a track.
+pub(crate) fn names_track(terms: &[String], title: &str) -> bool {
+    terms.iter().all(|term| title.contains(term))
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
-    Search(String),
+    Search { query: String, scope: Scope },
     FavouriteTracks,
     FavouriteAlbums,
     FavouriteArtists,
@@ -39,7 +159,7 @@ pub enum View {
 impl View {
     fn label(&self) -> String {
         match self {
-            View::Search(query) => format!("results for “{query}”"),
+            View::Search { query, .. } => format!("results for “{query}”"),
             View::FavouriteTracks => "favourite tracks".into(),
             View::FavouriteAlbums => "favourite albums".into(),
             View::FavouriteArtists => "favourite artists".into(),
@@ -56,6 +176,17 @@ impl View {
     /// separate "library" tab.
     fn is_playlists(&self) -> bool {
         matches!(self, View::Playlists | View::Playlist { .. })
+    }
+
+    /// What a search started from here should be narrowed to.
+    pub(crate) fn scope(&self) -> Scope {
+        match self {
+            View::Search { scope, .. } => *scope,
+            View::FavouriteTracks => Scope::Tracks,
+            View::FavouriteAlbums => Scope::Albums,
+            View::FavouriteArtists => Scope::Artists,
+            _ => Scope::Everything,
+        }
     }
 }
 
@@ -85,7 +216,14 @@ pub struct Shelf {
 #[derive(Clone, Copy)]
 pub struct Library {
     pub view: Signal<View>,
+    /// `loaded`, in `sort` order. Everything that indexes into the shelf
+    /// (the menus, "play all", a click on row N) reads this one, so the
+    /// order on screen and the order acted on cannot drift apart.
     pub shelf: Signal<Shelf>,
+    /// The shelf as it came, kept so a different sort, or "default" again,
+    /// does not need another fetch.
+    loaded: Signal<Shelf>,
+    pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button.
@@ -101,6 +239,9 @@ pub struct Library {
     /// searches are for something new, not a re-check of what is already
     /// kept.
     pub liked_only: Signal<bool>,
+    /// Keeps a search to the space: no round trip to Qobuz, only what has
+    /// already been analysed. Sticks across searches, like `liked_only`.
+    pub space_only: Signal<bool>,
     /// The three favourited-id sets a search result is checked against, or
     /// `None` before the first time `liked_only` turns on, the fetch that
     /// fills this is not worth paying for a session that never asks.
@@ -130,6 +271,8 @@ impl Library {
         Self {
             view: Signal::new(View::FavouriteTracks),
             shelf: Signal::new(Shelf::default()),
+            loaded: Signal::new(Shelf::default()),
+            sort: Signal::new(Sort::default()),
             loading: Signal::new(true),
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
@@ -137,6 +280,7 @@ impl Library {
             notice: Signal::new(None),
             tracks_view: Signal::new(TracksView::Grid),
             liked_only: Signal::new(false),
+            space_only: Signal::new(false),
             liked: Signal::new(None),
             epoch: Signal::new(0),
         }
@@ -258,17 +402,28 @@ impl Library {
     /// a query that fires as you type would otherwise leave one history entry
     /// per character, and "back" would walk you through your own spelling.
     pub(crate) fn search_to(self, query: String) {
-        if matches!(&*self.view.peek(), View::Search(_)) {
-            self.show(View::Search(query));
+        let current = self.view.peek().clone();
+        let scope = current.scope();
+        if matches!(current, View::Search { .. }) {
+            self.show(View::Search { query, scope });
         } else {
-            self.go(View::Search(query));
+            self.go(View::Search { query, scope });
+        }
+    }
+
+    /// Re-run the current search over a different kind of result. Replaces
+    /// rather than pushes, the same as refining the query does.
+    fn rescope(self, scope: Scope) {
+        let current = self.view.peek().clone();
+        if let View::Search { query, .. } = current {
+            self.show(View::Search { query, scope });
         }
     }
 
     /// Emptying the box should put back whatever the search covered up,
     /// rather than leaving an empty shelf with no way out but the tabs.
     pub(crate) fn leave_search(self) {
-        if !matches!(&*self.view.peek(), View::Search(_)) {
+        if !matches!(&*self.view.peek(), View::Search { .. }) {
             return;
         }
         if self.history.peek().is_empty() {
@@ -276,6 +431,28 @@ impl Library {
         } else {
             self.back();
         }
+    }
+
+    fn set_sort(mut self, sort: Sort) {
+        self.sort.set(sort);
+        let loaded = self.loaded.peek().clone();
+        self.shelf.set(loaded.sorted(sort));
+    }
+
+    /// Whether the "In your space" section is part of this view. Only for a
+    /// search: the tracks chip is the liked tracks, and the space holds
+    /// everything the crawl reached from them, liked albums' tracks included,
+    /// which is not what that chip is asking for.
+    fn shows_space(&self) -> bool {
+        match &*self.view.read() {
+            View::Search { scope, .. } => scope.tracks(),
+            _ => false,
+        }
+    }
+
+    /// Whether a search is skipping Qobuz and showing only the space.
+    fn searching_space_only(&self) -> bool {
+        matches!(&*self.view.read(), View::Search { .. }) && *self.space_only.read()
     }
 
     /// Ask for a view. The fetch happens in `LibraryPanel`, not here.
@@ -286,6 +463,7 @@ impl Library {
     pub fn show(mut self, target: View) {
         self.view.set(target.clone());
         self.shelf.set(Shelf::default());
+        self.loaded.set(Shelf::default());
         self.error.set(None);
         self.notice.set(None);
         self.loading.set(true);
@@ -300,10 +478,11 @@ impl Library {
         let Some(target) = target else { return };
         self.pending.set(None);
         let epoch = *self.epoch.peek();
+        let space_only = *self.space_only.peek();
 
         spawn(async move {
             let mut library = self;
-            let loaded = load(target).await;
+            let loaded = load(target, space_only).await;
 
             // Someone asked for a different view while this was in flight.
             // Writing now would put these rows under that view's heading, and
@@ -313,7 +492,11 @@ impl Library {
             }
 
             match loaded {
-                Ok(shelf) => library.shelf.set(shelf),
+                Ok(shelf) => {
+                    let sort = *library.sort.peek();
+                    library.loaded.set(shelf.clone());
+                    library.shelf.set(shelf.sorted(sort));
+                }
                 Err(err) => library.error.set(Some(format!("{err:#}"))),
             }
             library.loading.set(false);
@@ -333,17 +516,48 @@ pub fn open_initial(library: Library) {
     library.show(View::FavouriteTracks);
 }
 
-async fn load(view: View) -> anyhow::Result<Shelf> {
+async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
     let mut shelf = Shelf::default();
 
     match view {
         // Clicking the search tab before typing anything is not a query.
-        View::Search(query) if query.trim().is_empty() => {}
-        View::Search(query) => {
+        View::Search { query, .. } if query.trim().is_empty() => {}
+        View::Search { query, scope } if space_only => {
+            let (albums, artists) = space_groups(&query);
+            if scope.albums() {
+                shelf.albums = albums;
+            }
+            if scope.artists() {
+                shelf.artists = artists;
+            }
+        }
+        View::Search { query, scope } => {
             let found = backend().search(&query, SEARCH_LIMIT).await?;
-            shelf.tracks = found.tracks;
-            shelf.albums = found.albums;
-            shelf.artists = found.artists;
+            if scope.tracks() {
+                shelf.tracks = found.tracks;
+            }
+            // Only what the artist's or album's name brought in. Qobuz
+            // matches more loosely than a substring test (accents, for one),
+            // so a track this test cannot place at all stays.
+            if scope == Scope::Tracks {
+                let terms: Vec<String> =
+                    query.to_lowercase().split_whitespace().map(str::to_string).collect();
+                shelf.tracks.retain(|track| {
+                    let artist = track.artist.to_lowercase();
+                    let title = track.title.to_lowercase();
+                    let album = track.album.to_lowercase();
+                    names_track(&terms, &title)
+                        || !terms.iter().all(|term| {
+                            artist.contains(term) || title.contains(term) || album.contains(term)
+                        })
+                });
+            }
+            if scope.albums() {
+                shelf.albums = found.albums;
+            }
+            if scope.artists() {
+                shelf.artists = found.artists;
+            }
         }
         View::FavouriteTracks => shelf.tracks = backend().favourite_tracks(LIST_CAP).await?,
         View::FavouriteAlbums => shelf.albums = backend().favourite_albums(LIST_CAP).await?,
@@ -362,6 +576,78 @@ async fn load(view: View) -> anyhow::Result<Shelf> {
     Ok(shelf)
 }
 
+/// The albums and artists behind the space's tracks matching `query`, for a
+/// space-only search. Matched the way the space list is, every word somewhere
+/// in the artist, title or album, and put in the shelf so the tiles, their
+/// menus and the liked filter all work as they do for a Qobuz search.
+fn space_groups(query: &str) -> (Vec<RemoteAlbum>, Vec<RemoteArtist>) {
+    let terms: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let Some(first) = terms.first() else {
+        return Default::default();
+    };
+
+    let mut albums: Vec<(u8, RemoteAlbum)> = Vec::new();
+    let mut artists: Vec<(u8, RemoteArtist)> = Vec::new();
+    let mut album_at = std::collections::HashMap::new();
+    let mut artist_at = std::collections::HashMap::new();
+
+    let guard = crate::engine().lock().unwrap();
+    let catalog = &guard.navigator.catalog;
+    for i in catalog.visible() {
+        let track = catalog.get(i);
+        let artist = track.artist.to_lowercase();
+        let title = track.title.to_lowercase();
+        let album = track.album.to_lowercase();
+        if !terms
+            .iter()
+            .all(|term| artist.contains(term) || title.contains(term) || album.contains(term))
+        {
+            continue;
+        }
+
+        // Named after what was typed first, the same preference the space
+        // list gives a track, but on the album's own title here.
+        let rank = u8::from(!(artist.starts_with(first) || album.starts_with(first)));
+        let artist_id = Some(track.artist_id).filter(|id| *id >= 0);
+
+        if !track.album_id.is_empty() {
+            let at = *album_at.entry(track.album_id.clone()).or_insert_with(|| {
+                albums.push((
+                    rank,
+                    RemoteAlbum {
+                        id: track.album_id.clone(),
+                        title: track.album.clone(),
+                        artist: track.artist.clone(),
+                        artist_id,
+                        image: crate::qobuz::cover_url(&track.album_id),
+                        ..Default::default()
+                    },
+                ));
+                albums.len() - 1
+            });
+            albums[at].0 = albums[at].0.min(rank);
+        }
+
+        if let Some(id) = artist_id {
+            let rank = u8::from(!artist.starts_with(first));
+            let at = *artist_at.entry(id).or_insert_with(|| {
+                artists.push((
+                    rank,
+                    RemoteArtist { id, name: track.artist.clone(), ..Default::default() },
+                ));
+                artists.len() - 1
+            });
+            artists[at].0 = artists[at].0.min(rank);
+        }
+    }
+
+    albums.sort_by_key(|entry| entry.0);
+    artists.sort_by_key(|entry| entry.0);
+    (
+        albums.into_iter().map(|(_, album)| album).collect(),
+        artists.into_iter().map(|(_, artist)| artist).collect(),
+    )
+}
 
 // --------------------------------------------------------------- crawl hook
 
@@ -403,13 +689,16 @@ pub fn LibraryPanel() -> Element {
 
     let blocklist = use_context::<Blocklist>();
     let view = library.view.read().clone();
-    let searching = matches!(view, View::Search(_));
-    // The space has no album or artist grouping of its own, it is a flat
+    let searching = matches!(view, View::Search { .. });
+    let scope = view.scope();
+    // Only while searching, see `Library::shows_space`. The space has no
+    // album or artist grouping of its own, it is a flat
     // set of analysed tracks, so it only has anything to say for the two
     // views that are about tracks. Showing it regardless of which chip was
     // picked was the gap that made the source-row filter look like it only
     // applied to the Qobuz half of the list.
-    let show_space = matches!(view, View::FavouriteTracks | View::Search(_));
+    let show_space = library.shows_space();
+    let space_only = library.searching_space_only();
     let shelf = library.shelf.read().clone();
     let tracks_view = *library.tracks_view.read();
 
@@ -422,7 +711,7 @@ pub fn LibraryPanel() -> Element {
     // tracks, including ones the space section happens to be showing.
     let shelf_tracks = shelf.visible_tracks(&blocklist);
     let (liked_only, liked) = library.liked_state();
-    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&space));
+    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&library, &space));
     let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
         tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
     } else {
@@ -451,7 +740,7 @@ pub fn LibraryPanel() -> Element {
         && shelf.playlists.is_empty();
     // "Nothing here" belongs to the whole list, not to the Qobuz half of it:
     // with matches in the space above, the list is plainly not empty.
-    let nothing_visible = nothing_from_qobuz && space.0.read().1 == 0;
+    let nothing_visible = nothing_from_qobuz && (!show_space || space.0.read().1 == 0);
     let has_history = !library.history.read().is_empty();
 
     // Drives every navigation. Deliberately here rather than in `show`: see
@@ -488,9 +777,27 @@ pub fn LibraryPanel() -> Element {
             // here too, sharing a row with library/playlists; it is a header
             // icon now (see `app.rs`'s `SearchBox`), so this row only ever
             // has to say what four sources look like, not decide between
-            // finding something and browsing it. Hidden while a search is
-            // showing, since none of the four describes a result set.
-            if !searching {
+            // finding something and browsing it. While a search is showing
+            // the first three narrow it instead, and a second tap on the lit
+            // one widens it back to everything; playlists are not something
+            // a search returns, so that chip goes.
+            if searching {
+                div { class: "actions",
+                    for (label, chip) in [
+                        ("tracks", Scope::Tracks),
+                        ("albums", Scope::Albums),
+                        ("artists", Scope::Artists),
+                    ] {
+                        button {
+                            class: if scope == chip { "chip active" } else { "chip" },
+                            onclick: move |_| {
+                                library.rescope(if scope == chip { Scope::Everything } else { chip })
+                            },
+                            "{label}"
+                        }
+                    }
+                }
+            } else {
                 div { class: "actions",
                     button {
                         class: if view == View::FavouriteTracks { "chip active" } else { "chip" },
@@ -547,11 +854,29 @@ pub fn LibraryPanel() -> Element {
                     }
                 }
                 // A search asks the whole catalogue; this narrows the Qobuz
-                // half of the answer to what is already favourited. Only
+                // half of the answer to what is already favourited, or the
+                // space's own when "space" has left Qobuz out. Only
                 // shown while searching, the tracks/albums/artists chips
                 // above already are the liked list the rest of the time, so
                 // a second "liked" filter on top of them would filter
                 // favourites by whether they are favourited.
+                if searching {
+                    // Toggling re-runs the search rather than hiding the
+                    // Qobuz half: a hidden shelf would still be what "play
+                    // all" plays.
+                    button {
+                        class: if space_only { "chip active" } else { "chip" },
+                        title: "only search what's already in your space",
+                        onclick: move |_| {
+                            let mut space_only = library.space_only;
+                            let now = space_only();
+                            space_only.set(!now);
+                            let view = library.view.peek().clone();
+                            library.show(view);
+                        },
+                        "space"
+                    }
+                }
                 if searching {
                     button {
                         class: if liked_only { "chip active" } else { "chip" },
@@ -567,6 +892,7 @@ pub fn LibraryPanel() -> Element {
                         "liked"
                     }
                 }
+                SortMenu {}
                 // Grid by default, list for when the duration and the
                 // "in your space" dot are what you came for. One switch for
                 // both track sections below, see `Library::tracks_view`.
@@ -638,8 +964,76 @@ pub fn LibraryPanel() -> Element {
     }
 }
 
-/// Track ids already listed under "In your space".
-fn space_ids(matches: &SpaceMatches) -> std::collections::HashSet<i64> {
+/// The sort chip and the menu it opens: what to order by, a rule, then which
+/// way round. Stays open across picks, since a sort is usually both.
+#[component]
+fn SortMenu() -> Element {
+    let library = use_context::<Library>();
+    let mut open = use_signal(|| None::<(f64, f64)>);
+    let sort = *library.sort.read();
+
+    // Kept on screen the way the context menu is: opened from near the right
+    // edge, it would otherwise run off it.
+    use_effect(move || {
+        if open().is_some() {
+            document::eval(
+                "const el = document.querySelector('.sort-menu');
+                 if (el) {
+                   el.style.transform = 'none';
+                   const box = el.getBoundingClientRect();
+                   const dx = Math.min(0, window.innerWidth - 8 - box.right);
+                   const dy = Math.min(0, window.innerHeight - 8 - box.bottom);
+                   el.style.transform = `translate(${dx}px, ${dy}px)`;
+                 }",
+            );
+        }
+    });
+
+    let arrow = if sort.descending { "↓" } else { "↑" };
+
+    rsx! {
+        button {
+            class: if sort == Sort::default() { "chip" } else { "chip active" },
+            title: "sort",
+            onclick: move |event: Event<MouseData>| {
+                let point = event.client_coordinates();
+                open.set(Some((point.x, point.y)));
+            },
+            "{sort.key.label()} {arrow}"
+        }
+        if let Some((x, y)) = open() {
+            div { class: "menu-backdrop", onclick: move |_| open.set(None),
+                div {
+                    class: "context-menu sort-menu",
+                    style: "left: {x}px; top: {y}px;",
+                    onclick: move |event: Event<MouseData>| event.stop_propagation(),
+                    for key in SortKey::ALL {
+                        button {
+                            class: if sort.key == key { "menu-item checked" } else { "menu-item" },
+                            onclick: move |_| library.set_sort(Sort { key, ..sort }),
+                            "{key.label()}"
+                        }
+                    }
+                    div { class: "menu-rule" }
+                    for (label, descending) in [("ascending", false), ("descending", true)] {
+                        button {
+                            class: if sort.descending == descending { "menu-item checked" } else { "menu-item" },
+                            onclick: move |_| library.set_sort(Sort { descending, ..sort }),
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Track ids already listed under "In your space", none when that section
+/// is not showing, or the Qobuz list would drop them with nowhere to go.
+fn space_ids(library: &Library, matches: &SpaceMatches) -> std::collections::HashSet<i64> {
+    if !library.shows_space() {
+        return Default::default();
+    }
     matches.0.read().0.iter().map(|row| row.track_id).collect()
 }
 
@@ -682,6 +1076,18 @@ fn SpaceRows() -> Element {
     let mut shown = use_signal(|| FIRST_SHOWN);
 
     let (rows, total) = matches();
+    // With Qobuz out of the search, "liked" has only the space left to
+    // narrow. Counted over the rows the scan kept, not every match.
+    let (liked_only, liked) = library.liked_state();
+    let liked_only = liked_only && library.searching_space_only();
+    let (rows, total) = if liked_only {
+        let rows: Vec<SpaceRow> =
+            rows.into_iter().filter(|row| liked.tracks.contains(&row.track_id)).collect();
+        let total = rows.len();
+        (rows, total)
+    } else {
+        (rows, total)
+    };
     let searching = !search.text.read().trim().is_empty();
     let visible = shown().min(rows.len());
     let grid = *library.tracks_view.read() == TracksView::Grid;
@@ -690,7 +1096,11 @@ fn SpaceRows() -> Element {
         return rsx! {
             if searching {
                 h3 { class: "shelf-head source-head", "In your space" }
-                p { class: "muted", "Nothing matches. Every word has to appear somewhere." }
+                if liked_only {
+                    p { class: "muted", "Nothing you've liked matches." }
+                } else {
+                    p { class: "muted", "Nothing matches. Every word has to appear somewhere." }
+                }
             }
         };
     }
@@ -765,6 +1175,35 @@ fn SpaceRows() -> Element {
 }
 
 impl Shelf {
+    fn sorted(self, sort: Sort) -> Shelf {
+        let artist = |artist: &RemoteArtist, key: SortKey| match key {
+            SortKey::Title | SortKey::Artist => text(&artist.name),
+            _ => None,
+        };
+        Shelf {
+            tracks: sort.apply(self.tracks, |track, key| match key {
+                SortKey::Default => None,
+                SortKey::Title => text(&track.title),
+                SortKey::Artist => text(&track.artist),
+                SortKey::Album => text(&track.album),
+                SortKey::Released => track.released.as_deref().and_then(text),
+                SortKey::Duration => track.duration.map(SortValue::Number),
+            }),
+            albums: sort.apply(self.albums, |album, key| match key {
+                SortKey::Title | SortKey::Album => text(&album.title),
+                SortKey::Artist => text(&album.artist),
+                SortKey::Released => album.released.as_deref().and_then(text),
+                _ => None,
+            }),
+            artists: sort.apply(self.artists, artist),
+            playlists: sort.apply(self.playlists, |playlist, key| match key {
+                SortKey::Title => text(&playlist.name),
+                _ => None,
+            }),
+            similar: sort.apply(self.similar, artist),
+        }
+    }
+
     /// The rows a blocklist leaves visible, in display order. Rendering and
     /// the click handlers must both go through these, filtering in one and
     /// indexing the unfiltered list in the other made row N open row N+1.
@@ -814,7 +1253,7 @@ fn TrackRows() -> Element {
     // reach. A different release of the same song stays, because fetching
     // that one is a real thing to want.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
-    let tracks = qobuz_only(tracks, &space_ids(&matches));
+    let tracks = qobuz_only(tracks, &space_ids(&library, &matches));
     let (liked_only, liked) = library.liked_state();
     let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
         tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
@@ -902,7 +1341,7 @@ fn TrackRows() -> Element {
 fn AlbumRows() -> Element {
     let library = use_context::<Library>();
     let blocklist = use_context::<Blocklist>();
-    let mut detail = use_context::<Detail>().0;
+    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let (liked_only, liked) = library.liked_state();
@@ -925,9 +1364,12 @@ fn AlbumRows() -> Element {
                 li {
                     key: "{index}-{album.id}",
                     class: "tile",
+                    // Straight to the tracklist: the album page carries the
+                    // same cover, badges and actions the sheet would have,
+                    // so the sheet was only ever a detour on the way there.
                     onclick: {
                         let album = album.clone();
-                        move |_| detail.set(Some(DetailSubject::Album(album.clone())))
+                        move |_| library.go(View::Album(album.clone()))
                     },
                     "data-menu": MenuTarget::ShelfAlbum(index).tag(),
                     oncontextmenu: move |event: Event<MouseData>| {

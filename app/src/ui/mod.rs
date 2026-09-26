@@ -198,6 +198,8 @@ pub struct SpaceRow {
     /// For the artist-name link; `None` where the space stores -1.
     pub artist_id: Option<i64>,
     pub title: String,
+    /// The album's title, for sorting by it.
+    pub album: String,
     pub album_id: String,
 }
 
@@ -218,6 +220,10 @@ pub(crate) fn open_artist(mut detail: Signal<Option<DetailSubject>>, id: i64, na
 /// "now playing"), hence `stop_propagation`: the name does its own thing and
 /// not the row's as well. Plain text when there is no id to go to.
 ///
+/// The link is its own span inside the column one: `.artist` is held to a
+/// minimum width so list rows line up, and with the handler on that span the
+/// blank space after a short name opened the artist instead of the row.
+///
 /// A function, not a component, for the same reason as `menu_button`: no
 /// hooks, and a props struct per row is not worth it.
 pub(crate) fn artist_link(
@@ -228,17 +234,19 @@ pub(crate) fn artist_link(
 ) -> Element {
     match id {
         Some(id) => rsx! {
-            span {
-                class: "{class} clickable",
-                title: "open {name}",
-                onclick: {
-                    let name = name.clone();
-                    move |event: Event<MouseData>| {
-                        event.stop_propagation();
-                        open_artist(detail, id, name.clone());
-                    }
-                },
-                "{name}"
+            span { class: "{class}",
+                span {
+                    class: "clickable",
+                    title: "open {name}",
+                    onclick: {
+                        let name = name.clone();
+                        move |event: Event<MouseData>| {
+                            event.stop_propagation();
+                            open_artist(detail, id, name.clone());
+                        }
+                    },
+                    "{name}"
+                }
             }
         },
         None => rsx! { span { class: "{class}", "{name}" } },
