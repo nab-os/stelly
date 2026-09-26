@@ -68,8 +68,8 @@ pub fn bootstrap() -> anyhow::Result<()> {
     crate::init_engine(&data_dir, &db_path)
 }
 
-/// Re-run the parts of `bootstrap` a freshly paired device needs. Split out
-/// because `backend::init` is a `OnceLock` the setup screen has already filled.
+/// Re-run the parts of `bootstrap` a freshly paired device needs, against
+/// the backend the setup screen has just installed.
 pub async fn sync_and_load() -> anyhow::Result<()> {
     backend().sync_space().await?;
     let data_dir = crate::client_data_dir();
@@ -179,8 +179,8 @@ fn Setup(ready: Signal<bool>) -> Element {
                 token: secret.clone(),
             };
 
-            // Save first: `backend::init` is a OnceLock, so a second attempt
-            // here would not replace a wrong address.
+            // Save first, so the next launch starts from what was typed here
+            // rather than the pairing it just failed to reach.
             if let Err(err) = config.save() {
                 status.set(Some(format!("could not save the pairing: {err:#}")));
                 busy.set(false);
@@ -249,11 +249,9 @@ fn Setup(ready: Signal<bool>) -> Element {
 
 /// Where the server address and token can be changed after the first run.
 ///
-/// Saves and asks for a restart rather than reconnecting in place:
-/// `backend::init` fills a `OnceLock`, so a second call is silently ignored
-/// once this process has a backend. Swapping one live would mean handing every
-/// caller something other than the `&'static Backend` they hold across awaits,
-/// which is a much larger change than this screen is worth.
+/// Saves and asks for a restart rather than reconnecting in place: the
+/// backend could be swapped, but the space the engine has mapped, the loaded
+/// catalogue and every panel's state all came from the old server.
 #[component]
 fn Settings(open: Signal<bool>) -> Element {
     let stored = use_signal(ServerConfig::load);

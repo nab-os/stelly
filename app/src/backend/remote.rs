@@ -35,7 +35,7 @@ impl Remote {
     pub fn new(base: impl Into<String>, token: impl Into<String>, data_dir: PathBuf) -> Self {
         let base = base.into();
         Self {
-            http: reqwest::Client::new(),
+            http: http_client(),
             base: base.trim_end_matches('/').to_string(),
             token: token.into(),
             data_dir,
@@ -459,6 +459,42 @@ impl Remote {
         Self::check(response).await?;
         Ok(())
     }
+}
+
+#[cfg(not(target_os = "android"))]
+fn http_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+/// reqwest's default verifier is rustls-platform-verifier, which on Android
+/// calls into Java and panics unless it was handed a JNI context at startup,
+/// and the Kotlin half it calls is not in the APK anyway. The panic lands in
+/// the task awaiting the first https request, so pairing sat on "connecting…"
+/// forever, while plain http never touched it. Instead, verify with webpki
+/// against the certificates Android itself trusts, read off disk: the system
+/// store, the one Conscrypt updates through its APEX on 14+, and whatever
+/// the user installed, which is how a private CA in front of nginx gets in.
+#[cfg(target_os = "android")]
+fn http_client() -> reqwest::Client {
+    const STORES: [&str; 3] = [
+        "/apex/com.android.conscrypt/cacerts",
+        "/system/etc/security/cacerts",
+        "/data/misc/user/0/cacerts-added",
+    ];
+
+    let certs: Vec<reqwest::Certificate> = STORES
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(|entry| std::fs::read(entry.ok()?.path()).ok())
+        .filter_map(|pem| reqwest::Certificate::from_pem(&pem).ok())
+        .collect();
+    log::info!("trusting {} CA certificates from the system", certs.len());
+
+    reqwest::Client::builder()
+        .tls_certs_only(certs)
+        .build()
+        .expect("a client with only root certificates configured")
 }
 
 /// Hex md5 of a file, or None if it is not there. md5 because it is already a
