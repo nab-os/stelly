@@ -61,6 +61,20 @@ impl Stage {
 /// until the frontier empties, so it is not queued behind other work.
 pub const FULL_RUN: [Stage; 3] = [Stage::Analyse, Stage::BuildSpace, Stage::Layout];
 
+// --------------------------------------------------------- the catalogue
+
+/// Which of a set of albums the server's catalogue already has, for a page to
+/// say "fetched" rather than offer to fetch again. Two answers, because the
+/// two fetches write different things: an artist's lists the albums, an
+/// album's pulls in its tracklist.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Catalogued {
+    /// In `albums`: listed, whether or not its tracks are.
+    pub listed: Vec<String>,
+    /// With at least one row in `tracks`.
+    pub tracked: Vec<String>,
+}
+
 // --------------------------------------------------------------- the counts
 
 /// What still needs doing, phrased as the stages themselves would phrase it.

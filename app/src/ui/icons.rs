@@ -113,6 +113,14 @@ pub fn close() -> Element {
     })
 }
 
+/// Home, which is the favourites.
+pub fn home() -> Element {
+    stroked(rsx! {
+        path { d: "M3 10.5L12 3l9 7.5" }
+        path { d: "M5 9v11a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9" }
+    })
+}
+
 pub fn heart(full: bool) -> Element {
     rsx! {
         svg {

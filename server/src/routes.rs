@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use two_khz::api::{
-    BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
+    BlockedArtist, Catalogued, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
     SyncFile, SyncManifest,
 };
 use two_khz::session::{Command, Session, Update};
@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/artists/{id}/albums", get(artist_albums))
         .route("/api/artists/{id}/similar", get(similar_artists))
         .route("/api/artists/{id}/fetch", post(fetch_artist))
+        .route("/api/catalogue/albums", post(catalogued))
         // --------------------------------------------------------- playback
         .route("/api/tracks/{id}/url", get(file_url))
         .route("/api/session", get(session).post(session_command))
@@ -440,6 +441,21 @@ async fn fetch_artist(
     Ok(Json(Fetched {
         count: state.hub.fetch_artist(id).await?,
     }))
+}
+
+#[derive(Deserialize)]
+struct CataloguedBody {
+    ids: Vec<String>,
+}
+
+/// A POST for the body, not the effect: an artist page asks after every
+/// album on it, which is more ids than a query string should carry.
+async fn catalogued(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<CataloguedBody>,
+) -> Reply<Catalogued> {
+    Ok(Json(state.hub.catalogued(&body.ids).await?))
 }
 
 async fn corpus(State(state): State<AppState>, _: PlayAuth) -> Reply<Corpus> {
