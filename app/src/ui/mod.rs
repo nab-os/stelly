@@ -11,6 +11,7 @@ pub mod library;
 pub mod menu;
 pub mod pipeline;
 pub mod player;
+pub mod prefs;
 pub mod queue;
 pub mod screens;
 pub mod settings;

@@ -6,6 +6,7 @@
 use super::icons;
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
+use super::prefs::{self, Prefs};
 use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
 use super::settings::SettingsScreen;
 use super::{
@@ -213,16 +214,51 @@ impl View {
             _ => None,
         }
     }
+
+    /// Which grid-or-list choice applies here. `None` for pages without a
+    /// toggle.
+    fn kind(&self) -> Option<ViewKind> {
+        Some(match self {
+            View::Search { scope, .. } | View::Favourites { scope } => match scope {
+                Scope::Everything => ViewKind::Mixed,
+                Scope::Tracks => ViewKind::Tracks,
+                Scope::Albums => ViewKind::Albums,
+                Scope::Artists => ViewKind::Artists,
+            },
+            View::Playlists => ViewKind::Playlists,
+            View::Playlist { .. } => ViewKind::Playlist,
+            View::Artist(_) => ViewKind::Artist,
+            View::Album(_) | View::Track(_) | View::Settings => return None,
+        })
+    }
 }
 
 /// How the two track sections, the space and Qobuz, render. Grid by
 /// default: a cover to recognise, the way albums and artists already worked.
 /// List is where the detail that does not fit a tile lives (duration, the
 /// "in your space" dot), for when that is what you are after.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TracksView {
     Grid,
     List,
+}
+
+/// The kinds of page that remember grid or list separately. A mixed home
+/// wants covers while a narrowed track list wants durations, so one switch
+/// for all of them kept being flipped back and forth.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewKind {
+    /// Home or a search with no chip lit.
+    Mixed,
+    Tracks,
+    Albums,
+    Artists,
+    Playlists,
+    Playlist,
+    /// An artist's page, whose discography is the one list with a toggle.
+    Artist,
 }
 
 /// Whatever the current view loaded. One struct rather than a per-view enum:
@@ -256,10 +292,11 @@ pub struct Library {
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
-    /// One switch for both track sections (the space's and Qobuz's), not one
+    /// Grid or list, per kind of page, and saved. Within a page it is one
+    /// switch for both track sections (the space's and Qobuz's), not one
     /// each, they are the same kind of decision made twice, and a search
     /// result shows both at once.
-    pub tracks_view: Signal<TracksView>,
+    layouts: Signal<std::collections::HashMap<ViewKind, TracksView>>,
     /// Narrows a search to what is already favourited. Off by default: most
     /// searches are for something new, not a re-check of what is already
     /// kept.
@@ -302,12 +339,33 @@ impl Library {
             history: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
-            tracks_view: Signal::new(TracksView::Grid),
+            layouts: Signal::new(Prefs::load().layouts),
             liked_only: Signal::new(false),
             source: Signal::new(Source::Qobuz),
             liked: Signal::new(None),
             epoch: Signal::new(0),
         }
+    }
+
+    /// Grid or list for the page on screen. Grid until chosen otherwise.
+    pub(crate) fn layout(&self) -> TracksView {
+        self.view
+            .read()
+            .kind()
+            .and_then(|kind| self.layouts.read().get(&kind).copied())
+            .unwrap_or(TracksView::Grid)
+    }
+
+    /// Set it for this kind of page, here and in every later session.
+    pub(crate) fn set_layout(&self, layout: TracksView) {
+        let Some(kind) = self.view.peek().kind() else {
+            return;
+        };
+        let mut layouts = self.layouts;
+        layouts.write().insert(kind, layout);
+        prefs::update(|prefs| {
+            prefs.layouts.insert(kind, layout);
+        });
     }
 
     /// Fetch the three favourited-id sets, once. Safe to call every time the
@@ -1109,26 +1167,20 @@ fn BrowseScreen() -> Element {
 #[component]
 pub(crate) fn ViewToggle() -> Element {
     let library = use_context::<Library>();
-    let current = *library.tracks_view.read();
+    let current = library.layout();
 
     rsx! {
         div { class: "view-toggle",
             button {
                 class: if current == TracksView::Grid { "icon-btn active" } else { "icon-btn" },
                 title: "grid",
-                onclick: move |_| {
-                    let mut tracks_view = library.tracks_view;
-                    tracks_view.set(TracksView::Grid);
-                },
+                onclick: move |_| library.set_layout(TracksView::Grid),
                 {icons::grid()}
             }
             button {
                 class: if current == TracksView::List { "icon-btn active" } else { "icon-btn" },
                 title: "list",
-                onclick: move |_| {
-                    let mut tracks_view = library.tracks_view;
-                    tracks_view.set(TracksView::List);
-                },
+                onclick: move |_| library.set_layout(TracksView::List),
                 {icons::list()}
             }
         }
@@ -1252,7 +1304,7 @@ fn MixedRows() -> Element {
     let (liked_only, liked) = library.liked_state();
     let space_only = library.searching_space_only();
     let searching = matches!(&*library.view.read(), View::Search { .. });
-    let grid = *library.tracks_view.read() == TracksView::Grid;
+    let grid = library.layout() == TracksView::Grid;
     let now_playing = player.current().map(|t| t.id);
 
     let mut items: Vec<Item> = Vec::new();
@@ -1500,7 +1552,7 @@ fn SpaceRows() -> Element {
     };
     let searching = !search.text.read().trim().is_empty();
     let visible = shown().min(rows.len());
-    let grid = *library.tracks_view.read() == TracksView::Grid;
+    let grid = library.layout() == TracksView::Grid;
 
     if total == 0 {
         return rsx! {
@@ -1673,7 +1725,7 @@ fn TrackRows() -> Element {
         tracks
     };
     let now_playing = player.current().map(|t| t.id);
-    let grid = *library.tracks_view.read() == TracksView::Grid;
+    let grid = library.layout() == TracksView::Grid;
     let count = tracks.len();
 
     if tracks.is_empty() {
