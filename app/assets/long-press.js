@@ -50,6 +50,12 @@
   // Set when the menu opens, so the click that ends the press does not also
   // activate the row underneath it.
   let swallowNextClick = false;
+  // Set when the timer opened the menu, until the next press. Android fires
+  // its own `contextmenu` for the same press a little after the timer, by
+  // which time the menu's backdrop is under the finger, and the backdrop
+  // closes the menu on `contextmenu`. So the menu opened and closed in the
+  // same gesture. This marks that late event so it can be dropped.
+  let openedByPress = false;
 
   const cancel = () => {
     if (timer !== null) clearTimeout(timer);
@@ -64,6 +70,7 @@
     cancel();
     if (!row) return;
     swallowNextClick = true;
+    openedByPress = true;
     if (window.twoKhzLongPressSend) {
       window.twoKhzLongPressSend({
         target: row.dataset.menu,
@@ -76,6 +83,12 @@
   document.addEventListener(
     "pointerdown",
     (event) => {
+      // A new press, so the press that opened the menu is over. A long press
+      // does not always end in a click on touch, and a swallow still armed
+      // from it would eat the first tap on a menu item.
+      openedByPress = false;
+      swallowNextClick = false;
+
       // A mouse keeps the native path: right-click is instant, and a mouse
       // held still over a row should not sprout a menu.
       if (event.pointerType === "mouse") return;
@@ -119,6 +132,13 @@
       if (pressed) {
         event.preventDefault();
         open();
+        return;
+      }
+      // The same press, reported late. Kept away from the backdrop, which
+      // would close the menu, and from the row, which would open it again.
+      if (openedByPress) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
       swallowNextClick = true;
