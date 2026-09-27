@@ -229,6 +229,10 @@ Two scopes, both authenticated: `play` is browsing, syncing and minting a stream
 URL; `pipeline` is crawling and analysis. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
 
+The devices share one queue. The speaker button in the player bar lists the
+ones connected, under the name they were paired with, and picks which one
+plays; the others become remotes for it.
+
 ```sh
 two-khz-server pair --name phone --scope play
 two-khz-server devices

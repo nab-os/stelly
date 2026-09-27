@@ -9,7 +9,7 @@
 pub mod remote;
 
 pub use crate::logbuffer::LogBuffer;
-pub use remote::Remote;
+pub use remote::{Remote, SessionFeed};
 use std::sync::RwLock;
 
 /// The one backend there is. Named for what callers use it as.
