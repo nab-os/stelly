@@ -4,7 +4,6 @@
 //! `main`: the APK loads the .so and calls `start_app`.
 
 use crate::backend::{self, backend};
-use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
     icons, space_track, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel,
     Generator, Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar,
@@ -255,7 +254,7 @@ fn Shell() -> Element {
         index: Signal::new(0),
         playing: Signal::new(false),
         position: Signal::new((0.0, 0.0)),
-        quality: Signal::new(FORMAT_MP3_320),
+        quality: Signal::new(crate::ui::prefs::Prefs::load().quality()),
         status: Signal::new(None),
         volume: Signal::new(1.0),
         muted: Signal::new(false),
