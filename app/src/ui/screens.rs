@@ -46,7 +46,13 @@ fn toggle_like(
 /// Pull an album's tracklist, or an artist's discography, into the catalogue
 /// now. Only feature extraction still waits for the pipeline, which the
 /// status line says.
-fn fetch(kind: &'static str, id: String, label: String, mut status: Signal<Option<String>>) {
+fn fetch(
+    kind: &'static str,
+    id: String,
+    label: String,
+    mut status: Signal<Option<String>>,
+    mut fetched: Resource<bool>,
+) {
     status.set(Some(format!("fetching {label}…")));
     spawn(async move {
         let result = match kind {
@@ -56,6 +62,9 @@ fn fetch(kind: &'static str, id: String, label: String, mut status: Signal<Optio
             },
             _ => backend().fetch_album(&id).await,
         };
+        if result.is_ok() {
+            fetched.restart();
+        }
         status.set(Some(match result {
             Ok(count) if kind == "artist" => {
                 format!("{label}: {count} albums queued. Analyse from settings to add them to the space.")
@@ -68,11 +77,45 @@ fn fetch(kind: &'static str, id: String, label: String, mut status: Signal<Optio
     });
 }
 
+/// Whether the catalogue already has everything a page's Fetch would pull in:
+/// each of `ids` listed, for an artist, or with its tracklist, for an album.
+/// `ids` is read inside, so a page reused for another album or artist, or an
+/// artist's discography landing, asks again.
+fn use_fetched(ids: impl Fn() -> Vec<String> + 'static, tracklists: bool) -> Resource<bool> {
+    use_resource(move || {
+        let ids = ids();
+        async move {
+            if ids.is_empty() {
+                return false;
+            }
+            let Ok(found) = backend().catalogued(&ids).await else {
+                return false;
+            };
+            let have = if tracklists { found.tracked } else { found.listed };
+            ids.iter().all(|id| have.contains(id))
+        }
+    })
+}
+
 /// "In your space" when it already is, the button that would put it there
 /// when it is not. One slot, so the page never offers to fetch what it has.
-fn fetch_or_badge(in_space: bool, title: &'static str, onclick: impl FnMut(Event<MouseData>) + 'static) -> Element {
+/// Fetched but not yet analysed, the button says so and has nothing to do.
+fn fetch_or_badge(
+    in_space: bool,
+    fetched: Resource<bool>,
+    title: &'static str,
+    onclick: impl FnMut(Event<MouseData>) + 'static,
+) -> Element {
     if in_space {
         rsx! { span { class: "badge in-space", "in your space" } }
+    } else if fetched() == Some(true) {
+        rsx! {
+            button {
+                title: "in the catalogue; analyse from settings to add it to the space",
+                disabled: true,
+                "Fetched"
+            }
+        }
     } else {
         rsx! {
             button { title: "{title}", onclick, "Fetch" }
@@ -175,6 +218,13 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     });
 
     let album_id = track.album_id.clone();
+    let fetched = use_fetched(
+        move || match &*library.view.read() {
+            View::Track(track) => track.album_id.iter().cloned().collect(),
+            _ => Vec::new(),
+        },
+        true,
+    );
     let quality = if track.hires { "hi-res available" } else { "CD quality" };
     let credits: Vec<String> = track
         .performers
@@ -225,12 +275,12 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                         }
                     }
                     div { class: "hero-actions",
-                        {fetch_or_badge(in_space, "fetch this track's album into the catalogue", {
+                        {fetch_or_badge(in_space, fetched, "fetch this track's album into the catalogue", {
                             let album_id = album_id.clone();
                             let label = track.album.clone();
                             move |_| {
                                 if let Some(id) = album_id.clone() {
-                                    fetch("album", id, label.clone(), status);
+                                    fetch("album", id, label.clone(), status, fetched);
                                 }
                             }
                         })}
@@ -316,6 +366,13 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
     library.ensure_liked_loaded();
     let liked = library.liked().albums.contains(&album.id);
     let in_space = reach.read().0.contains(&album.id);
+    let fetched = use_fetched(
+        move || match &*library.view.read() {
+            View::Album(album) => vec![album.id.clone()],
+            _ => Vec::new(),
+        },
+        true,
+    );
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
     // `ShelfTrack` indices address the same list.
@@ -382,9 +439,9 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                             },
                             {icons::heart(liked)}
                         }
-                        {fetch_or_badge(in_space, "fetch this tracklist into the catalogue", {
+                        {fetch_or_badge(in_space, fetched, "fetch this tracklist into the catalogue", {
                             let (id, title) = (album.id.clone(), album.title.clone());
-                            move |_| fetch("album", id.clone(), title.clone(), status)
+                            move |_| fetch("album", id.clone(), title.clone(), status, fetched)
                         })}
                     }
                     if let Some(message) = status() {
@@ -467,6 +524,17 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     library.ensure_liked_loaded();
     let followed = library.liked().artists.contains(&artist.id);
     let in_space = reach.read().1.contains(&artist.id);
+    // The discography as Qobuz has it, which is what the fetch lists. Hidden
+    // ones included: the fetch does not skip them either.
+    let catalogued = use_fetched(
+        move || {
+            if *library.loading.read() {
+                return Vec::new();
+            }
+            library.shelf.read().albums.iter().map(|album| album.id.clone()).collect()
+        },
+        false,
+    );
 
     // The portrait and biography, which nothing that links here carries. A
     // server from before that route answers 404; the page just goes without.
@@ -509,9 +577,9 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                             },
                             {icons::heart(followed)}
                         }
-                        {fetch_or_badge(in_space, "fetch this discography into the catalogue", {
+                        {fetch_or_badge(in_space, catalogued, "fetch this discography into the catalogue", {
                             let (id, name) = (artist.id, artist.name.clone());
-                            move |_| fetch("artist", id.to_string(), name.clone(), status)
+                            move |_| fetch("artist", id.to_string(), name.clone(), status, catalogued)
                         })}
                         button {
                             class: "danger",

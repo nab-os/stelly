@@ -289,6 +289,9 @@ pub struct Library {
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button.
     pub history: Signal<Vec<View>>,
+    /// Views stepped back out of, for the mouse's forward button. Emptied by
+    /// going anywhere new, as a browser does.
+    forward: Signal<Vec<View>>,
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
@@ -337,6 +340,7 @@ impl Library {
             loading: Signal::new(true),
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
+            forward: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
             layouts: Signal::new(Prefs::load().layouts),
@@ -466,6 +470,7 @@ impl Library {
         let previous = self.view.peek().clone();
         if previous != target {
             self.history.write().push(previous);
+            self.forward.write().clear();
         }
         self.show(target);
         to_top();
@@ -474,6 +479,21 @@ impl Library {
     pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
         if let Some(view) = previous {
+            self.forward.write().push(self.view.peek().clone());
+            self.show(view);
+            to_top();
+        }
+    }
+
+    /// False once going somewhere new has emptied the way forward.
+    pub(crate) fn can_forward(&self) -> bool {
+        !self.forward.peek().is_empty()
+    }
+
+    pub(crate) fn forward(mut self) {
+        let next = self.forward.write().pop();
+        if let Some(view) = next {
+            self.history.write().push(self.view.peek().clone());
             self.show(view);
             to_top();
         }
@@ -866,12 +886,12 @@ pub fn MainScreen() -> Element {
                 span { class: "spacer" }
                 button {
                     class: if home { "icon-btn active" } else { "icon-btn" },
-                    title: "favourites",
+                    title: "home",
                     onclick: move |_| {
                         map.close();
                         library.home();
                     },
-                    {icons::heart(home)}
+                    {icons::home()}
                 }
                 button {
                     class: if settings { "icon-btn active" } else { "icon-btn" },

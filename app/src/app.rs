@@ -474,6 +474,86 @@ fn Shell() -> Element {
         }
     });
 
+    // Back and forward, from Android's back key and the mouse's side buttons.
+    // Back closes whatever is over the page before it leaves the page. The
+    // key only reaches here while back.js is armed, so it is armed whenever
+    // there is something back would do, and after each press the answer is
+    // given again: a back that leaves more to go back to changes nothing
+    // the effect below would notice.
+    let can_back = move || {
+        menu.read().is_some()
+            || *player.queue_open.read()
+            || *generator.panel_open.read()
+            || map_open()
+            || !library.history.read().is_empty()
+    };
+    let arm_back = |want: bool| {
+        document::eval(&format!("window.twoKhzBackArm && window.twoKhzBackArm({want});"));
+    };
+    use_effect(move || arm_back(can_back()));
+    use_future(move || async move {
+        let mut handle = document::eval(include_str!("../assets/back.js"));
+        arm_back(can_back());
+
+        let mut queue_open = player.queue_open;
+        let mut panel_open = generator.panel_open;
+        let map = MapView { map_open, map_route };
+        // What each back did, latest last, so forward can undo it: step back
+        // into the page, or open again what back closed.
+        let mut undone: Vec<Undone> = Vec::new();
+        while let Ok(message) = handle.recv::<serde_json::Value>().await {
+            let narrow = message.get("narrow").and_then(|v| v.as_bool()).unwrap_or(false);
+            match message.get("type").and_then(|v| v.as_str()) {
+                Some("back") => {
+                    // The menu is not reopened: it belongs to where it was
+                    // opened from, and is quicker opened again than found.
+                    if menu.peek().is_some() {
+                        menu.set(None);
+                    } else if *queue_open.peek() {
+                        queue_open.set(false);
+                        undone.push(Undone::Queue);
+                    } else if *panel_open.peek() && narrow {
+                        panel_open.set(false);
+                        undone.push(Undone::Panel);
+                    } else if *map_open.peek() {
+                        undone.push(Undone::Map { route: *map_route.peek() });
+                        map.close();
+                    } else {
+                        // Docked on a wide screen, the panel was never in
+                        // the way; left open it would keep the key armed.
+                        panel_open.set(false);
+                        if !library.history.peek().is_empty() {
+                            library.back();
+                            undone.push(Undone::Page);
+                        }
+                    }
+                }
+                Some("forward") => match undone.pop() {
+                    Some(Undone::Queue) => queue_open.set(true),
+                    Some(Undone::Panel) => panel_open.set(true),
+                    Some(Undone::Map { route: true }) => map.show_route(),
+                    Some(Undone::Map { route: false }) => map.browse(),
+                    // Going somewhere new since forgets the way forward, as a
+                    // browser does, and what back closed on the way there.
+                    Some(Undone::Page) if !library.can_forward() => undone.clear(),
+                    Some(Undone::Page) => {
+                        map.close();
+                        library.forward();
+                    }
+                    // Nothing back closed: the page history, which the top
+                    // bar's arrow also steps back through.
+                    None if library.can_forward() => {
+                        map.close();
+                        library.forward();
+                    }
+                    None => {}
+                },
+                _ => {}
+            }
+            arm_back(can_back());
+        }
+    });
+
     // The remote half of the search box. The local filter above runs on every
     // keystroke because it is a scan of memory; Qobuz is a network round trip
     // and must not, so this waits for the text to stop moving before asking.
@@ -683,8 +763,25 @@ fn Shell() -> Element {
 
     use_context_provider(|| SpaceMatches(filtered));
 
+    // Whether the layout is the phone's, where the generate panel slides over
+    // the main area rather than sitting docked beside it. `panel_open` alone
+    // cannot say: generating opens it on any screen.
+    let mut narrow = use_signal(|| false);
+    use_future(move || async move {
+        let mut handle = document::eval(
+            "const query = window.matchMedia('(max-width: 900px)');
+             dioxus.send(query.matches);
+             query.addEventListener('change', (event) => dioxus.send(event.matches));
+             await new Promise(() => {});",
+        );
+        while let Ok(matches) = handle.recv::<bool>().await {
+            narrow.set(matches);
+        }
+    });
+
     let map = MapView { map_open, map_route };
     let mut panel_open = generator.panel_open;
+    let covered = narrow() && panel_open();
     let searching = matches!(&*library.view.read(), View::Search { .. });
 
     rsx! {
@@ -715,28 +812,47 @@ fn Shell() -> Element {
                     }
 
                     // Bottom right of the main area, over the map as well,
-                    // since the map's own is how you close it again.
+                    // since the map's own is how you close it again. On a
+                    // phone, over the generate panel too: the other two act
+                    // on the main area, so from there they slide the panel
+                    // away first, and answer to what is under it only once
+                    // it can be seen.
                     div { class: "fabs",
                         // Phone only: the panel is always showing otherwise.
                         button {
-                            class: "fab fab-generate",
-                            title: "generate",
-                            onclick: move |_| panel_open.set(true),
+                            class: if covered { "fab fab-generate active" } else { "fab fab-generate" },
+                            title: if covered { "close generate" } else { "generate" },
+                            onclick: move |_| panel_open.set(!covered),
                             {icons::spark()}
                         }
                         button {
-                            class: if searching { "fab fab-search active" } else { "fab fab-search" },
-                            title: if searching { "close search" } else { "search" },
+                            class: if searching && !covered { "fab fab-search active" } else { "fab fab-search" },
+                            title: if searching && !covered { "close search" } else { "search" },
                             onclick: move |_| {
                                 map.close();
+                                if covered {
+                                    panel_open.set(false);
+                                    if searching {
+                                        return;
+                                    }
+                                }
                                 library.toggle_search(search.text.peek().trim().to_string());
                             },
                             {icons::search()}
                         }
                         button {
-                            class: if map_open() { "fab fab-map active" } else { "fab fab-map" },
-                            title: if map_open() { "close the map" } else { "the map" },
-                            onclick: move |_| map.toggle(),
+                            class: if map_open() && !covered { "fab fab-map active" } else { "fab fab-map" },
+                            title: if map_open() && !covered { "close the map" } else { "the map" },
+                            onclick: move |_| {
+                                if covered {
+                                    panel_open.set(false);
+                                    if !map_open() {
+                                        map.browse();
+                                    }
+                                } else {
+                                    map.toggle();
+                                }
+                            },
                             {icons::globe()}
                         }
                     }
@@ -756,6 +872,14 @@ fn Shell() -> Element {
             ContextMenuView {}
         }
     }
+}
+
+/// Something a back took away, for forward to give back.
+enum Undone {
+    Page,
+    Queue,
+    Panel,
+    Map { route: bool },
 }
 
 #[cfg(test)]
