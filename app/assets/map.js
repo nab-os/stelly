@@ -619,6 +619,8 @@
   let last = { x: 0, y: 0 };
 
   canvas.addEventListener("mousedown", (e) => {
+    // The left button only: the side ones are back and forward, see back.js.
+    if (e.button !== 0) return;
     dragging = true;
     dragMoved = false;
     last = { x: e.offsetX, y: e.offsetY };
