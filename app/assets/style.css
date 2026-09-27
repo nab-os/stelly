@@ -824,7 +824,9 @@ span.path-end {
   white-space: nowrap;
   font-size: 12px;
 }
-.output-menu {
+/* Doubled up to outrank `.context-menu`, which comes later and is fixed to
+   the window: fixed, this bottom offset put the card above the screen. */
+.context-menu.output-menu {
   position: absolute;
   right: 0;
   bottom: calc(100% + 10px);
