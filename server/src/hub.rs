@@ -5,6 +5,7 @@
 //! The crawl and the stages publish a status that clients poll, because a
 //! server cannot write a client's signals.
 
+use crate::cache::Cache;
 use crate::pipeline::{Job, Paths};
 use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::schema::{frontier, tracks};
@@ -17,6 +18,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use two_khz::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, FULL_RUN};
 use two_khz::logbuffer::LogBuffer;
 
@@ -28,6 +30,13 @@ pub struct Hub {
     /// Built on first use: browsing the space needs no credentials, so a
     /// missing .env should only bite when you reach for Qobuz.
     client: OnceLock<Arc<tokio::sync::Mutex<QobuzClient>>>,
+    /// Albums, artists, discographies: they change on the scale of weeks.
+    catalogue: Cache,
+    /// Short, since the same words find new releases.
+    searches: Cache,
+    /// Favourites and playlists, which the account can change from any Qobuz
+    /// client. Cleared on our own writes, and short for everyone else's.
+    account: Cache,
     /// Loaded on first use and kept. `None` inside means the tower has not
     /// been exported, which is not an error, the UI hides steering.
     text: tokio::sync::Mutex<Option<TextEncoder>>,
@@ -64,6 +73,9 @@ impl Hub {
             model_dir: paths.model_dir.clone(),
             paths,
             client: OnceLock::new(),
+            catalogue: Cache::new(Duration::from_secs(6 * 60 * 60), 5_000),
+            searches: Cache::new(Duration::from_secs(5 * 60), 500),
+            account: Cache::new(Duration::from_secs(2 * 60), 200),
             text: tokio::sync::Mutex::new(None),
             text_tried: AtomicBool::new(false),
             crawl: Arc::new(CrawlJob::default()),
@@ -82,84 +94,123 @@ impl Hub {
         Ok(self.client.get().expect("just set").clone())
     }
 
+    /// A logged-in copy of the shared client, for reads. The lock is held only
+    /// while copying, so one device's request never waits out another's turn
+    /// at the rate limiter; they still queue on the same budget.
+    async fn session(&self) -> Result<QobuzClient> {
+        let client = self.qobuz()?;
+        let mut shared = client.lock().await;
+        shared.login().await?;
+        Ok(shared.clone())
+    }
+
     // -------------------------------------------------------------- browsing
 
     pub async fn search(&self, query: &str, limit: usize) -> Result<SearchResults> {
-        self.qobuz()?.lock().await.search(query, limit).await
+        let key = format!("search:{limit}:{query}");
+        self.searches
+            .get_or(key, async { self.session().await?.search(query, limit).await })
+            .await
     }
 
     pub async fn favourite_tracks(&self, cap: usize) -> Result<Vec<RemoteTrack>> {
-        self.qobuz()?.lock().await.favorite_tracks(cap).await
+        self.account
+            .get_or(format!("favourite_tracks:{cap}"), async {
+                self.session().await?.favorite_tracks(cap).await
+            })
+            .await
     }
 
     pub async fn favourite_albums(&self, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.qobuz()?.lock().await.favorite_albums(cap).await
+        self.account
+            .get_or(format!("favourite_albums:{cap}"), async {
+                self.session().await?.favorite_albums(cap).await
+            })
+            .await
     }
 
     pub async fn favourite_artists(&self, cap: usize) -> Result<Vec<RemoteArtist>> {
-        self.qobuz()?.lock().await.favorite_artists(cap).await
+        self.account
+            .get_or(format!("favourite_artists:{cap}"), async {
+                self.session().await?.favorite_artists(cap).await
+            })
+            .await
     }
 
     pub async fn playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
-        self.qobuz()?.lock().await.user_playlists(cap).await
+        self.account
+            .get_or(format!("playlists:{cap}"), async {
+                self.session().await?.user_playlists(cap).await
+            })
+            .await
     }
 
     pub async fn playlist_tracks(&self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
-        self.qobuz()?
-            .lock()
-            .await
-            .playlist_tracks(playlist_id, cap)
+        self.account
+            .get_or(format!("playlist_tracks:{playlist_id}:{cap}"), async {
+                self.session().await?.playlist_tracks(playlist_id, cap).await
+            })
             .await
     }
 
     pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>> {
-        Ok(self.qobuz()?.lock().await.album_tracks(album_id).await?.1)
+        self.catalogue
+            .get_or(format!("album_tracks:{album_id}"), async {
+                Ok(self.session().await?.album_tracks(album_id).await?.1)
+            })
+            .await
     }
 
     pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
-        self.qobuz()?.lock().await.artist(artist_id).await
+        self.catalogue
+            .get_or(format!("artist:{artist_id}"), async {
+                self.session().await?.artist(artist_id).await
+            })
+            .await
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        Ok(self
-            .qobuz()?
-            .lock()
+        self.catalogue
+            .get_or(format!("artist_albums:{artist_id}:{cap}"), async {
+                Ok(self.session().await?.artist_albums(artist_id, cap).await?.1)
+            })
             .await
-            .artist_albums(artist_id, cap)
-            .await?
-            .1)
     }
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
-        self.qobuz()?
-            .lock()
-            .await
-            .similar_artists(artist_id, limit)
+        self.catalogue
+            .get_or(format!("similar_artists:{artist_id}:{limit}"), async {
+                self.session().await?.similar_artists(artist_id, limit).await
+            })
             .await
     }
 
     // -------------------------------------------------------------- playback
 
+    /// Never cached, the URL is signed and expires. Under the lock rather than
+    /// on a session, because it is where the client learns which secret works.
     pub async fn file_url(&self, track_id: i64, format_id: u32) -> Result<String> {
         self.qobuz()?.lock().await.file_url(track_id, format_id).await
     }
 
     pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {
-        self.qobuz()?
-            .lock()
-            .await
-            .export_playlist(name, track_ids)
-            .await
+        let id = self.session().await?.export_playlist(name, track_ids).await?;
+        self.account.clear();
+        Ok(id)
     }
 
     // ------------------------------------------------------- favourites
 
     pub async fn favorite_add(&self, kind: &str, id: &str) -> Result<()> {
-        self.qobuz()?.lock().await.favorite_add(kind, id).await
+        self.session().await?.favorite_add(kind, id).await?;
+        self.account.clear();
+        Ok(())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str) -> Result<()> {
-        self.qobuz()?.lock().await.favorite_remove(kind, id).await
+        self.session().await?.favorite_remove(kind, id).await?;
+        self.account.clear();
+        Ok(())
     }
 
     // --------------------------------------------------------- text steering
