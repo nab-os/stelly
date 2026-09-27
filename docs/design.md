@@ -55,6 +55,28 @@ block holds, so they reweight what CLAP heard rather than adding an
 independent opinion. What they buy: no second model, no second front end,
 labels that are plain text in `pipeline/labels.rs`, and a permissive licence.
 
+## One queue across devices
+
+Every paired device follows one play session: the queue, the position, and
+which device the sound comes out of. The server holds it in memory; a restart
+empties the queue.
+
+The rules are `two_khz::session`, which both sides run. A button applies its
+`Op` to the app's own copy at once and posts it; the server applies the same
+op to the real copy and pushes the result over SSE to every device. An op that
+names a row by index carries the queue version it was made against, and is
+refused when the queue has changed since, so a drag cannot move the wrong row.
+
+Only the output plays. It follows the session's `cue`, bumped by a jump, a
+seek or a change of output, and reports what its `<audio>` element is doing
+every ten seconds; everyone else carries the position forward from the last
+report. The first device to press play when nothing is sounding becomes the
+output, and an output that disconnects is let go after ten seconds.
+
+Qobuz Connect was the alternative. It would have reached the official apps and
+streamers, but its protocol is reverse-engineered, and its queue accepts
+tracks from clients that know nothing of the dedupe or the hidden artists.
+
 ## The space
 
 | block | dims | source |

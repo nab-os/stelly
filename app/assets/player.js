@@ -13,11 +13,21 @@
   }
   if (!audio) return;
 
-  window.twoKhzPlayUrl = (url) => {
+  // `start` is where the session is by now, which is not always the top: a
+  // device taking over the sound picks up mid-track. Says "loaded" once the
+  // element has started or given up, so Rust can tell the pause a src swap
+  // causes from someone pausing.
+  window.twoKhzPlayUrl = (url, start, autoplay) => {
     audio.src = url;
-    // A previous track's position survives a src swap in some webviews.
-    audio.currentTime = 0;
-    audio.play().catch(() => {});
+    // Set even when it is 0: a previous track's position survives a src swap
+    // in some webviews.
+    audio.currentTime = start || 0;
+    const loaded = () => dioxus.send({ type: "loaded" });
+    if (autoplay) {
+      audio.play().then(loaded, loaded);
+    } else {
+      setTimeout(loaded, 0);
+    }
   };
   window.twoKhzResume = () => audio.play().catch(() => {});
   window.twoKhzPause = () => audio.pause();
@@ -26,8 +36,8 @@
     audio.removeAttribute("src");
     audio.load();
   };
-  window.twoKhzSeek = (fraction) => {
-    if (Number.isFinite(audio.duration)) audio.currentTime = fraction * audio.duration;
+  window.twoKhzSeekTo = (seconds) => {
+    audio.currentTime = Math.max(0, seconds);
   };
   window.twoKhzVolume = (value) => {
     audio.volume = Math.max(0, Math.min(1, value));
@@ -67,11 +77,11 @@
   audio.addEventListener("ended", () => dioxus.send({ type: "ended" }));
   audio.addEventListener("play", () => {
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
-    dioxus.send({ type: "playing", playing: true });
+    dioxus.send({ type: "playing", playing: true, position: audio.currentTime || 0 });
   });
   audio.addEventListener("pause", () => {
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
-    dioxus.send({ type: "playing", playing: false });
+    dioxus.send({ type: "playing", playing: false, position: audio.currentTime || 0 });
   });
 
   audio.addEventListener("error", () => {

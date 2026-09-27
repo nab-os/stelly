@@ -55,6 +55,15 @@ pub fn queue() -> Element {
     })
 }
 
+/// A speaker cabinet, where the sound comes out.
+pub fn speaker() -> Element {
+    stroked(rsx! {
+        rect { x: "5", y: "2", width: "14", height: "20", rx: "2" }
+        circle { cx: "12", cy: "14", r: "4" }
+        path { d: "M12 6h.01" }
+    })
+}
+
 pub fn volume(muted: bool) -> Element {
     stroked(rsx! {
         path { d: "M11 5L6 9H2v6h4l5 4V5z" }

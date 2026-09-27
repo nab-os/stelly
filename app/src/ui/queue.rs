@@ -6,7 +6,7 @@
 //! shows on hover. The gestures live in `queue-drag.js`.
 
 use super::menu::{open_menu, ContextMenu, MenuTarget};
-use super::player::{clear_queue, move_to, play_at, remove_at, Player};
+use super::player::{clear_queue, move_to, play_at, remove_at, set_upcoming, Player};
 use super::{album_link, artist_link, icons, Cover, Library};
 use crate::engine;
 use crate::qobuz::RemoteTrack;
@@ -59,9 +59,7 @@ fn sort_queue(mut player: Player) {
     let unplaced = remaining.len();
     sorted.extend(remaining);
 
-    let mut next = queue[..=index].to_vec();
-    next.extend(sorted);
-    player.queue.set(next);
+    set_upcoming(player, sorted);
 
     player.status.set(Some(match unplaced {
         0 => "queue sorted by distance".into(),
@@ -140,9 +138,7 @@ pub fn QueueView() -> Element {
                         li {
                             key: "{index}-{track.id}",
                             class: if index == current { "queue-row playing" } else { "queue-row" },
-                            onclick: move |_| {
-                                spawn(async move { play_at(player, index).await });
-                            },
+                            onclick: move |_| play_at(player, index),
                             // Right-click only: a long press here starts a
                             // drag, see queue-drag.js.
                             oncontextmenu: move |event: Event<MouseData>| {

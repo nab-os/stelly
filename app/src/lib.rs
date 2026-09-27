@@ -15,6 +15,7 @@ pub mod map;
 pub mod paths;
 pub mod qobuz;
 pub mod schema;
+pub mod session;
 pub mod space;
 
 /// The window, and everything in it. Shared by every platform that has one.
