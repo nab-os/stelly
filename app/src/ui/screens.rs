@@ -1,0 +1,610 @@
+//! The detail pages: one track, one album, one artist, each a screen of the
+//! main area rather than a sheet over it.
+//!
+//! What you can do with a thing sits at the top, under its cover: play it,
+//! like it, fetch it into the catalogue, or, for a track the space holds, name
+//! it as either end of a path. The generate panel beside the main area is where
+//! that path, or any other walk, then shows up.
+
+use super::generate::{Generator, PathEnd};
+use super::icons;
+use super::library::{ArtistRows, Library, TracksView, View, ViewToggle};
+use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
+use super::player::{enqueue, play_list, Player};
+use super::{
+    album_link, artist_link, open_remote_track, space_mark, Blocklist, Cover, LocalIds, MapView,
+    Selection, SpaceReach,
+};
+use crate::backend::backend;
+use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
+use dioxus::prelude::*;
+
+/// Add to or remove from the account's Qobuz favourites. `kind` is "track",
+/// "album" or "artist". The heart flipping is the confirmation; only a
+/// failure is worth a line of text.
+fn toggle_like(
+    kind: &'static str,
+    id: String,
+    currently_liked: bool,
+    library: Library,
+    mut status: Signal<Option<String>>,
+) {
+    let want = !currently_liked;
+    spawn(async move {
+        let result = if want {
+            backend().favorite_add(kind, &id).await
+        } else {
+            backend().favorite_remove(kind, &id).await
+        };
+        match result {
+            Ok(()) => library.set_liked(kind, &id, want),
+            Err(err) => status.set(Some(format!("{err:#}"))),
+        }
+    });
+}
+
+/// Pull an album's tracklist, or an artist's discography, into the catalogue
+/// now. Only feature extraction still waits for the pipeline, which the
+/// status line says.
+fn fetch(kind: &'static str, id: String, label: String, mut status: Signal<Option<String>>) {
+    status.set(Some(format!("fetching {label}…")));
+    spawn(async move {
+        let result = match kind {
+            "artist" => match id.parse() {
+                Ok(artist_id) => backend().fetch_artist(artist_id).await,
+                Err(_) => return,
+            },
+            _ => backend().fetch_album(&id).await,
+        };
+        status.set(Some(match result {
+            Ok(count) if kind == "artist" => {
+                format!("{label}: {count} albums queued. Analyse from settings to add them to the space.")
+            }
+            Ok(count) => {
+                format!("{label}: {count} tracks fetched. Analyse from settings to add them to the space.")
+            }
+            Err(err) => format!("{err:#}"),
+        }));
+    });
+}
+
+/// "In your space" when it already is, the button that would put it there
+/// when it is not. One slot, so the page never offers to fetch what it has.
+fn fetch_or_badge(in_space: bool, title: &'static str, onclick: impl FnMut(Event<MouseData>) + 'static) -> Element {
+    if in_space {
+        rsx! { span { class: "badge in-space", "in your space" } }
+    } else {
+        rsx! {
+            button { title: "{title}", onclick, "Fetch" }
+        }
+    }
+}
+
+/// The two path ends, green for where it starts and red for where it goes.
+/// Disabled for a track the space does not hold: it has no coordinates to
+/// walk from or to.
+#[component]
+pub(crate) fn PathButtons(track_id: i64, enabled: bool, compact: bool) -> Element {
+    let generator = use_context::<Generator>();
+    let from = *generator.from.read();
+    let to = *generator.to.read();
+    let why = if enabled { "" } else { ", only for tracks in your space" };
+
+    rsx! {
+        button {
+            class: if from == Some(track_id) { "path-end a set" } else { "path-end a" },
+            disabled: !enabled,
+            title: "start a path here{why}",
+            onclick: move |event: Event<MouseData>| {
+                event.stop_propagation();
+                generator.set_path_end(PathEnd::A, track_id);
+            },
+            if compact { "A" } else { "Path A" }
+        }
+        button {
+            class: if to == Some(track_id) { "path-end b set" } else { "path-end b" },
+            disabled: !enabled,
+            title: "end a path here{why}",
+            onclick: move |event: Event<MouseData>| {
+                event.stop_propagation();
+                generator.set_path_end(PathEnd::B, track_id);
+            },
+            if compact { "B" } else { "Path B" }
+        }
+    }
+}
+
+/// One line of the facts list, skipped when there is nothing to say.
+fn fact(label: &'static str, value: Option<String>) -> Element {
+    match value.filter(|v| !v.trim().is_empty()) {
+        Some(value) => rsx! {
+            div { class: "fact",
+                dt { "{label}" }
+                dd { "{value}" }
+            }
+        },
+        None => rsx! {},
+    }
+}
+
+fn clock(seconds: i64) -> String {
+    if seconds >= 3600 {
+        format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
+// -------------------------------------------------------------------- track
+
+/// Everything known about one track, on one screen, so it can be shared as a
+/// single screenshot: cover and names up top, then every fact the catalogue
+/// and the space have about it.
+#[component]
+pub fn TrackScreen(track: RemoteTrack) -> Element {
+    let player = use_context::<Player>();
+    let library = use_context::<Library>();
+    let local = use_context::<LocalIds>();
+    let blocklist = use_context::<Blocklist>();
+    let map = use_context::<MapView>();
+    let mut selection = use_context::<Selection>().0;
+    let status = use_signal(|| None::<String>);
+
+    library.ensure_liked_loaded();
+    let liked = library.liked().tracks.contains(&track.id);
+    let in_space = local.0.read().contains(&track.id);
+
+    // The space's own row: genre, tempo, where the crawl found it, where it
+    // sits on the map. None of it travels on a Qobuz track.
+    let meta = {
+        let guard = crate::engine().lock().unwrap();
+        guard
+            .navigator
+            .index_of
+            .get(&track.id)
+            .map(|&row| guard.navigator.catalog.get(row).clone())
+    };
+
+    // Looking at a track the space holds makes it the one in hand, for the
+    // generate panel and the map, however the page was reached.
+    let seed = track.id;
+    use_effect(move || {
+        if in_space {
+            selection.set(Some(seed));
+        }
+    });
+
+    let album_id = track.album_id.clone();
+    let quality = if track.hires { "hi-res available" } else { "CD quality" };
+    let credits: Vec<String> = track
+        .performers
+        .as_deref()
+        .unwrap_or_default()
+        .split(';')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    rsx! {
+        div { class: "page",
+            div { class: "hero",
+                Cover { url: track.image.clone(), class: "hero-art eager" }
+                div { class: "hero-meta",
+                    h1 { class: "hero-title", "{track.title}" }
+                    {artist_link(library, track.artist_id, track.artist.clone(), "hero-line")}
+                    {album_link(library, &track, "hero-line muted")}
+
+                    div { class: "hero-actions",
+                        button {
+                            class: "primary",
+                            disabled: !track.streamable,
+                            onclick: {
+                                let track = track.clone();
+                                move |_| play_list(player, vec![track.clone()], 0)
+                            },
+                            {icons::play()}
+                            "Play"
+                        }
+                        button {
+                            disabled: !track.streamable,
+                            onclick: {
+                                let track = track.clone();
+                                move |_| enqueue(player, vec![track.clone()])
+                            },
+                            "Queue"
+                        }
+                        button {
+                            class: if liked { "icon-btn liked" } else { "icon-btn" },
+                            title: if liked { "unlike" } else { "like" },
+                            onclick: {
+                                let id = track.id.to_string();
+                                move |_| toggle_like("track", id.clone(), liked, library, status)
+                            },
+                            {icons::heart(liked)}
+                        }
+                    }
+                    div { class: "hero-actions",
+                        {fetch_or_badge(in_space, "fetch this track's album into the catalogue", {
+                            let album_id = album_id.clone();
+                            let label = track.album.clone();
+                            move |_| {
+                                if let Some(id) = album_id.clone() {
+                                    fetch("album", id, label.clone(), status);
+                                }
+                            }
+                        })}
+                        PathButtons { track_id: track.id, enabled: in_space, compact: false }
+                        if in_space {
+                            button {
+                                title: "show where it sits",
+                                onclick: move |_| map.browse(),
+                                {icons::globe()}
+                                "Map"
+                            }
+                        }
+                    }
+                    if let Some(message) = status() {
+                        p { class: "muted", "{message}" }
+                    }
+                }
+            }
+
+            div { class: "rule" }
+
+            dl { class: "facts",
+                {fact("Title", Some(track.title.clone()))}
+                {fact("Artist", Some(track.artist.clone()))}
+                {fact("Album", Some(track.album.clone()))}
+                {fact("Duration", track.duration.filter(|d| *d > 0).map(clock))}
+                {fact("Released", track.released.clone())}
+                {fact("Genre", meta.as_ref().map(|m| m.genre.clone()))}
+                {fact("Tempo", meta.as_ref().and_then(|m| m.bpm).map(|bpm| format!("{bpm:.0} bpm")))}
+                {fact("ISRC", track.isrc.clone().or_else(|| meta.as_ref().and_then(|m| m.isrc.clone())))}
+                {fact("Quality", Some(quality.to_string()))}
+                {fact("Streamable", Some(if track.streamable { "yes" } else { "not here" }.to_string()))}
+                {fact("In your space", Some(if in_space { "yes" } else { "no" }.to_string()))}
+                {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from your likes", m.seed_distance)))}
+                {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
+                {fact("Qobuz track", Some(track.id.to_string()))}
+                {fact("Qobuz album", track.album_id.clone())}
+            }
+
+            if !credits.is_empty() {
+                h3 { class: "shelf-head", "Credits" }
+                ul { class: "credits",
+                    for (i, credit) in credits.into_iter().enumerate() {
+                        li { key: "{i}", "{credit}" }
+                    }
+                }
+            }
+
+            if let Some(artist_id) = track.artist_id {
+                div { class: "page-foot",
+                    button {
+                        class: "danger",
+                        onclick: {
+                            let name = track.artist.clone();
+                            move |_| {
+                                blocklist.block.call((artist_id, name.clone()));
+                                library.back();
+                            }
+                        },
+                        "Hide {track.artist}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------- album
+
+/// An album: cover and details, then its tracklist, each row playable and
+/// ready to be either end of a path.
+#[component]
+pub fn AlbumScreen(album: RemoteAlbum) -> Element {
+    let player = use_context::<Player>();
+    let library = use_context::<Library>();
+    let local = use_context::<LocalIds>();
+    let reach = use_context::<SpaceReach>().0;
+    let blocklist = use_context::<Blocklist>();
+    let selection = use_context::<Selection>().0;
+    let mut menu = use_context::<ContextMenu>().0;
+    let status = use_signal(|| None::<String>);
+
+    library.ensure_liked_loaded();
+    let liked = library.liked().albums.contains(&album.id);
+    let in_space = reach.read().0.contains(&album.id);
+
+    // `LibraryPanel`'s drive fetched these for this view; the menu's
+    // `ShelfTrack` indices address the same list.
+    let tracks = library.shelf.read().visible_tracks(&blocklist);
+    let no_tracks = tracks.is_empty();
+    let loading = *library.loading.read();
+    let now_playing = player.current().map(|t| t.id);
+    let local_ids = local.0.read().clone();
+
+    // An album reached from a track only knows what the track did; the
+    // tracklist fills in the rest once it lands.
+    let released = album
+        .released
+        .clone()
+        .or_else(|| tracks.iter().find_map(|t| t.released.clone()));
+    let total: i64 = tracks.iter().filter_map(|t| t.duration).sum();
+    let count = album.tracks_count.unwrap_or(tracks.len() as i64);
+    let details: Vec<String> = [
+        released,
+        album.genre.clone(),
+        album.label.clone(),
+        (count > 0).then(|| format!("{count} tracks")),
+        (total > 0).then(|| clock(total)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    rsx! {
+        div { class: "page",
+            div { class: "hero",
+                Cover { url: album.image.clone(), class: "hero-art eager" }
+                div { class: "hero-meta",
+                    h1 { class: "hero-title", "{album.title}" }
+                    {artist_link(library, album.artist_id, album.artist.clone(), "hero-line")}
+                    if !details.is_empty() {
+                        span { class: "hero-line muted", {details.join(" · ")} }
+                    }
+                    div { class: "hero-actions",
+                        button {
+                            class: "primary",
+                            disabled: no_tracks,
+                            onclick: move |_| {
+                                let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                play_list(player, queue, 0);
+                            },
+                            {icons::play()}
+                            "Play"
+                        }
+                        button {
+                            disabled: no_tracks,
+                            onclick: move |_| {
+                                let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                enqueue(player, queue);
+                            },
+                            "Queue"
+                        }
+                        button {
+                            class: if liked { "icon-btn liked" } else { "icon-btn" },
+                            title: if liked { "unlike" } else { "like" },
+                            onclick: {
+                                let id = album.id.clone();
+                                move |_| toggle_like("album", id.clone(), liked, library, status)
+                            },
+                            {icons::heart(liked)}
+                        }
+                        {fetch_or_badge(in_space, "fetch this tracklist into the catalogue", {
+                            let (id, title) = (album.id.clone(), album.title.clone());
+                            move |_| fetch("album", id.clone(), title.clone(), status)
+                        })}
+                    }
+                    if let Some(message) = status() {
+                        p { class: "muted", "{message}" }
+                    }
+                }
+            }
+
+            div { class: "rule" }
+
+            if loading {
+                p { class: "muted", "loading…" }
+            } else if let Some(message) = library.error.read().clone() {
+                p { class: "muted error", "{message}" }
+            } else {
+                ol { class: "list album-tracks",
+                    for (index, track) in tracks.into_iter().enumerate() {
+                        li {
+                            key: "{index}-{track.id}",
+                            class: if now_playing == Some(track.id) { "row playing" } else { "row" },
+                            onclick: {
+                                let track = track.clone();
+                                move |_| open_remote_track(library, selection, &local, track.clone())
+                            },
+                            "data-menu": MenuTarget::ShelfTrack(index).tag(),
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
+                            },
+                            span { class: "title",
+                                "{track.title}"
+                                if track.artist != album.artist {
+                                    span { class: "muted", " · {track.artist}" }
+                                }
+                            }
+                            if local_ids.contains(&track.id) {
+                                span { class: "in-space-dot", title: "in your space", "•" }
+                            }
+                            span { class: "muted", "{track.duration_label()}" }
+                            div { class: "row-actions",
+                                button {
+                                    class: "icon-btn",
+                                    title: "play from here",
+                                    disabled: !track.streamable,
+                                    onclick: move |event: Event<MouseData>| {
+                                        event.stop_propagation();
+                                        let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                        play_list(player, queue, index);
+                                    },
+                                    {icons::play()}
+                                }
+                                PathButtons {
+                                    track_id: track.id,
+                                    enabled: local_ids.contains(&track.id),
+                                    compact: true,
+                                }
+                            }
+                            {menu_button(menu, MenuTarget::ShelfTrack(index))}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------- artist
+
+/// An artist: portrait, a biography folded to a few lines, then the
+/// discography as a grid or a list, then who Qobuz thinks is close.
+#[component]
+pub fn ArtistScreen(artist: RemoteArtist) -> Element {
+    let library = use_context::<Library>();
+    let reach = use_context::<SpaceReach>().0;
+    let blocklist = use_context::<Blocklist>();
+    let mut menu = use_context::<ContextMenu>().0;
+    let status = use_signal(|| None::<String>);
+    let mut expanded = use_signal(|| false);
+
+    library.ensure_liked_loaded();
+    let followed = library.liked().artists.contains(&artist.id);
+    let in_space = reach.read().1.contains(&artist.id);
+
+    // The portrait and biography, which nothing that links here carries. A
+    // server from before that route answers 404; the page just goes without.
+    let mut info: Signal<Option<RemoteArtist>> = use_signal(|| None);
+    {
+        let id = artist.id;
+        use_future(move || async move {
+            if let Ok(found) = backend().artist(id).await {
+                info.set(Some(found));
+            }
+        });
+    }
+    let fetched = info.read().clone();
+    let image = fetched.as_ref().and_then(|a| a.image.clone()).or_else(|| artist.image.clone());
+    let biography = fetched.as_ref().and_then(|a| a.biography.clone());
+    let albums_count = fetched.as_ref().and_then(|a| a.albums_count).or(artist.albums_count);
+
+    let shelf = library.shelf.read().clone();
+    let albums = shelf.visible_albums(&blocklist);
+    let has_similar = !shelf.visible_artists(&blocklist, true).is_empty();
+    let loading = *library.loading.read();
+    let grid = *library.tracks_view.read() == TracksView::Grid;
+
+    rsx! {
+        div { class: "page",
+            div { class: "hero",
+                Cover { url: image, class: "hero-art round eager" }
+                div { class: "hero-meta",
+                    h1 { class: "hero-title", "{artist.name}" }
+                    if let Some(count) = albums_count {
+                        span { class: "hero-line muted", "{count} albums" }
+                    }
+                    div { class: "hero-actions",
+                        button {
+                            class: if followed { "icon-btn liked" } else { "icon-btn" },
+                            title: if followed { "unfollow" } else { "follow" },
+                            onclick: {
+                                let id = artist.id.to_string();
+                                move |_| toggle_like("artist", id.clone(), followed, library, status)
+                            },
+                            {icons::heart(followed)}
+                        }
+                        {fetch_or_badge(in_space, "fetch this discography into the catalogue", {
+                            let (id, name) = (artist.id, artist.name.clone());
+                            move |_| fetch("artist", id.to_string(), name.clone(), status)
+                        })}
+                        button {
+                            class: "danger",
+                            onclick: {
+                                let (id, name) = (artist.id, artist.name.clone());
+                                move |_| {
+                                    blocklist.block.call((id, name.clone()));
+                                    library.back();
+                                }
+                            },
+                            "Hide"
+                        }
+                    }
+                    if let Some(message) = status() {
+                        p { class: "muted", "{message}" }
+                    }
+                }
+            }
+
+            // Folded by default: a biography can run to pages, and the
+            // discography under it is what most visits are for.
+            if let Some(biography) = biography {
+                div { class: if expanded() { "bio open" } else { "bio" },
+                    for (i, paragraph) in biography.lines().enumerate() {
+                        p { key: "{i}", "{paragraph}" }
+                    }
+                }
+                button {
+                    class: "link bio-toggle",
+                    onclick: move |_| {
+                        let now = expanded();
+                        expanded.set(!now);
+                    },
+                    if expanded() { "less" } else { "more" }
+                }
+            }
+
+            div { class: "rule" }
+
+            div { class: "shelf-head",
+                "Albums"
+                span { class: "spacer" }
+                ViewToggle {}
+            }
+
+            if loading {
+                p { class: "muted", "loading…" }
+            } else if let Some(message) = library.error.read().clone() {
+                p { class: "muted error", "{message}" }
+            } else if albums.is_empty() {
+                p { class: "muted", "nothing here" }
+            } else {
+                ul { class: if grid { "tiles" } else { "list" },
+                    for (index, album) in albums.into_iter().enumerate() {
+                        li {
+                            key: "{index}-{album.id}",
+                            class: if grid { "tile" } else { "row" },
+                            onclick: {
+                                let album = album.clone();
+                                move |_| library.go(View::Album(album.clone()))
+                            },
+                            "data-menu": MenuTarget::ShelfAlbum(index).tag(),
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
+                            },
+                            Cover {
+                                url: album.image.clone(),
+                                class: if grid { String::new() } else { "thumb".to_string() },
+                            }
+                            if grid {
+                                {space_mark(reach.read().0.contains(&album.id))}
+                                span { class: "title", "{album.title}" }
+                                span { class: "artist", "{album.year()}" }
+                            } else {
+                                span { class: "title", "{album.title}" }
+                                if reach.read().0.contains(&album.id) {
+                                    span { class: "in-space-dot", title: "in your space", "•" }
+                                }
+                                if let Some(count) = album.tracks_count {
+                                    span { class: "muted", "{count} tracks" }
+                                }
+                                span { class: "muted", "{album.year()}" }
+                            }
+                            {menu_button(menu, MenuTarget::ShelfAlbum(index))}
+                        }
+                    }
+                }
+            }
+
+            if has_similar {
+                ArtistRows { heading: "Similar artists".to_string(), similar: true }
+            }
+        }
+    }
+}
