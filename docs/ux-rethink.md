@@ -262,3 +262,46 @@ it build and hang together" but not "does the sheet's animation feel right",
 "is 320px too much art on a small phone", or "does the docked sheet's
 900px breakpoint land somewhere sensible", all genuinely open until someone
 runs `cargo run` from `app/` and taps through it.
+
+## Round two: generate as the side panel
+
+Built. Supersedes the rail proposal that stood here: the side panel is the
+generate tool itself, always showing, and everything else is a screen of the
+main area beside it.
+
+- **Main area** (`MainScreen`, `ui/library.rs`): a slim top bar (back,
+  what the page is, favourites, settings) over one scroller. Screens are
+  `View` variants and `Library::history` is the way back: favourites (mixed,
+  exclusive tracks/albums/artists filters, liked-date sort, grid/list),
+  search (box plus an exclusive space/qobuz switch), album, artist, track,
+  playlists, settings.
+- **Detail pages** (`ui/screens.rs`): cover and names up top, verbs under
+  them, a rule, then the rest. Album rows carry play, a green A and a red B.
+  The track page lists every fact the catalogue and the space have, laid out
+  to be screenshotted. The artist page folds Qobuz's biography, which comes
+  from a new `GET /api/artists/{id}`; an older server just shows none.
+- **Generate panel** (`ui/side.rs`): seed, modes, path ends, result,
+  weights. Docked right above 900px; below it, slides in from the right
+  over the main area with a floating back arrow, and anything that
+  generates slides it in (`Generator::panel_open`).
+- **Floating buttons**, bottom right of the main area: the map (accent,
+  globe) and search (base colour, magnifier), plus the panel's own on a
+  phone.
+- **Map** covers the main area only. Picking a point selects it and shows a
+  card (cover, title, album, artist) that map.js pins to the point every
+  frame, so it follows a pan or zoom at a constant size; the card opens the
+  track page.
+- **Player** runs the full width of the window: seek line along its top
+  edge, cover and names (each opening its page), centred transport, then a
+  wheel-scrollable volume and the queue button. The full-screen player is
+  gone, its job is the track page's now. Stream quality moved to settings.
+- **Queue drawer** rises from the player: covers and names, drag to
+  reorder (long press first on touch), swipe away or hover-cross to remove,
+  a handle to drag it down on a phone (`queue-drag.js`).
+- **Settings** is one row per group: server and token, playback quality,
+  devices and their tokens, hidden artists, pipeline controls, pipeline
+  output. The pipeline is no longer a screen of its own.
+
+Checked with `cargo check`, `cargo test` and `cargo clippy` on the app and
+`cargo check` on the server. Like everything above it in this document, not
+yet looked at in a running window.

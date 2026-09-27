@@ -116,6 +116,10 @@ impl Hub {
         Ok(self.qobuz()?.lock().await.album_tracks(album_id).await?.1)
     }
 
+    pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
+        self.qobuz()?.lock().await.artist(artist_id).await
+    }
+
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         Ok(self
             .qobuz()?

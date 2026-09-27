@@ -6,6 +6,12 @@
   --accent: #7aa2f7;
   --text: #e5e7ef;
   --muted: #8b90a3;
+  /* A path's two ends, the same green and red map.js draws a route's first
+     and last point in, so the buttons that set them and the line on the map
+     agree about which end is which. */
+  --path-a: #9ece6a;
+  --path-b: #f7768e;
+  --danger: #f7768e;
 }
 
 * { box-sizing: border-box; }
@@ -17,34 +23,48 @@ body {
   font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+.muted { color: var(--muted); font-size: 12px; }
+.error { color: var(--danger); }
+.notice { color: var(--accent); }
+.spacer { flex: 1; }
+.hidden { display: none !important; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+code {
+  background: var(--row);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
+}
+
+/* ----------------------------------------------------------------- layout
+   Two rows: the workspace, then the player the full width of the window.
+   The workspace is the main area with the generate panel docked to its
+   right; below 900px the panel leaves the row and slides over the main area
+   instead, see the `@media` block at the end. */
+
 .app {
-  padding: 16px;
   height: 100vh;
   height: 100dvh;
   display: flex;
   flex-direction: column;
-  /* Anchors the player's transient status line above the bar. */
+  overflow: hidden;
+}
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 12px;
+  padding: 12px 12px 0;
+  /* The queue drawer and, on a phone, the generate panel are positioned
+     against this box, so both stop at the player rather than covering it. */
   position: relative;
 }
 
-header {
-  display: flex;
-  /* Centred, not baseline: the header now holds an input, and a text baseline
-     shared with a bordered box sits the box visibly low. */
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-header h1 { font-size: 16px; font-weight: 600; margin: 0; }
-/* Pipeline and settings sit at the far end whatever comes before them: the
-   search box is capped in width, and on a phone it wraps to a row of its
-   own, so a spacer between them never had any room left to take. */
-header .nav-btn { margin-left: auto; }
-
 .panel {
   background: var(--panel);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 12px;
   display: flex;
   flex-direction: column;
@@ -61,81 +81,95 @@ header .nav-btn { margin-left: auto; }
   color: var(--muted);
   margin: 0 0 8px;
 }
+.panel h2 button { text-transform: none; letter-spacing: normal; }
 
-/* An album or artist's own page, with its detail (cover, badges, actions)
-   standing where the plain heading usually does, see `LibraryPanel`. A
-   rule under it is the same separation `.sheet-rule` draws between a track's
-   detail and what it can make; here it is between the detail and the
-   tracklist or discography underneath. */
-.library-detail {
+/* The main area. `relative` because the map and the floating buttons sit
+   over it rather than in it. */
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-bottom: 12px;
-  margin-bottom: 8px;
+  background: var(--panel);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.screen { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--row);
   flex: none;
 }
-
-.muted { color: var(--muted); font-size: 12px; }
-.error { color: #f7768e; }
-
-code {
-  background: var(--row);
-  border-radius: 3px;
-  padding: 1px 4px;
-  font-size: 11px;
+.topbar h2 {
+  margin: 0 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  min-width: 0;
 }
 
-.spacer { flex: 1; }
-
-/* One browse column and the space tools beside it. `relative` because the map
-   overlays this box rather than sitting in it. */
-.body { display: flex; gap: 12px; flex: 1; min-height: 0; position: relative; }
-
-/* The browse column is now the primary surface, one list holding both what
-   the space has and what Qobuz will sell you, so it takes the room the map
-   used to. */
-.library {
-  flex: 1 1 auto;
-  min-width: 380px;
-  min-height: 0;
-}
-
-/* Source headings. Louder than a plain shelf heading, because they are what
-   tells you why a row is where it is. */
-.source-head {
-  color: var(--text);
-  border-bottom: 1px solid var(--row);
-  padding-bottom: 4px;
-  margin-top: 14px;
-}
-.source-head:first-child { margin-top: 0; }
-
-.more-rows {
-  align-self: flex-start;
-  margin: 6px 0 2px 7px;
-}
-
-.tabs { display: flex; gap: 4px; margin-bottom: 8px; }
-
-.tab {
+/* The one scroller in the main area. Room at the bottom so the last row can
+   scroll out from under the floating buttons. */
+.screen-body {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px 96px;
+}
+
+/* ------------------------------------------------------------------- icons */
+
+.icon { width: 18px; height: 18px; flex: none; display: block; }
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
   background: transparent;
   color: var(--muted);
-  border-bottom: 2px solid transparent;
-  border-radius: 4px 4px 0 0;
-  padding: 5px 4px;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex: none;
 }
-.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.icon-btn:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
+.icon-btn.active, .icon-btn.liked { color: var(--accent); }
 
-/* A pill, deliberately: this app's other buttons (`button`, `.primary`) are
-   a 5px-rounded rectangle, close enough to a chip's old 4px that the two
-   families read as the same control wearing two sizes, which is what made
-   an action ("Play", "Hide", "Fetch") and a filter ("albums", "liked") look
-   interchangeable. Fully round corners is the one cheap change that fixes
-   this everywhere `.chip` is used, without auditing every call site: a pill
-   says "tag or toggle", a rectangle says "verb". */
+/* ----------------------------------------------------------------- buttons */
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--row);
+  color: var(--text);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--row-hover); }
+button:disabled { opacity: 0.4; cursor: default; }
+button .icon { width: 16px; height: 16px; }
+
+button.primary { background: var(--accent); color: #12131a; font-weight: 600; }
+button.primary:hover:not(:disabled) { background: #8fb3ff; }
+
+button.danger, .chip.danger { color: var(--danger); }
+button.danger:hover:not(:disabled),
+.chip.danger:hover:not(:disabled) { background: var(--danger); color: #12131a; }
+
+/* A pill: a tag or a toggle. A rectangle is a verb. */
 .chip {
   background: var(--row);
   color: var(--muted);
@@ -146,48 +180,150 @@ code {
 }
 .chip.active { background: var(--accent); color: #12131a; }
 
-/* A chip that takes you to a different screen, the map, the pipeline,
-   rather than narrowing what the current one shows. Same size as a filter
-   chip, deliberately not the same look: outlined instead of filled, and
-   "you are here" is a coloured border rather than `.chip.active`'s solid
-   fill, so a source-row filter and a page switch do not read as the same
-   kind of control. */
-.nav-btn {
-  background: transparent;
+/* An artist, album or track name that opens its own page. Stays the colour
+   of the text around it until pointed at: every row has one, and a column of
+   accent-coloured names would shout. */
+.clickable { cursor: pointer; }
+.clickable:hover { color: var(--accent); text-decoration: underline; }
+.row.selected .clickable:hover { color: inherit; }
+
+.link {
+  all: unset;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+.link:hover { color: var(--accent); text-decoration: underline; }
+
+/* --------------------------------------------------------- floating buttons
+   Bottom right of the main area, over the map too: the map's own button is
+   how it closes again. The map is the primary action and wears the accent;
+   search is quieter, the base colour. */
+
+.fabs {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fab {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.fab-map { width: 54px; height: 54px; background: var(--accent); color: #12131a; }
+.fab-map .icon { width: 26px; height: 26px; }
+.fab-map:hover:not(:disabled) { background: #8fb3ff; }
+.fab-map.active { box-shadow: 0 0 0 3px var(--panel), 0 0 0 5px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
+
+.fab-search { width: 44px; height: 44px; background: var(--row-hover); color: var(--text); }
+.fab-search .icon { width: 20px; height: 20px; }
+.fab-search:hover:not(:disabled) { background: #363a47; }
+.fab-search.active { color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
+
+/* Phone only, see the `@media` block. */
+.fab-generate { display: none; }
+
+/* --------------------------------------------------------------------- map
+   Over the main area. The background must stay opaque and must stay
+   `--panel`: map.js reads `getComputedStyle(canvas.parentElement)` and
+   premultiplies the rasterised point cloud against it. A translucent
+   backdrop would tint 28k points wrong. For the same reason, and because
+   this is Cairo, no backdrop-filter. */
+
+.map-wrap {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+#map:active { cursor: grabbing; }
+
+.map-route { position: absolute; top: 12px; left: 12px; z-index: 11; }
+
+/* Pinned over the selected point by map.js, which sets `left`/`top` to the
+   point and owns `visibility`. The transform lifts it above the point, with
+   the arrow underneath pointing down at it. Screen pixels, so a zoom moves it
+   without scaling it. */
+.map-card {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 11;
+  visibility: hidden;
+  transform: translate(-50%, calc(-100% - 20px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 280px;
+  padding: 8px 14px 8px 8px;
+  background: var(--bg);
   border: 1px solid var(--row-hover);
-  color: var(--text);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
 }
-.nav-btn:hover:not(:disabled) { background: var(--row-hover); }
-.nav-btn.active {
-  background: transparent;
-  border-color: var(--accent);
-  color: var(--accent);
+.map-card:empty { display: none; }
+.map-card:hover { border-color: var(--accent); }
+.map-card::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  width: 10px;
+  height: 10px;
+  background: var(--bg);
+  border-right: 1px solid var(--row-hover);
+  border-bottom: 1px solid var(--row-hover);
+  transform: translateX(-50%) rotate(45deg);
 }
+.map-card:hover::after { border-color: var(--accent); }
+.map-card .thumb { width: 48px; height: 48px; }
+.map-card-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
+.map-card-text .title { font-weight: 600; }
 
-/* Reveal-on-hover is a pointer affordance, and a touch screen has no hover.
-   Left unguarded, every per-row control, hide, "in space", fetch, play,
-   is permanently invisible on a phone, which is a missing feature rather
-   than a cosmetic difference. Sticky :hover after a tap is the same bug seen
-   from the other side, so the row highlight is scoped too. */
-@media (hover: hover) and (pointer: fine) {
-  .row .chip { visibility: hidden; }
-  .row:hover .chip { visibility: visible; }
-  .row:hover { background: var(--row-hover); }
-}
+/* ------------------------------------------------------------------ covers
+   Artwork is a background rather than an <img>, so a URL that 404s, and
+   `qobuz::cover_url` guesses some of them, leaves the placeholder tint
+   instead of a broken-image glyph. Sizing is the caller's. */
 
-.crumb {
+.cover {
+  background: var(--row-hover) center / cover no-repeat;
+  border-radius: 4px;
+}
+.thumb { flex: none; align-self: center; width: 44px; height: 44px; }
+.round { border-radius: 50%; }
+
+/* ------------------------------------------------------------ browse lists */
+
+.toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  row-gap: 6px;
-  margin-bottom: 6px;
-  min-height: 22px;
+  gap: 8px;
+  margin-bottom: 8px;
 }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.view-toggle { display: flex; gap: 2px; flex: none; }
 
-.view-toggle { display: flex; gap: 4px; flex: none; }
-
-.shelf { overflow-y: auto; flex: 1; min-height: 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 
 .shelf-head {
   display: flex;
@@ -197,75 +333,94 @@ code {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
-  margin: 10px 0 4px;
+  margin: 12px 0 6px;
 }
 .shelf-head:first-child { margin-top: 0; }
 
-/* Inside the shelf the lists scroll as one, not each on their own. */
-.shelf .list { overflow-y: visible; flex: none; }
-
-.notice { color: var(--accent); }
-
-/* The result's heading names what produced it. A sentence, not a section
-   label, so it drops `shelf-head`'s uppercasing and tracking. */
-.result-head {
-  text-transform: none;
-  letter-spacing: normal;
-  font-size: 12px;
-  gap: 8px;
+/* Where a section's rows came from. Louder than a plain heading. */
+.source-head {
+  color: var(--text);
+  border-bottom: 1px solid var(--row);
+  padding-bottom: 4px;
+  margin-top: 14px;
 }
-.result-head .ellipsis { min-width: 0; }
-.result-head .chip { flex: none; }
-.tag { flex: none; }
+.source-head:first-child { margin-top: 0; }
 
+.more-rows { align-self: flex-start; margin: 6px 0 2px 7px; }
+
+.list { list-style: none; margin: 0; padding: 0; }
+
+ol.list { counter-reset: step; }
+ol.list .row::before {
+  counter-increment: step;
+  content: counter(step);
+  color: var(--muted);
+  min-width: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* Anything a long press can open a menu on. Without this the platform's own
+   text-selection UI engages mid-press. `pan-y` keeps vertical scrolling
+   working while the timer runs. */
+[data-menu] {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-y;
+}
+
+.row.selected { background: var(--accent); color: #12131a; }
+.row.selected .artist, .row.selected .muted { color: #12131a; }
 .row.playing { color: var(--accent); }
 .row.playing .title { font-weight: 600; }
-.tile.playing .title { color: var(--accent); font-weight: 600; }
-.tile.playing .cover { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* ------------------------------------------------------------------ covers */
+.artist {
+  color: var(--muted);
+  min-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag { flex: none; }
 
-/* Artwork is a background rather than an <img>, so a URL that 404s, and
-   `qobuz::cover_url` guesses some of them, leaves the placeholder tint
-   instead of a broken-image glyph. */
-/* Size-agnostic: `.cover` is the artwork itself, and the variants below place
-   it. It used to carry the row-specific placement, which a tile cannot use. */
-.cover {
-  background: var(--row-hover) center / cover no-repeat;
-  border-radius: 4px;
+/* Reveal-on-hover is a pointer affordance; a touch screen has no hover. */
+@media (hover: hover) and (pointer: fine) {
+  .row .chip { visibility: hidden; }
+  .row:hover .chip { visibility: visible; }
+  .row:hover { background: var(--row-hover); }
+  .row.selected:hover { background: var(--accent); }
 }
 
-/* In a row. Rows align on the baseline, which a box holding no text does not
-   have, hence the explicit centring. */
-.thumb {
-  flex: none;
-  align-self: center;
-  width: 44px;
-  height: 44px;
-}
-.round { border-radius: 50%; }
-.now-art { flex: none; align-self: center; width: 48px; height: 48px; border-radius: 6px; }
+.in-space-dot { color: var(--accent); font-size: 14px; line-height: 1; }
 
-/* Wraps the mini-bar's art as a plain tap target, a `<button>` for the
-   semantics (focusable, disableable when nothing plays) without looking like
-   one. */
-.now-art-button {
-  all: unset;
-  cursor: pointer;
-  flex: none;
-  display: flex;
+.chip.more { padding: 2px 6px; line-height: 1; opacity: 0.45; }
+.row:hover .chip.more { opacity: 1; }
+@media (hover: none) {
+  .chip.more { opacity: 0.8; }
 }
-.now-art-button:disabled { cursor: default; }
 
-/* ------------------------------------------------------------------ tiles
-   Art goes where art is the identity. Albums and artists were always grids;
-   tracks are now too by default, see `Library::tracks_view`, with a
-   toggle back to `.list` for when the duration and the "in your space" dot
-   are what a track row is actually for. */
+/* ------------------------------------------------------------------ tiles */
+
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 12px 10px;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 14px 12px;
   list-style: none;
   margin: 0 0 4px;
   padding: 0;
@@ -280,16 +435,9 @@ code {
   min-width: 0;
 }
 
-/* Fixed box, always: a cover that arrives late must not reflow the grid it
-   landed in. `aspect-ratio` alone would not do it, the width has to be
-   settled before the image exists. */
-.tile .cover {
-  width: 100%;
-  aspect-ratio: 1;
-  border-radius: 6px;
-}
+/* Fixed box, always: a cover that arrives late must not reflow the grid. */
+.tile .cover { width: 100%; aspect-ratio: 1; border-radius: 8px; }
 .tile .round { border-radius: 50%; }
-
 .tile .title, .tile .artist {
   min-width: 0;
   font-size: 12px;
@@ -298,101 +446,268 @@ code {
   text-overflow: ellipsis;
 }
 .tile .title { flex: none; }
-.tile .artist { min-width: 0; }
 
-/* The tile's own menu button, over the art rather than beside the text. */
-.tile .more {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-}
+.tile .more { position: absolute; top: 4px; right: 4px; }
 @media (hover: hover) and (pointer: fine) {
   .tile .chip { visibility: hidden; }
   .tile:hover .chip { visibility: visible; }
   .tile:hover .cover { outline: 2px solid var(--accent); outline-offset: 1px; }
 }
-/* A track tile is selectable, the way a row is, `.row.selected` has a
-   background to change; a tile's identity is its cover, so this outlines
-   that instead, persistently rather than only on hover. */
-.tile.selected .cover { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tile.selected .cover,
+.tile.playing .cover { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tile.playing .title { color: var(--accent); font-weight: 600; }
 
-/* An overlay over the body rather than a column in it.
-
-   The background must stay opaque and must stay `--panel`: map.js reads
-   `getComputedStyle(canvas.parentElement).backgroundColor` and premultiplies
-   the rasterised point cloud against it. A translucent backdrop, the
-   obvious thing to reach for on an overlay, would tint 28k points wrong.
-   For the same reason, and because this is Cairo, no backdrop-filter and no
-   large shadows. */
-.map-wrap {
+.tile .space-mark {
   position: absolute;
-  inset: 0;
-  z-index: 20;
-  background: var(--panel);
-  border-radius: 8px;
-  overflow: hidden;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
+  top: 6px;
+  left: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg);
+  pointer-events: none;
 }
+.tile .round ~ .space-mark { top: 0; left: 0; margin: 12% 0 0 12%; }
 
-.map-bar {
+.tile .kind {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  pointer-events: none;
+}
+.tile .kind ~ .space-mark { top: 24px; }
+
+/* ------------------------------------------------------------------ search */
+
+.search {
+  background: var(--row);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  font: inherit;
+}
+.search:focus { outline: none; border-color: var(--accent); }
+
+.search-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.search-bar .search { margin: 0; width: 100%; font-size: 14px; padding: 8px 32px 8px 10px; }
+
+.search-wrap { position: relative; display: flex; flex: 1; min-width: 0; }
+
+.clear-search {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 30px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+}
+.clear-search:hover:not(:disabled) { background: transparent; color: var(--text); }
+
+/* Two options, exactly one of them lit. */
+.segmented {
+  display: flex;
   flex: none;
+  padding: 2px;
+  gap: 2px;
+  background: var(--row);
+  border-radius: 8px;
+}
+.segmented button { background: transparent; color: var(--muted); padding: 5px 12px; font-size: 12px; }
+.segmented button:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
+.segmented button.active { background: var(--accent); color: #12131a; font-weight: 600; }
+
+/* ------------------------------------------------------------ detail pages
+   Track, album, artist. Cover and names up top, what you can do with it
+   under the names, then a rule, then the rest. The track page is meant to
+   be screenshotted, so everything about it sits on one screen at a size a
+   phone can read. */
+
+.page { display: flex; flex-direction: column; gap: 14px; }
+
+.hero { display: flex; align-items: flex-end; gap: 22px; }
+.hero-art { width: 210px; height: 210px; flex: none; border-radius: 10px; }
+.hero-art.round { border-radius: 50%; }
+.hero-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.hero-title {
+  margin: 0 0 2px;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.hero-line { font-size: 14px; }
+.hero-line.muted { font-size: 13px; }
+.hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+
+.badge.in-space {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 12px;
 }
 
-#map { width: 100%; flex: 1; min-height: 0; display: block; cursor: grab; }
+.rule { border-top: 1px solid var(--row); }
 
-/* --------------------------------------------------------------- sheet
-   The selected track and everything you can do with it, `TrackSheet` in
-   Rust. Docked beside the list on a wide screen, the way `.side` used to sit;
-   below the 900px breakpoint it leaves the flex row and pins to the bottom of
-   the viewport instead, overlaying the list rather than replacing it behind a
-   tab. See the `@media` block below for that half. */
-.sheet {
-  width: 420px;
-  flex: none;
+.facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 28px;
+  margin: 0;
+}
+.fact { display: contents; }
+.fact dt { color: var(--muted); }
+.fact dd { margin: 0; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+
+.credits {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-height: 0;
-  overflow-y: auto;
+  gap: 2px;
+  color: var(--muted);
 }
-/* Everything in the sheet takes its natural height and the sheet scrolls as
-   a whole. `.list` is `flex: 1; min-height: 0` for the browse column's sake,
-   which inside an overflowing flex column makes it the one child allowed to
-   shrink below its content, so a generated result, an album's tracklist,
-   whatever list sat lowest, got crushed to a one-row sliver. `.side` used to
-   carry the same `flex: none` rule for the same reason; it was lost when
-   `.side` became `.sheet`. No `max-height` cap either: one scroller, not a
-   list scrolling inside a sheet scrolling inside a window. */
-.sheet > * { flex: none; }
-/* Spelled out again for `.list` specifically: `.sheet > *` and `.list` are
-   the same specificity, and `.list` comes later in this file, so its
-   `flex: 1` won, the list's box still collapsed to nothing, and with
-   overflow visible its rows then painted over whatever came after it. Two
-   classes outrank one regardless of order. */
-.sheet .list { flex: none; min-height: auto; overflow-y: visible; }
 
-.sheet-head { display: flex; align-items: center; }
-.sheet-close { flex: none; font-size: 18px; line-height: 1; padding: 4px 10px; }
+.page-foot { margin-top: 10px; }
 
-/* Only meaningful once the sheet below becomes a fixed overlay, hidden here
-   so a docked sheet has neither a dimming layer nor a handle to drag. */
-.sheet-backdrop { display: none; }
-.sheet-drag { display: none; }
+/* Folded to a few lines by default, faded out where it is cut. */
+.bio {
+  max-height: 4.6em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(black 40%, transparent);
+  mask-image: linear-gradient(black 40%, transparent);
+  color: #c6c9d6;
+  max-width: 72ch;
+}
+.bio.open { max-height: none; -webkit-mask-image: none; mask-image: none; }
+.bio p { margin: 0 0 8px; }
+.bio-toggle { align-self: flex-start; margin-top: -8px; }
 
-.sheet-rule { border-top: 1px solid var(--row); margin: 4px 0 2px; }
+/* Green A, red B: where a path starts and where it goes. Outlined until the
+   track is that end, filled once it is. */
+.path-end { font-weight: 700; background: transparent; }
+.path-end.a { color: var(--path-a); box-shadow: inset 0 0 0 1px rgba(158, 206, 106, 0.55); }
+.path-end.b { color: var(--path-b); box-shadow: inset 0 0 0 1px rgba(247, 118, 142, 0.55); }
+.path-end.a:hover:not(:disabled) { background: rgba(158, 206, 106, 0.15); }
+.path-end.b:hover:not(:disabled) { background: rgba(247, 118, 142, 0.15); }
+.path-end.a.set { background: var(--path-a); color: #12131a; }
+.path-end.b.set { background: var(--path-b); color: #12131a; }
+span.path-end {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 11px;
+  flex: none;
+}
 
-/* Collapsed by default, most sessions never touch a weight, so this used
-   to spend a fixed column's worth of space on a control that was not why the
-   sheet was opened. */
+/* An album's tracklist: play, A, B on every row. */
+.album-tracks .row { padding: 4px 7px; }
+.album-tracks .title .muted { font-size: 12px; }
+.row-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.row-actions .icon-btn .icon { width: 14px; height: 14px; }
+.row-actions .path-end { width: 28px; height: 28px; padding: 0; border-radius: 50%; font-size: 12px; }
+@media (hover: hover) and (pointer: fine) {
+  .album-tracks .row-actions { opacity: 0.5; }
+  .album-tracks .row:hover .row-actions { opacity: 1; }
+}
+
+/* ------------------------------------------------------------ generate panel */
+
+.side-panel {
+  width: 380px;
+  flex: none;
+  overflow-y: auto;
+  gap: 10px;
+}
+/* One scroller for the whole panel; nothing inside it shrinks to fit. */
+.side-panel > * { flex: none; }
+.side-panel h2 { margin: 0; }
+.side-panel .actions { margin: 0; }
+.side-panel .search { margin: 0; }
+
+/* Phone only, see the `@media` block. */
+.side-back { display: none; }
+
+.seed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: var(--row);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.seed:hover { background: var(--row-hover); }
+.seed-text { display: flex; flex-direction: column; min-width: 0; }
+.seed-text .title { font-weight: 600; }
+.seed-empty { margin: 0; }
+
+.tabs { display: flex; gap: 4px; }
+.tab {
+  flex: 1;
+  background: transparent;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  border-radius: 4px 4px 0 0;
+  padding: 5px 4px;
+}
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.side-panel .tabs + p { margin: 0; }
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+.field > .muted:first-child { min-width: 44px; }
+.field .ellipsis { flex: 1; min-width: 0; font-size: 12px; }
+
+.slider {
+  display: grid;
+  grid-template-columns: 70px 1fr 30px;
+  align-items: center;
+  gap: 6px;
+}
+.slider label { font-size: 12px; }
+.slider input { width: 100%; }
+
+.result-head {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+.result-head .ellipsis { min-width: 0; }
+.result.list .title { font-size: 12px; }
+
+.weights-disclosure { border-top: 1px solid var(--row); padding-top: 4px; }
 .weights-toggle {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 8px;
   width: 100%;
   background: transparent;
@@ -403,195 +718,271 @@ code {
   color: var(--muted);
 }
 .weights-toggle:hover:not(:disabled) { background: transparent; color: var(--text); }
+.weights-disclosure .slider { margin-bottom: 4px; }
 
-/* A path half-picked, docked above the player rather than living only inside
-   the sheet that started it, the one piece of state a phone user is likely
-   to lose by backgrounding the app or picking a second track from a
-   different screen entirely. */
-.path-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin-top: 8px;
+/* A path half-built, on a phone only, where the panel is usually away. */
+.path-pill { display: none; }
+
+/* ------------------------------------------------------------------ player
+   The full width of the window, under everything. A grid of three: two
+   equal tracks either side of `auto` is what keeps the transport centred on
+   the bar itself rather than on whatever the sides leave over. */
+
+.player {
+  position: relative;
   flex: none;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 12px 16px 10px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  background: var(--panel);
+  border-top: 1px solid var(--row);
 }
-.path-pill .ellipsis { flex: 1; min-width: 0; font-size: 12px; }
+.player audio { display: none; }
 
-/* ----------------------------------------------------------------- detail
-   Where the selection landed once selecting stopped generating. The cover is
-   the largest thing in the window on purpose: it is the one place artwork is
-   the subject rather than a label. */
-.detail { gap: 10px; }
-
-.detail-art {
-  width: 100%;
-  max-width: 240px;
-  aspect-ratio: 1;
-  align-self: center;
-  border-radius: 8px;
-}
-
-.detail-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-
-/* An artist's name, where it appears as a way to reach their own page rather
-   than as a label, a track's or an album's detail sheet. Reset back to
-   plain text rather than a button, since it sits among the plain `<span>`
-   lines above and below it and has to look like the same kind of line,
-   distinguished only by being reachable. */
-.link {
-  all: unset;
-  cursor: pointer;
-  color: var(--muted);
-  font-size: 13px;
-  text-align: left;
-  width: 100%;
-}
-.link:hover { color: var(--accent); text-decoration: underline; }
-/* Beside a heading rather than standing alone as a whole line, the
-   artist-name usage above wants `width: 100%` for its own ellipsis to have
-   something to truncate against; a link at the end of a `.shelf-head` row
-   wants to be exactly as wide as its own text. */
-.shelf-head .link { width: auto; flex: none; }
-
-/* An artist name inside a row, tile or the player, see `artist_link`.
-   Stays the colour of the text around it until pointed at, like `.link`:
-   every row has one, and a column of accent-coloured names would shout. */
-.clickable { cursor: pointer; }
-.clickable:hover { color: var(--accent); text-decoration: underline; }
-/* A selected row is accent-filled already; accent text on it would vanish. */
-.row.selected .clickable:hover { color: inherit; }
-.detail-title { font-size: 15px; font-weight: 600; }
-.detail-badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
-
-/* Qobuz's credit string, one line per role, see `RemoteTrack::performers`'s
-   doc comment on why this prints the field rather than parsing it further. */
-.detail-credits {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 6px;
-  font-size: 12px;
-}
-
-/* Two rows: what to do with the track, then where to go from it. Wrapping
-   rather than scrolling, because a hidden verb is a verb nobody uses. */
-.detail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+/* Range inputs drawn by hand: a track filled up to `--filled`, set inline. */
+.player input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
   margin: 0;
+  cursor: pointer;
 }
-.detail-actions button { flex: 1 1 auto; white-space: nowrap; }
+.player input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--filled, 0%), var(--row-hover) var(--filled, 0%));
+}
+.player input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--text);
+}
+.player input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--row-hover); }
+.player input[type="range"]::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--accent); }
+.player input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border: none; border-radius: 50%; background: var(--text); }
 
-.search {
-  background: var(--row);
-  border: 1px solid transparent;
+/* The seek line: the bar's whole top edge. Thin until pointed at. */
+.player .seek-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -7px;
+  width: 100%;
+  height: 14px;
+}
+.player .seek-line::-webkit-slider-runnable-track { height: 3px; border-radius: 0; }
+.player .seek-line::-webkit-slider-thumb { margin-top: -4.5px; opacity: 0; transition: opacity 120ms ease; }
+.player:hover .seek-line::-webkit-slider-thumb { opacity: 1; }
+.player .seek-line:disabled { cursor: default; }
+
+.now { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.now-art { width: 52px; height: 52px; border-radius: 6px; flex: none; }
+.now-art-button { all: unset; cursor: pointer; flex: none; display: flex; }
+.now-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.now-text .title { font-weight: 600; flex: none; }
+.now-sub, .queue-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.now-sub > span, .queue-sub > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.now-sub > span:nth-child(2), .queue-sub > span:nth-child(2) { flex: none; }
+
+.transport { display: flex; align-items: center; gap: 8px; justify-self: center; }
+.transport .icon-btn { width: 36px; height: 36px; color: var(--text); }
+.transport .icon-btn .icon { width: 18px; height: 18px; }
+.transport .play { width: 42px; height: 42px; background: var(--text); color: var(--bg); }
+.transport .play:hover:not(:disabled) { background: #fff; color: var(--bg); }
+.transport .play .icon { width: 20px; height: 20px; }
+.transport .time {
+  min-width: 86px;
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.player-meta { justify-self: end; display: flex; align-items: center; gap: 10px; }
+.volume { display: flex; align-items: center; gap: 4px; }
+.volume input { width: 100px; height: 16px; }
+
+.queue-btn { width: auto; padding: 0 9px; border-radius: 16px; gap: 6px; }
+.queue-count { font-size: 11px; font-variant-numeric: tabular-nums; }
+
+/* Floats above the bar rather than taking a row in it: it comes and goes,
+   and the bar's height should not. */
+.player-status {
+  position: absolute;
+  left: 16px;
+  bottom: calc(100% + 12px);
+  max-width: 60%;
+  padding: 6px 10px;
   border-radius: 6px;
-  color: var(--text);
-  padding: 6px 8px;
-  margin-bottom: 8px;
+  background: var(--row);
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 5;
 }
-.search:focus { outline: none; border-color: var(--accent); }
 
-.list {
+/* ------------------------------------------------------------ queue drawer
+   Rises from the player over the bottom right of the workspace, and goes
+   back down when the queue button is pressed again. */
+
+.queue-drawer {
+  position: absolute;
+  right: 12px;
+  bottom: 0;
+  z-index: 20;
+  width: min(460px, calc(100% - 24px));
+  max-height: 72%;
+  gap: 8px;
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.45);
+  transform: translateY(calc(100% + 16px));
+  visibility: hidden;
+  transition: transform 200ms ease, visibility 0s linear 200ms;
+}
+.queue-drawer.open {
+  transform: none;
+  visibility: visible;
+  transition: transform 200ms ease;
+}
+
+.queue-head { display: flex; align-items: center; gap: 6px; flex: none; }
+.queue-head h2 { margin: 0; }
+
+/* Phone only, see the `@media` block. */
+.drawer-handle { display: none; }
+
+.queue-list {
   list-style: none;
   margin: 0;
   padding: 0;
   overflow-y: auto;
-  flex: 1;
   min-height: 0;
+  flex: 1;
 }
 
-ol.list { counter-reset: step; }
-ol.list .row::before {
-  counter-increment: step;
-  content: counter(step);
-  color: var(--muted);
-  min-width: 18px;
-}
-
-.row {
+.queue-row {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 5px 7px;
-  border-radius: 5px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border-radius: 8px;
   cursor: pointer;
-}
-
-/* Anything a long press can open a menu on. Without this the platform's own
-   text-selection UI engages mid-press, the magnifier on Android, the
-   selection handles in WebKitGTK, and the gesture becomes a fight over what
-   is being held. `pan-y` keeps vertical scrolling working while the timer
-   runs, so a press that turns into a scroll still scrolls. */
-[data-menu] {
-  -webkit-touch-callout: none;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-touch-callout: none;
   touch-action: pan-y;
+  transition: transform 120ms ease;
+  background: var(--panel);
 }
-.row.selected { background: var(--accent); color: #12131a; }
-.row.selected .artist, .row.selected .muted { color: #12131a; }
+.queue-row .thumb { width: 40px; height: 40px; }
+.queue-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.queue-row.playing .title { color: var(--accent); font-weight: 600; }
+.queue-row .duration { flex: none; font-variant-numeric: tabular-nums; }
 
-.artist {
-  color: var(--muted);
-  min-width: 34%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Wraps: this row grew from three chips (tracks/albums/artists) to four
-   (playlists joined it once the separate tab row above it was removed), and
-   nothing here shrinks to make room on a narrow screen. */
-.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-
-button {
-  background: var(--row);
-  color: var(--text);
-  border: none;
-  border-radius: 5px;
-  padding: 5px 10px;
-  cursor: pointer;
-}
-button:hover:not(:disabled) { background: var(--row-hover); }
-button:disabled { opacity: 0.4; cursor: default; }
-
-.slider {
+.queue-remove {
   display: grid;
-  grid-template-columns: 70px 1fr 30px;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--danger);
+  visibility: hidden;
+  flex: none;
 }
-.slider label { font-size: 12px; }
-.slider input { width: 100%; }
+.queue-remove:hover:not(:disabled) { background: rgba(247, 118, 142, 0.15); }
+.queue-remove .icon { width: 16px; height: 16px; }
+
+@media (hover: hover) and (pointer: fine) {
+  .queue-row:hover { background: var(--row-hover); }
+  .queue-row:hover .queue-remove { visibility: visible; }
+}
+
+/* Lifted out of the list while dragged; it follows the pointer without lag. */
+.queue-row.dragging {
+  position: relative;
+  z-index: 2;
+  cursor: grabbing;
+  background: var(--row-hover);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  transition: none;
+}
+
+/* --------------------------------------------------------------- settings
+   One row per group, stacked. */
+
+.settings { gap: 12px; }
+
+.setting {
+  background: transparent;
+  border: 1px solid var(--row);
+  padding: 14px;
+  gap: 10px;
+}
+.setting h2 { margin: 0; }
+.setting p { margin: 0; }
+
+.setting-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.setting-fields .search { margin: 0; flex: 1 1 220px; min-width: 0; }
+
+.setting .list { max-height: 320px; overflow-y: auto; }
+.hidden-artists .chip { visibility: visible; }
+.hidden-artists .row .title { flex: 0 1 auto; max-width: 45%; }
+.hidden-artists .row .muted {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setting .row .chip { visibility: visible; }
+
+.counts { display: flex; flex-wrap: wrap; gap: 18px; }
+.counts > div { display: flex; flex-direction: column; }
+.count { font-size: 20px; font-variant-numeric: tabular-nums; }
+
+.stages { list-style: none; margin: 0; padding: 0; }
+.stage {
+  display: grid;
+  grid-template-columns: 110px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+}
+.stage + .stage { margin-top: 2px; }
+.stage.active { background: var(--row); border-left-color: var(--accent); }
+.stage-name { font-weight: 600; }
+.stage-blurb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.log {
+  min-height: 160px;
+  max-height: 420px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 10px;
+  background: var(--bg);
+  border-radius: 6px;
+  font: 11px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* ---------------------------------------------------------- context menus */
 
-/* Invisible, full-window, and under the menu: one click anywhere dismisses,
-   which is what makes the menu safe to open from a row that is itself
-   clickable. */
-.menu-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-}
+.menu-backdrop { position: fixed; inset: 0; z-index: 30; }
 
 .context-menu {
   position: fixed;
   min-width: 190px;
   max-width: min(280px, calc(100vw - 16px));
-  /* Long menus (an album's) must not run off a short window. */
   max-height: 70vh;
   overflow-y: auto;
   padding: 4px;
@@ -602,8 +993,6 @@ button:disabled { opacity: 0.4; cursor: default; }
   cursor: default;
 }
 
-/* Which row this menu belongs to, opened from a list, the pointer has
-   usually moved away from it by the time the menu is read. */
 .menu-head {
   display: flex;
   flex-direction: column;
@@ -626,409 +1015,17 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: none;
   border-radius: 5px;
   padding: 7px 10px;
-  font: inherit;
 }
 .menu-item:hover:not(:disabled) { background: var(--row-hover); }
-.menu-item.danger { color: #f7768e; }
+.menu-item.danger { color: var(--danger); }
 .menu-item:disabled { opacity: 0.35; }
-/* The picked sort key and direction, in a menu that stays open across picks. */
 .menu-item.checked { color: var(--accent); font-weight: 600; }
 
-.menu-rule {
-  height: 1px;
-  background: var(--row);
-  margin: 4px 6px;
-}
+.menu-rule { height: 1px; background: var(--row); margin: 4px 6px; }
 
-/* The one button a row keeps. Dim until the row is touched, so a long list
-   reads as text rather than as a column of controls. */
-.chip.more {
-  padding: 2px 6px;
-  line-height: 1;
-  opacity: 0.45;
-}
-.row:hover .chip.more { opacity: 1; }
+/* ------------------------------------------------------------------ setup
+   Shown until a device has a server to talk to. Sized for a phone first. */
 
-/* No hover on a touch screen, so it would never light up. */
-@media (hover: none) {
-  .chip.more { opacity: 0.8; }
-}
-
-.in-space-dot { color: var(--accent); font-size: 14px; line-height: 1; }
-
-/* The same mark on a tile, over the cover's top-left corner, the menu
-   button has the other one. Ringed in the background colour so it reads
-   over any artwork. */
-.tile .space-mark {
-  position: absolute;
-  top: 6px;
-  left: 6px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 2px var(--bg);
-  pointer-events: none;
-}
-/* A round cover's corner is empty; margin percentages follow the width, so
-   this lands on the circle's edge whatever size the tile is. */
-.tile .round ~ .space-mark { top: 0; left: 0; margin: 12% 0 0 12%; }
-
-/* In a mixed list an album tile and a track tile are the same square, so the
-   album says what it is. Tracks, the most common entry, go unmarked, and an
-   artist is already round. */
-.tile .kind {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 10px;
-  background: rgba(0, 0, 0, 0.6);
-  color: var(--text);
-  pointer-events: none;
-}
-.tile .kind ~ .space-mark { top: 24px; }
-
-/* ----------------------------------------------------------------- modals */
-
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  z-index: 20;
-}
-
-.modal {
-  /* `.setup` centres itself in a page; inside a backdrop it is already
-     centred, and needs to stop growing instead. */
-  margin: 0;
-  width: 100%;
-  max-height: 100%;
-  overflow-y: auto;
-  cursor: default;
-}
-
-.modal .actions { align-items: center; }
-
-/* ----------------------------------------------------------- queue drawer */
-
-/* Sits between the body and the player bar, so it pushes the layout up rather
-   than floating over it, an overlay would cover the list you queue from. */
-.queue-drawer {
-  flex: none;
-  margin-top: 12px;
-  max-height: 40vh;
-}
-
-.queue-drawer h2 { gap: 8px; }
-.queue-list { max-height: 34vh; }
-
-/* The drag handle. `touch-action: none` is what makes a drag here reorder
-   instead of scrolling, and why it is on the grip alone, so dragging
-   anywhere else on the row still scrolls the list. */
-.queue-grip {
-  touch-action: none;
-  cursor: grab;
-  user-select: none;
-  padding: 0 4px;
-  color: var(--muted);
-  opacity: 0.45;
-  line-height: 1;
-}
-.row:hover .queue-grip { opacity: 1; }
-@media (hover: none) {
-  .queue-grip { opacity: 0.8; }
-}
-
-/* Lifted out of the list while it is being dragged, and above the rows it is
-   sliding past. `position: relative` is what gives it a z-index to use. */
-.queue-list li.dragging {
-  position: relative;
-  z-index: 2;
-  cursor: grabbing;
-  background: var(--row-hover);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-}
-
-/* Rows animate into the gap; the dragged one follows the pointer and must
-   not lag behind it. */
-.queue-list li { transition: transform 120ms ease; }
-.queue-list li.dragging { transition: none; }
-
-/* --------------------------------------------------------- full player
-   The mini-bar blown up to a screen of its own, opened from its art or
-   title. A focus mode rather than a drawer, centred and capped even on a
-   phone, closer in spirit to `.modal` than to `.sheet`, which already owns
-   "slides up from the bottom". Above everything else in the window,
-   `.sheet` included: it is reachable at every width, so a track selected
-   while it is open should not disappear behind it. */
-.full-player-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: rgba(0, 0, 0, 0.6);
-}
-
-.full-player {
-  position: fixed;
-  inset: 0;
-  z-index: 41;
-  margin: auto;
-  width: min(420px, calc(100% - 32px));
-  max-height: min(680px, calc(100% - 32px));
-  overflow-y: auto;
-  gap: 14px;
-  /* Not `align-items: center` on the whole column: `.sheet-head`, the seek
-     row, `.player-meta` and `.actions` all rely on a spacer or `flex: 1`
-     expanding to the column's full width, which a centred cross-axis would
-     shrink them out of. Only the art and the text under it want centring. */
-}
-
-.full-art {
-  width: 100%;
-  max-width: 320px;
-  aspect-ratio: 1;
-  border-radius: 12px;
-  align-self: center;
-}
-
-.full-meta {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  max-width: 320px;
-  text-align: center;
-}
-.full-meta .detail-title { font-size: 18px; }
-/* `align-items: center` above shrinks these to their own content width,
-   which leaves nothing for `.ellipsis` to truncate against. Stretching just
-   these two back out to the column's width is what lets a long title clip
-   instead of overflowing `.full-player`'s edges. */
-.full-meta .ellipsis { align-self: stretch; }
-
-.full-seek { width: 100%; }
-
-.full-transport { justify-content: center; gap: 18px; }
-.full-transport button { padding: 10px 20px; font-size: 20px; }
-.full-transport .play { padding: 12px 26px; }
-
-/* The volume/quality row and the queue/map row: centred as a whole rather
-   than stretched edge-to-edge, since neither has a spacer pushing anything
-   to one end here the way the mini-bar's `.player-meta` does. */
-.full-player .player-meta,
-.full-player .actions { justify-content: center; }
-
-/* ------------------------------------------------------------- player bar */
-
-/* A grid, not a flex row: the transport buttons are the thing a hand reaches
-   for most, so they get the one spot a flex row cannot give a middle
-   element for free, truly centred regardless of how wide the cover+title
-   on one side or the volume/map/queue group on the other happen to be. Two
-   equal `1fr` tracks either side of `auto` is what keeps that centring true;
-   an `auto`/`1fr` split centres against whichever side is bigger instead.
-   The seek bar gets the row under all three, full width. */
-.player {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  grid-template-areas:
-    "now transport meta"
-    "seek seek seek"
-    "status status status";
-  align-items: center;
-  column-gap: 16px;
-  row-gap: 6px;
-  background: var(--panel);
-  border-radius: 8px;
-  padding: 8px 14px;
-  margin-top: 12px;
-  flex: none;
-}
-
-.player audio { display: none; }
-
-.transport { grid-area: transport; display: flex; gap: 4px; justify-self: center; }
-.transport button { padding: 4px 9px; font-size: 13px; }
-.transport .play { background: var(--accent); color: #12131a; }
-.transport .play:hover:not(:disabled) { background: #8fb3ff; }
-
-/* Cover and title side by side rather than the title taking the row under
-   the seek bar, next to the thing it names is also, incidentally, less
-   width spent saying it: two short stacked lines beat one line long enough
-   to need `max-width: 60%` to stop it swallowing the seek bar's row. */
-.now { grid-area: now; display: flex; align-items: center; gap: 10px; min-width: 0; }
-
-.now-title {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-  cursor: pointer;
-}
-.now-title .title,
-.now-title .muted {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.seek { grid-area: seek; display: flex; align-items: center; gap: 8px; }
-.seek input { flex: 1; min-width: 0; }
-
-.player-meta {
-  grid-area: meta;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-self: end;
-  align-self: start;
-}
-
-/* The native select ignores `color` in this webview, so drop the native
-   appearance and draw the arrow ourselves. */
-.player-meta select {
-  appearance: none;
-  -webkit-appearance: none;
-  background: var(--row);
-  color: var(--text);
-  border: none;
-  border-radius: 5px;
-  padding: 4px 22px 4px 8px;
-  font-size: 12px;
-  font-family: inherit;
-  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position: calc(100% - 13px) 50%, calc(100% - 9px) 50%;
-  background-size: 4px 4px, 4px 4px;
-  background-repeat: no-repeat;
-}
-.player-meta option { background: var(--panel); color: var(--text); }
-
-/* A grid row of its own rather than an absolute overlay: that worked only
-   for one specific bar height, and the bar's height is no longer one thing,
-   the seek row means there are always at least two, win or lose a
-   playback message. */
-.player-status { grid-area: status; font-size: 12px; }
-
-/* ------------------------------------------------------- hidden artists */
-
-.chip.danger, button.danger { color: #f7768e; }
-.chip.danger:hover:not(:disabled),
-button.danger:hover:not(:disabled) { background: #f7768e; color: #12131a; }
-
-/* Like/Follow: a toggle, not a one-way action, so it gets a state to show
-   rather than just a label, the filled heart is the whole point, wording
-   ("Liked"/"Following") is only there for anyone on a screen reader or a
-   glance too quick to register colour. */
-button.liked { color: var(--accent); }
-
-/* Lives in the settings panel now, not at the foot of the browse column,
-   a block list is a thing you check on rarely, not a permanent fixture of
-   the screen you spend the rest of a session in. It used to need
-   `margin-top: auto` to stay pinned to the bottom of a column of varying
-   height; the settings modal has no such column to be pinned within. */
-.hidden-artists {
-  border-top: 1px solid var(--row);
-  margin-top: 12px;
-  padding-top: 12px;
-  flex: none;
-}
-/* Only the expanded list needs a cap; collapsed it is one heading. */
-.hidden-artists.open { max-height: 190px; overflow-y: auto; }
-.hidden-artists .list { overflow-y: visible; }
-/* Always offer the way out, without needing to find the row first. */
-.hidden-artists .chip { visibility: visible; }
-
-/* Reasons can be a sentence. Keep every entry one line tall, or a long note
-   pushes the browse list off the panel. */
-.hidden-artists .row { flex-wrap: nowrap; }
-.hidden-artists .row .title { flex: 0 1 auto; max-width: 45%; }
-.hidden-artists .row .muted {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* ------------------------------------------------------------- pipeline */
-
-.hidden { display: none !important; }
-
-.pipeline {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 1fr 1.3fr;
-  grid-template-rows: auto 1fr;
-  gap: 12px;
-}
-/* Corpus and stages stack on the left, the log fills the right. */
-.pipeline .log-panel { grid-row: 1 / 3; grid-column: 2; }
-
-.counts { display: flex; flex-wrap: wrap; gap: 18px; }
-.counts > div { display: flex; flex-direction: column; }
-.count { font-size: 20px; font-variant-numeric: tabular-nums; }
-
-.stages { list-style: none; margin: 0; padding: 0; }
-
-.stage {
-  display: grid;
-  grid-template-columns: 110px 1fr auto;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
-  border-radius: 6px;
-  border-left: 2px solid transparent;
-}
-.stage + .stage { margin-top: 2px; }
-.stage.active { background: var(--row); border-left-color: var(--accent); }
-.stage-name { font-weight: 600; }
-.stage-blurb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-button.primary { background: var(--accent); color: #12131a; font-weight: 600; }
-button.primary:hover:not(:disabled) { background: #8fb3ff; }
-
-.log-panel h2 { display: flex; align-items: center; gap: 8px; }
-
-.log {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  margin: 0;
-  padding: 10px;
-  background: var(--bg);
-  border-radius: 6px;
-  font: 11px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-/* --------------------------------------------------------------- generate */
-
-.generate .tabs .tab { padding: 4px 6px; font-size: 12px; }
-
-.field {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-  min-height: 24px;
-}
-.field > .muted:first-child { min-width: 44px; }
-.field .ellipsis { flex: 1; min-width: 0; font-size: 12px; }
-
-/* ---------------------------------------------------------------- setup
-   Shown until a device has a server to talk to. Sized for a phone first:
-   this is the one screen that is guaranteed to be read on one. */
 .setup {
   max-width: 34rem;
   margin: 0 auto;
@@ -1039,265 +1036,174 @@ button.primary:hover:not(:disabled) { background: #8fb3ff; }
 }
 .setup h1 { margin: 0 0 0.5rem; font-size: 1.4rem; }
 .setup label { font-size: 0.8rem; opacity: 0.7; margin-top: 0.5rem; }
-.setup .search { width: 100%; box-sizing: border-box; padding: 0.7rem; font-size: 1rem; }
+.setup .search { width: 100%; padding: 0.7rem; font-size: 1rem; }
 .setup .actions { margin-top: 1rem; }
 .setup .primary { padding: 0.7rem 1.4rem; font-size: 1rem; }
-.setup pre.log { white-space: pre-wrap; margin-top: 1rem; max-height: 16rem; }
+.setup pre.log { margin-top: 1rem; max-height: 16rem; }
 
-/* ============================================================== responsive
-   There is one column now, the browse list, with the map and the track
-   sheet overlaying it rather than sitting beside it as fixed-width furniture.
-   That used to be three columns (360px of Qobuz, a flexible map, 420px of
-   space tools), which was 780px of furniture before the map got a pixel, and
-   is why a ~393px phone used to need a pane switcher at all: the sheet is
-   what the switcher's "tools" pane became, and it no longer needs a tab,
-   because it opens itself the moment something is selected.
-
-   Above this breakpoint the sheet docks in the flex row beside the list
-   instead of overlaying it, see `.sheet` above. The map still overlays at
-   every width; map.js holds a reference to the canvas regardless of what is
-   showing, so it stays out of this switch entirely. */
+/* ============================================================== phone
+   The generate panel leaves the row and slides in from the right, over the
+   main area but not the player, with a floating arrow to send it back. A
+   third floating button, the panel's own, brings it in. */
 
 @media (max-width: 900px) {
-  .app {
-    padding: 10px;
-    /* Keep content clear of the notch and the gesture bar. */
-    padding-left: max(10px, env(safe-area-inset-left));
-    padding-right: max(10px, env(safe-area-inset-right));
-    padding-bottom: max(10px, env(safe-area-inset-bottom));
-  }
+  .workspace { padding: 0; gap: 0; }
+  .main { border-radius: 0; }
 
-  /* The title was being squeezed to min-content by its siblings and wrapping
-     one word per line. Let the header wrap instead. */
-  header {
-    flex-wrap: wrap;
-    align-items: center;
-    row-gap: 6px;
-    column-gap: 10px;
-    margin-bottom: 8px;
-  }
-  header h1 { font-size: 15px; white-space: nowrap; }
+  .screen-body { padding: 12px 12px 96px; }
+  .topbar { padding: 6px 8px; padding-top: max(6px, env(safe-area-inset-top)); }
 
-  /* The browse list is the whole column now, nothing left to switch away
-     from it to. The map still overlays it on purpose, at every width. */
-  .body { flex-direction: column; gap: 0; }
-  .library { width: auto; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-
-  /* The sheet leaves the flex row and pins to the bottom of the viewport
-     instead, with a backdrop behind it: a docked side column has nowhere to
-     go on a screen this narrow, so below the breakpoint it becomes the
-     overlay the pane switcher used to be. */
-  .sheet {
-    position: fixed;
-    inset: auto 0 0 0;
-    z-index: 30;
-    width: auto;
-    max-height: 85vh;
-    border-radius: 14px 14px 0 0;
-    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
-  }
-  .sheet-backdrop {
-    display: block;
-    position: fixed;
+  .side-panel {
+    position: absolute;
     inset: 0;
-    z-index: 29;
-    background: rgba(0, 0, 0, 0.5);
+    z-index: 25;
+    width: auto;
+    border-radius: 0;
+    padding-top: max(12px, env(safe-area-inset-top));
+    transform: translateX(100%);
+    visibility: hidden;
+    transition: transform 220ms ease, visibility 0s linear 220ms;
   }
-  .sheet-drag {
-    display: block;
-    width: 36px;
-    height: 4px;
-    border-radius: 2px;
+  .side-panel.open {
+    transform: none;
+    visibility: visible;
+    transition: transform 220ms ease;
+  }
+  /* Room beside the heading for the floating arrow. */
+  .side-panel h2 { min-height: 40px; padding-left: 52px; }
+
+  /* Fixed, so it stays put while the panel scrolls under it. The panel's
+     transform makes it the containing block while sliding, so the arrow
+     slides in with it, and once in (`transform: none`) it is the window's. */
+  .side-back {
+    display: grid;
+    place-items: center;
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top));
+    left: 12px;
+    z-index: 26;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 50%;
     background: var(--row-hover);
-    margin: 2px auto 6px;
+    color: var(--text);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  }
+  .side-back .icon { width: 20px; height: 20px; }
+
+  .fab-generate {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    background: var(--row-hover);
+    color: var(--accent);
+  }
+  .fab-generate .icon { width: 20px; height: 20px; }
+  .fabs { right: 14px; bottom: 14px; gap: 10px; }
+
+  .path-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 10px 0;
+    padding: 6px 8px 6px 10px;
+    background: var(--panel);
+    border-radius: 10px;
     flex: none;
   }
+  .path-pill .ellipsis { flex: 1; min-width: 0; font-size: 12px; }
 
-  /* ------------------------------------------------- one scroller per pane
-     The desktop layout nests scroll regions: the shelf scrolls inside the
-     panel, each list scrolls inside the shelf. On a touch screen nested
-     scrollers are a coin flip over which one moves, and worse, the boxes
-     fight for a column that is now 400px tall rather than 900.
-
-     So on mobile each pane is one scroller and everything inside it takes
-     its natural height. The sheet gets the same treatment: it scrolls as one
-     region, bounded by `max-height` above rather than the viewport. Hidden
-     artists moved to the settings panel and is not part of this scroller at
-     all any more, see `.hidden-artists`'s own doc comment. */
-  .shelf,
-  .shelf .list,
-  .sheet .list {
-    overflow: visible;
-    max-height: none;
-    flex: none;
-    min-height: 0;
+  /* ---------------------------------------------------------- player bar
+     Cover and names, then the transport, then the queue. The volume goes:
+     a phone has keys for that, and the bar has no room. */
+  .player {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 6px;
+    margin-top: 0;
+    padding: 10px 10px 8px;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
   }
-  .hidden-artists.open { max-height: 40vh; overflow-y: auto; }
+  .now { gap: 10px; }
+  .now-art { width: 44px; height: 44px; }
+  .transport { gap: 2px; }
+  .transport .time { display: none; }
+  .transport .icon-btn { width: 38px; height: 38px; }
+  .transport .play { width: 42px; height: 42px; }
+  .volume { display: none; }
+  .queue-btn { padding: 0 8px; height: 38px; }
+  .queue-count { display: none; }
+  .player .seek-line::-webkit-slider-thumb { opacity: 1; width: 10px; height: 10px; margin-top: -3.5px; }
+  .player-status { max-width: calc(100% - 32px); }
 
-  /* ------------------------------------------------------ touch targets
-     Rows and buttons are the whole interface here. 13px text with 5px of
-     padding is a ~30px target; these bring the things you actually tap up
-     to something a thumb can hit. */
+  /* ---------------------------------------------------------- queue drawer
+     Most of the screen, from the bottom, with a handle to drag it back
+     down by. */
+  .queue-drawer {
+    left: 0;
+    right: 0;
+    width: auto;
+    max-height: 88%;
+    padding-top: 0;
+    border-radius: 16px 16px 0 0;
+  }
+  .drawer-handle {
+    display: block;
+    position: relative;
+    flex: none;
+    height: 24px;
+    margin: 0 -12px;
+    touch-action: none;
+    cursor: grab;
+  }
+  .drawer-handle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 10px;
+    width: 40px;
+    height: 5px;
+    border-radius: 3px;
+    background: var(--row-hover);
+    transform: translateX(-50%);
+  }
+  .queue-row { padding: 8px 6px; }
+  .queue-row .thumb { width: 44px; height: 44px; }
+
+  /* -------------------------------------------------------- detail pages */
+  .hero { flex-direction: column; align-items: stretch; gap: 14px; }
+  .hero-art { width: min(240px, 70vw); height: auto; aspect-ratio: 1; align-self: center; }
+  .hero-title { font-size: 22px; }
+  .facts { gap: 6px 16px; }
+
+  /* ------------------------------------------------------ touch targets */
   .row { padding: 10px 8px; gap: 10px; }
   .tab { padding: 9px 6px; }
   button { padding: 9px 12px; }
   .chip { padding: 7px 10px; font-size: 12px; }
-  .transport button { padding: 10px 16px; font-size: 16px; }
-  .icon-btn { width: 38px; height: 38px; font-size: 17px; }
+  .icon-btn { width: 38px; height: 38px; padding: 0; }
+  .row-actions .path-end { width: 34px; height: 34px; }
+  .album-tracks .row { flex-wrap: wrap; }
+  .album-tracks .row .title { flex: 1 1 60%; }
 
   /* 16px stops the webview zooming the page when a field takes focus. */
-  .search { font-size: 16px; padding: 10px; }
-  .search-wrap .search { padding-right: 40px; }
-  .clear-search { height: 42px; width: 38px; font-size: 20px; }
+  .search, .search-bar .search { font-size: 16px; padding: 10px; }
+  .search-bar .search { padding-right: 36px; }
 
-  /* The search box gets its own full-width row below the title; pipeline
-     and settings stay with the title rather than being pushed to a third
-     row of their own, a title and one icon share a line comfortably at
-     any width this app runs at, so forcing them apart just added a row for
-     nothing. Search used to sit behind an icon, which is what let it share
-     a line with everything else; now that it is always open, it is the one
-     control here big enough to need a row to itself. */
-  .header-search { flex: 1 1 100%; max-width: none; order: 2; margin: 2px 0; }
-
-  /* Sliders are the fiddliest thing on a touch screen; give the thumb room. */
   .slider { grid-template-columns: 64px 1fr 32px; }
   .slider input { height: 28px; }
 
-  /* ---------------------------------------------------------- player bar */
-  /* One column: cover+title, then transport, then seek, then the meta row,
-     each full width in turn, the three-track centring above needs the
-     room a 393px bar does not have. */
-  .player {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "now"
-      "transport"
-      "seek"
-      "meta"
-      "status";
-    row-gap: 8px;
-    padding: 8px 10px;
-    margin-top: 8px;
-  }
-  .transport { justify-self: center; }
-  .player-meta { justify-self: end; align-self: center; }
-  .seek input { height: 28px; }
-  .volume input { width: 96px; height: 28px; }
-  .volume .chip { padding: 7px 9px; font-size: 15px; }
-
-  /* ------------------------------------------------------------ pipeline */
-  /* Flex, not grid. Two separate faults came out of keeping the grid here:
-     the desktop rule pins the log to a second column spanning two rows, which
-     on a one-column grid creates an implicit second column and drags the
-     whole view wider than the screen; and a height-constrained grid with a
-     `1fr` row will compress its `auto` rows below their content rather than
-     scroll, which is how four panels ended up drawn on top of each other. A
-     column of natural-height boxes in a scrolling parent has neither
-     failure mode. */
-  .pipeline {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    overflow-y: auto;
-  }
-  .pipeline > .panel { flex: none; min-width: 0; }
-  .pipeline .log-panel { min-height: 220px; }
-  /* Capped, or a natural-height panel grows to every buffered line and the
-     rest of the pipeline is a long scroll away below it. */
-  .pipeline .log-panel .log { min-height: 170px; max-height: 40vh; }
-
-  /* The queue takes the list's place rather than a strip under it: 40vh of
-     a phone is a handful of rows. The list is only hidden, not unmounted,
-     so closing the queue puts it back where it was. */
-  .app.queue-open .body { display: none; }
-  .queue-drawer { flex: 1; max-height: none; margin-top: 0; }
-  .queue-list { flex: 1; max-height: none; }
-
-  /* A flex row that cannot wrap sets its container's min-content width. The
-     device form, a text input and three buttons, was doing exactly that,
-     which is the other half of why text was running off the right edge. */
   .field { flex-wrap: wrap; }
   .field .search { flex: 1 1 100%; min-width: 0; }
 
   .counts { gap: 10px 16px; }
-  .counts > div { min-width: 0; }
   .count { font-size: 18px; }
-
-  /* The blurb gets its own line instead of being ellipsised to nothing. */
   .stage { grid-template-columns: 1fr auto; gap: 4px 10px; padding: 10px 8px; }
   .stage-blurb { grid-column: 1 / -1; white-space: normal; }
 
-  /* An artist name and a title on one 393px line leaves room for neither. */
   .artist { min-width: 30%; }
 
-  /* Three across a 393px screen rather than two and a gap. */
   .tiles { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px 8px; }
-  /* No hover on a touch screen, so the tile's menu button has to stay put. */
   .tile .chip { visibility: visible; }
+  .queue-remove { display: none; }
 }
-
-/* Phones in portrait. The browse column's desktop minimum would overflow a
-   393px screen. */
-@media (max-width: 560px) {
-  .library { min-width: 0; }
-}
-
-/* --------------------------------------------------------------- search
-   A clear button inside the field, so emptying a long query does not mean
-   selecting the text first. */
-.search-wrap { position: relative; display: flex; flex-direction: column; }
-.search-wrap .search { padding-right: 30px; }
-
-/* The one search box, in the header because it drives both columns. Wide
-   enough to be the obvious place to start typing, capped so it does not push
-   the selected-track label off the end of the bar. */
-.header-search {
-  flex: 1 1 320px;
-  max-width: 420px;
-  min-width: 180px;
-}
-.header-search .search { margin-bottom: 0; }
-
-.clear-search {
-  position: absolute;
-  top: 0;
-  right: 0;
-  height: 30px;
-  width: 28px;
-  padding: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 17px;
-  line-height: 1;
-  border-radius: 0 6px 6px 0;
-}
-.clear-search:hover:not(:disabled) { background: transparent; color: var(--text); }
-
-/* An action, not a place, deliberately not `.chip`/`.nav-btn`, which this
-   app uses for things that toggle or that take you somewhere and stay lit
-   while you're there (the map, the pipeline view). Settings never has an
-   "active" state to show, so it doesn't get either one's pill shape. */
-.icon-btn {
-  background: transparent;
-  color: var(--muted);
-  border-radius: 50%;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  font-size: 15px;
-  line-height: 1;
-  flex: none;
-}
-.icon-btn:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
-
-/* The map names what you point at, so the canvas wants a pointer that says
-   "this is interactive" rather than the text caret a bare canvas gets. */
-#map { cursor: crosshair; }
-#map:active { cursor: grabbing; }
-
-/* ---------------------------------------------------------------- volume
-   Independent of the device's own level, so the phone's hardware keys still
-   do what they always did and this trims within that. */
-.volume { display: flex; align-items: center; gap: 6px; flex: none; }
-.volume .chip { padding: 2px 6px; font-size: 13px; line-height: 1.2; }
-.volume input { width: 82px; }

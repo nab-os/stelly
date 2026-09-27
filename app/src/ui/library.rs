@@ -3,11 +3,14 @@
 //! Navigation is explicit rather than reactive: every move sets the view and
 //! spawns its own load. One `Shelf` holds whatever the view returned.
 
+use super::icons;
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
+use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
+use super::settings::SettingsScreen;
 use super::{
-    artist_link, open_track, AlbumDetail, ArtistDetail, Blocklist, Cover, Detail, DetailSubject, LocalIds,
-    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
+    artist_link, open_track, Blocklist, Cover, LocalIds, MapView, Search, Selection, SpaceMatches,
+    SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
 use crate::backend::backend;
@@ -149,6 +152,8 @@ pub(crate) fn names_track(terms: &[String], title: &str) -> bool {
     terms.iter().all(|term| title.contains(term))
 }
 
+/// Which screen the main area is showing. Every page is one of these, and
+/// `Library::history` is the way back through them.
 #[derive(Clone, PartialEq, Debug)]
 pub enum View {
     Search { query: String, scope: Scope },
@@ -158,25 +163,37 @@ pub enum View {
     Playlists,
     Playlist { id: i64, name: String },
     /// The full object, not just its id and title, carried over from
-    /// wherever this was reached (almost always the detail sheet, which
-    /// already had it in hand), so the page landed on can show the same
-    /// cover/badges/actions inline instead of just a bare tracklist under a
-    /// heading. See `LibraryPanel`'s `AlbumDetail` call.
+    /// wherever this was reached, so the page can show the cover and
+    /// details while the tracklist is still loading.
     Album(RemoteAlbum),
-    /// As `Album`: the full object, so the discography page can show it
-    /// inline the same way.
+    /// As `Album`: the page fetches the portrait and biography on top.
     Artist(RemoteArtist),
+    /// One track, everything known about it, laid out to be screenshotted.
+    Track(RemoteTrack),
+    Settings,
+}
+
+/// Where a search looks: the analysed space, or the whole Qobuz catalogue.
+/// One or the other, never both at once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    Space,
+    Qobuz,
 }
 
 impl View {
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
-            View::Search { query, .. } => format!("results for “{query}”"),
+            View::Search { .. } => "search".into(),
             View::Favourites { .. } => "favourites".into(),
             View::Playlists => "your playlists".into(),
             View::Playlist { name, .. } => name.clone(),
-            View::Album(album) => album.title.clone(),
-            View::Artist(artist) => artist.name.clone(),
+            // The page's own header names it; the bar says what kind of
+            // page it is.
+            View::Album(_) => "album".into(),
+            View::Artist(_) => "artist".into(),
+            View::Track(_) => "track".into(),
+            View::Settings => "settings".into(),
         }
     }
 
@@ -186,16 +203,6 @@ impl View {
     /// separate "library" tab.
     fn is_playlists(&self) -> bool {
         matches!(self, View::Playlists | View::Playlist { .. })
-    }
-
-    /// What the current search is narrowed to. Anything else is not a
-    /// search, and the one it starts is mixed: the chip lit while browsing
-    /// names a list of favourites, not a filter to carry into a search.
-    pub(crate) fn scope(&self) -> Scope {
-        match self {
-            View::Search { scope, .. } => *scope,
-            _ => Scope::Everything,
-        }
     }
 
     /// The narrowing the tracks/albums/artists chips light up for. Only the
@@ -257,9 +264,8 @@ pub struct Library {
     /// searches are for something new, not a re-check of what is already
     /// kept.
     pub liked_only: Signal<bool>,
-    /// Keeps a search to the space: no round trip to Qobuz, only what has
-    /// already been analysed. Sticks across searches, like `liked_only`.
-    pub space_only: Signal<bool>,
+    /// Where a search looks. Sticks across searches, like `liked_only`.
+    pub source: Signal<Source>,
     /// The three favourited-id sets a search result is checked against, or
     /// `None` before the first time `liked_only` turns on, the fetch that
     /// fills this is not worth paying for a session that never asks.
@@ -298,7 +304,7 @@ impl Library {
             notice: Signal::new(None),
             tracks_view: Signal::new(TracksView::Grid),
             liked_only: Signal::new(false),
-            space_only: Signal::new(false),
+            source: Signal::new(Source::Qobuz),
             liked: Signal::new(None),
             epoch: Signal::new(0),
         }
@@ -404,28 +410,47 @@ impl Library {
             self.history.write().push(previous);
         }
         self.show(target);
+        to_top();
     }
 
-    fn back(mut self) {
+    pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
         if let Some(view) = previous {
             self.show(view);
+            to_top();
         }
     }
 
-    /// Navigate to a search result, refining in place.
-    ///
-    /// The first search from an album or artist pushes that view, so back
-    /// returns to what you were reading. Every refinement after it replaces:
-    /// a query that fires as you type would otherwise leave one history entry
-    /// per character, and "back" would walk you through your own spelling.
+    /// Home: favourites, as a place to go rather than a step back, so it
+    /// is pushed like any other page.
+    pub(crate) fn home(self) {
+        if !matches!(&*self.view.peek(), View::Favourites { .. }) {
+            self.go(View::Favourites { scope: Scope::Everything });
+        }
+    }
+
+    /// The search button: open the search screen on whatever is already
+    /// typed, or leave it again if it is the screen showing.
+    pub(crate) fn toggle_search(self, query: String) {
+        if matches!(&*self.view.peek(), View::Search { .. }) {
+            if self.history.peek().is_empty() {
+                self.show(View::Favourites { scope: Scope::Everything });
+            } else {
+                self.back();
+            }
+        } else {
+            self.go(View::Search { query, scope: Scope::Everything });
+        }
+    }
+
+    /// Refine the search in place. Only while the search screen is showing:
+    /// the debounce behind this fires a beat after the last keystroke, and
+    /// by then you may have tapped your way somewhere else. Replaces rather
+    /// than pushes, or "back" would walk you through your own spelling.
     pub(crate) fn search_to(self, query: String) {
         let current = self.view.peek().clone();
-        let scope = current.scope();
-        if matches!(current, View::Search { .. }) {
+        if let View::Search { scope, .. } = current {
             self.show(View::Search { query, scope });
-        } else {
-            self.go(View::Search { query, scope });
         }
     }
 
@@ -443,17 +468,10 @@ impl Library {
         }
     }
 
-    /// Emptying the box should put back whatever the search covered up,
-    /// rather than leaving an empty shelf with no way out but the tabs.
-    pub(crate) fn leave_search(self) {
-        if !matches!(&*self.view.peek(), View::Search { .. }) {
-            return;
-        }
-        if self.history.peek().is_empty() {
-            self.show(View::Favourites { scope: Scope::Everything });
-        } else {
-            self.back();
-        }
+    /// Emptying the box empties the results, and stays on the search screen:
+    /// it has its own button to leave by now.
+    pub(crate) fn clear_search(self) {
+        self.search_to(String::new());
     }
 
     fn set_sort(mut self, sort: Sort) {
@@ -462,20 +480,20 @@ impl Library {
         self.shelf.set(loaded.sorted(sort));
     }
 
-    /// Whether the "In your space" section is part of this view. Only for a
-    /// search: the tracks chip is the liked tracks, and the space holds
-    /// everything the crawl reached from them, liked albums' tracks included,
-    /// which is not what that chip is asking for.
+    /// Whether the space's own tracks are part of this view. Only for a
+    /// search of the space: the tracks chip is the liked tracks, and the space
+    /// holds everything the crawl reached from them, liked albums' tracks
+    /// included, which is not what that chip is asking for.
     fn shows_space(&self) -> bool {
         match &*self.view.read() {
-            View::Search { scope, .. } => scope.tracks(),
+            View::Search { scope, .. } => scope.tracks() && *self.source.read() == Source::Space,
             _ => false,
         }
     }
 
-    /// Whether a search is skipping Qobuz and showing only the space.
+    /// Whether a search is looking at the space rather than Qobuz.
     fn searching_space_only(&self) -> bool {
-        matches!(&*self.view.read(), View::Search { .. }) && *self.space_only.read()
+        matches!(&*self.view.read(), View::Search { .. }) && *self.source.read() == Source::Space
     }
 
     /// Ask for a view. The fetch happens in `LibraryPanel`, not here.
@@ -501,7 +519,7 @@ impl Library {
         let Some(target) = target else { return };
         self.pending.set(None);
         let epoch = *self.epoch.peek();
-        let space_only = *self.space_only.peek();
+        let space_only = *self.source.peek() == Source::Space;
 
         spawn(async move {
             let mut library = self;
@@ -531,6 +549,14 @@ impl Default for Library {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A new page starts at its top. The main area is one scroller that outlives
+/// every page in it, so without this an album opened from far down the
+/// favourites opened just as far down itself. Not on `show`: refining a search
+/// as you type is the same page.
+fn to_top() {
+    document::eval("const el = document.querySelector('.screen-body'); if (el) el.scrollTop = 0;");
 }
 
 /// First load, so the app shell does not have to reach into navigation.
@@ -634,6 +660,8 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
             // discography rather than an error.
             shelf.similar = backend().similar_artists(artist.id, 20).await.unwrap_or_default();
         }
+        // Pages that carry what they show, or fetch it themselves.
+        View::Track(_) | View::Settings => {}
     }
 
     Ok(shelf)
@@ -745,8 +773,169 @@ async fn fetch_into_catalog(kind: &str, id: &str) -> anyhow::Result<usize> {
 
 // --------------------------------------------------------------- components
 
+/// The main area: a slim bar for getting around, then whichever screen the
+/// view names. Left of the generate panel at every width, under it on a phone
+/// when that slides in.
 #[component]
-pub fn LibraryPanel() -> Element {
+pub fn MainScreen() -> Element {
+    let library = use_context::<Library>();
+    let map = use_context::<MapView>();
+    let view = library.view.read().clone();
+    let has_history = !library.history.read().is_empty();
+
+    // Drives every navigation. Deliberately here, mounted for the life of the
+    // window, rather than in `show`: see the comment there.
+    use_effect(move || library.drive());
+
+    let home = matches!(view, View::Favourites { .. });
+    let settings = matches!(view, View::Settings);
+
+    rsx! {
+        section { class: "screen",
+            nav { class: "topbar",
+                if has_history {
+                    button {
+                        class: "icon-btn",
+                        title: "back",
+                        onclick: move |_| {
+                            map.close();
+                            library.back();
+                        },
+                        {icons::back()}
+                    }
+                }
+                h2 { class: "ellipsis", "{view.label()}" }
+                span { class: "spacer" }
+                button {
+                    class: if home { "icon-btn active" } else { "icon-btn" },
+                    title: "favourites",
+                    onclick: move |_| {
+                        map.close();
+                        library.home();
+                    },
+                    {icons::heart(home)}
+                }
+                button {
+                    class: if settings { "icon-btn active" } else { "icon-btn" },
+                    title: "settings",
+                    onclick: move |_| {
+                        map.close();
+                        if !settings {
+                            library.go(View::Settings);
+                        }
+                    },
+                    {icons::settings()}
+                }
+            }
+
+            div { class: "screen-body",
+                match view {
+                    // Keyed on what they show: going from one album straight
+                    // to another is otherwise a prop change on the same
+                    // component, and whatever the first one fetched for
+                    // itself would sit under the second one's title.
+                    View::Album(album) => rsx! { AlbumScreen { key: "{album.id}", album } },
+                    View::Artist(artist) => rsx! { ArtistScreen { key: "{artist.id}", artist } },
+                    View::Track(track) => rsx! { TrackScreen { key: "{track.id}", track } },
+                    View::Settings => rsx! { SettingsScreen {} },
+                    _ => rsx! { BrowseScreen {} },
+                }
+            }
+        }
+    }
+}
+
+/// The search box, and where it looks.
+///
+/// Its own component, and deliberately propless, so Dioxus memoises it: it
+/// then re-renders when the text changes and at no other time.
+///
+/// That is not tidiness, it is the fix for a real bug. A controlled input in
+/// a webview is a race, the keystroke travels to Rust, a render patches
+/// `value` back into the DOM, and whatever was typed in the meantime is
+/// overwritten. Re-rendering whenever anything else did, including when a
+/// search result landed, which is precisely when you are still typing, lost
+/// characters.
+#[component]
+fn SearchBar() -> Element {
+    let library = use_context::<Library>();
+    let search = use_context::<Search>();
+    let mut query = search.text;
+    let source = *library.source.read();
+
+    // The magnifier opened this screen to type into, so the keyboard should
+    // already be up.
+    use_effect(|| {
+        document::eval(
+            "setTimeout(() => { const el = document.querySelector('.search-bar .search'); if (el) el.focus(); }, 0);",
+        );
+    });
+
+    let pick = move |wanted: Source| {
+        let mut source = library.source;
+        if *source.peek() != wanted {
+            source.set(wanted);
+            // Re-run rather than hide a half: a hidden shelf would still be
+            // what "play all" plays.
+            let view = library.view.peek().clone();
+            library.show(view);
+        }
+    };
+
+    rsx! {
+        div { class: "search-bar",
+            div { class: "search-wrap",
+                input {
+                    class: "search",
+                    placeholder: "artist, title or album, any order",
+                    value: "{query}",
+                    oninput: move |e| query.set(e.value()),
+                    // Enter skips the debounce. The local list has already
+                    // filtered; this is impatience with the round trip.
+                    onkeydown: move |event| {
+                        if event.key() != Key::Enter {
+                            return;
+                        }
+                        let mut search = search;
+                        let text = search.text.peek().trim().to_string();
+                        if text.is_empty() || text == *search.submitted.peek() {
+                            return;
+                        }
+                        search.submitted.set(text.clone());
+                        library.search_to(text);
+                    },
+                }
+                if !query().is_empty() {
+                    button {
+                        class: "clear-search",
+                        title: "clear",
+                        onclick: move |_| query.set(String::new()),
+                        "×"
+                    }
+                }
+            }
+            div { class: "segmented",
+                button {
+                    class: if source == Source::Space { "active" } else { "" },
+                    title: "only what's already in your space",
+                    onclick: move |_| pick(Source::Space),
+                    "space"
+                }
+                button {
+                    class: if source == Source::Qobuz { "active" } else { "" },
+                    title: "the whole Qobuz catalogue",
+                    onclick: move |_| pick(Source::Qobuz),
+                    "qobuz"
+                }
+            }
+        }
+    }
+}
+
+/// Favourites, a search, playlists: one list of tracks, albums and artists,
+/// narrowed by the chips above it.
+#[component]
+fn BrowseScreen() -> Element {
     let library = use_context::<Library>();
     let player = use_context::<Player>();
 
@@ -756,21 +945,13 @@ pub fn LibraryPanel() -> Element {
     // Home or a search with no chip lit: tracks, albums and artists in one
     // list, sorted together, rather than a section for each.
     let mixed = view.filter() == Some(Scope::Everything);
-    // Only while searching, see `Library::shows_space`. The space has no
-    // album or artist grouping of its own, it is a flat
-    // set of analysed tracks, so it only has anything to say for the two
-    // views that are about tracks. Showing it regardless of which chip was
-    // picked was the gap that made the source-row filter look like it only
-    // applied to the Qobuz half of the list.
+    // Only while searching the space, see `Library::shows_space`.
     let show_space = library.shows_space();
     let space_only = library.searching_space_only();
     let shelf = library.shelf.read().clone();
-    let tracks_view = *library.tracks_view.read();
 
     // Every emptiness test below asks about what is *visible*: no heading over
     // nothing, and the bulk actions must not reach past the filter.
-    // Tracks the space section is already showing do not count towards the
-    // Qobuz section being non-empty, or its heading would stand over nothing.
     let space = use_context::<SpaceMatches>();
     // The whole shelf, for the bulk actions: "play all" means the view's
     // tracks, including ones the space section happens to be showing.
@@ -794,57 +975,23 @@ pub fn LibraryPanel() -> Element {
     } else {
         artists
     };
-    // Similar artists are Qobuz's suggestion, not something to have already
-    // liked, filtering them by the same toggle would just empty a section
-    // whose entire point is showing you what you have not reached yet.
-    let similar = shelf.visible_artists(&blocklist, true);
-    let nothing_from_qobuz = tracks.is_empty()
-        && albums.is_empty()
-        && artists.is_empty()
-        && similar.is_empty()
-        && shelf.playlists.is_empty();
-    // "Nothing here" belongs to the whole list, not to the Qobuz half of it:
-    // with matches in the space above, the list is plainly not empty.
+    let nothing_from_qobuz =
+        tracks.is_empty() && albums.is_empty() && artists.is_empty() && shelf.playlists.is_empty();
     let nothing_visible = nothing_from_qobuz && (!show_space || space.0.read().1 == 0);
-    let has_history = !library.history.read().is_empty();
-
-    // Drives every navigation. Deliberately here rather than in `show`: see
-    // the comment there.
-    use_effect(move || library.drive());
+    let empty_search = matches!(&view, View::Search { query, .. } if query.trim().is_empty());
 
     rsx! {
-        aside { class: "panel library",
-            // An album or an artist's own page shows the same cover, badges
-            // and actions the detail sheet does, ahead of its tracklist or
-            // discography below, rather than the sheet's content being
-            // dismissed on the way here and this page starting over with
-            // nothing but a bare heading over a list. `inline: true` is the
-            // one difference: it drops the sheet's own "View tracklist" /
-            // "View discography" button, which here would just reload the
-            // list already sitting right underneath it.
-            if let View::Album(album) = &view {
-                div { class: "library-detail",
-                    AlbumDetail { album: album.clone(), inline: true }
-                }
-            } else if let View::Artist(artist) = &view {
-                div { class: "library-detail",
-                    ArtistDetail { artist: artist.clone(), inline: true }
-                }
-            } else {
-                // Named for what you are looking at, not for where the rows
-                // came from. "Qobuz" as a column heading was half of what
-                // made this feel like two rival lists; it survives below as
-                // a section badge, which is the honest scope for it.
-                h2 { class: "ellipsis", "{view.label()}" }
-            }
+        if searching {
+            SearchBar {}
+        }
 
-            // What kind of thing you are looking at. Home and a search are
-            // both mixed, liked or found tracks, albums and artists together,
-            // and the first three chips narrow either one: a tap narrows, a
-            // second tap on the lit one widens back. Playlists is a place of
-            // its own rather than a narrowing, and not something a search
-            // returns, so it only shows outside one.
-            div { class: "actions",
+        // What kind of thing you are looking at. Home and a search are both
+        // mixed, liked or found tracks, albums and artists together, and the
+        // three chips narrow either one, exclusively: a tap narrows, a second
+        // tap on the lit one widens back. Playlists is a place of its own
+        // rather than a narrowing, and not something a search returns.
+        div { class: "toolbar",
+            div { class: "filters",
                 for (label, chip) in [
                     ("tracks", Scope::Tracks),
                     ("albums", Scope::Albums),
@@ -863,63 +1010,6 @@ pub fn LibraryPanel() -> Element {
                         "playlists"
                     }
                 }
-            }
-
-            div { class: "crumb",
-                if has_history {
-                    button { class: "chip", onclick: move |_| library.back(), "‹ back" }
-                }
-                span { class: "spacer" }
-                if !shelf_tracks.is_empty() {
-                    button {
-                        class: "chip",
-                        onclick: move |_| {
-                            let queue = library.shelf.peek().visible_tracks(&blocklist);
-                            play_list(player, queue, 0);
-                        },
-                        "play all"
-                    }
-                    button {
-                        class: "chip",
-                        onclick: move |_| {
-                            let queue = library.shelf.peek().visible_tracks(&blocklist);
-                            play_next(player, queue);
-                        },
-                        "next"
-                    }
-                    button {
-                        class: "chip",
-                        onclick: move |_| {
-                            let queue = library.shelf.peek().visible_tracks(&blocklist);
-                            enqueue(player, queue);
-                        },
-                        "queue"
-                    }
-                }
-                // A search asks the whole catalogue; this narrows the Qobuz
-                // half of the answer to what is already favourited, or the
-                // space's own when "space" has left Qobuz out. Only
-                // shown while searching, the tracks/albums/artists chips
-                // above already are the liked list the rest of the time, so
-                // a second "liked" filter on top of them would filter
-                // favourites by whether they are favourited.
-                if searching {
-                    // Toggling re-runs the search rather than hiding the
-                    // Qobuz half: a hidden shelf would still be what "play
-                    // all" plays.
-                    button {
-                        class: if space_only { "chip active" } else { "chip" },
-                        title: "only search what's already in your space",
-                        onclick: move |_| {
-                            let mut space_only = library.space_only;
-                            let now = space_only();
-                            space_only.set(!now);
-                            let view = library.view.peek().clone();
-                            library.show(view);
-                        },
-                        "space"
-                    }
-                }
                 if searching {
                     button {
                         class: if liked_only { "chip active" } else { "chip" },
@@ -935,86 +1025,115 @@ pub fn LibraryPanel() -> Element {
                         "liked"
                     }
                 }
-                SortMenu {}
-                // Grid by default, list for when the duration and the
-                // "in your space" dot are what you came for. One switch for
-                // both track sections below, see `Library::tracks_view`.
-                div { class: "view-toggle",
-                    button {
-                        class: if tracks_view == TracksView::Grid { "chip active" } else { "chip" },
-                        title: "grid",
-                        onclick: move |_| {
-                            let mut tracks_view = library.tracks_view;
-                            tracks_view.set(TracksView::Grid);
-                        },
-                        "▦"
-                    }
-                    button {
-                        class: if tracks_view == TracksView::List { "chip active" } else { "chip" },
-                        title: "list",
-                        onclick: move |_| {
-                            let mut tracks_view = library.tracks_view;
-                            tracks_view.set(TracksView::List);
-                        },
-                        "☰"
-                    }
+            }
+            span { class: "spacer" }
+            SortMenu {}
+            ViewToggle {}
+        }
+
+        if !shelf_tracks.is_empty() {
+            div { class: "actions",
+                button {
+                    class: "chip",
+                    onclick: move |_| {
+                        let queue = library.shelf.peek().visible_tracks(&blocklist);
+                        play_list(player, queue, 0);
+                    },
+                    "play all"
+                }
+                button {
+                    class: "chip",
+                    onclick: move |_| {
+                        let queue = library.shelf.peek().visible_tracks(&blocklist);
+                        play_next(player, queue);
+                    },
+                    "next"
+                }
+                button {
+                    class: "chip",
+                    onclick: move |_| {
+                        let queue = library.shelf.peek().visible_tracks(&blocklist);
+                        enqueue(player, queue);
+                    },
+                    "queue"
                 }
             }
+        }
 
-            if let Some(message) = library.notice.read().clone() {
-                p { class: "muted notice", "{message}" }
-            }
+        if let Some(message) = library.notice.read().clone() {
+            p { class: "muted notice", "{message}" }
+        }
 
-            if *library.loading.read() {
-                p { class: "muted", "loading…" }
-            } else if let Some(message) = library.error.read().clone() {
-                p { class: "muted error", "{message}" }
-            } else {
-                div { class: "shelf",
-                    // What you already have, first: it needs no round trip,
-                    // it is what the space can actually navigate, and it is
-                    // usually what you were looking for. Only for the views
-                    // "tracks" actually means, though, it used to show
-                    // regardless of whether Albums, Artists or Playlists was
-                    // the thing picked above, ignoring that filter entirely
-                    // and reading as a second list bolted onto the one the
-                    // chips claimed to control.
-                    // A space-only mixed search puts the space's tracks in the
-                    // one list with its albums and artists, see `MixedRows`.
-                    if show_space && !(mixed && space_only) {
-                        SpaceRows {}
-                    }
+        if *library.loading.read() {
+            p { class: "muted", "loading…" }
+        } else if let Some(message) = library.error.read().clone() {
+            p { class: "muted error", "{message}" }
+        } else {
+            div { class: "shelf",
+                // A space-only mixed search puts the space's tracks in the one
+                // list with its albums and artists, see `MixedRows`.
+                if show_space && !(mixed && space_only) {
+                    SpaceRows {}
+                }
 
-                    if mixed {
-                        if !nothing_from_qobuz || space_only {
-                            MixedRows {}
-                        }
-                    } else {
-                        if !artists.is_empty() {
-                            ArtistRows { heading: "Artists".to_string(), similar: false }
-                        }
-                        if !albums.is_empty() {
-                            AlbumRows {}
-                        }
-                        if !shelf.playlists.is_empty() {
-                            PlaylistRows {}
-                        }
-                        if !tracks.is_empty() {
-                            TrackRows {}
-                        }
+                if mixed {
+                    if !nothing_from_qobuz || space_only {
+                        MixedRows {}
                     }
-                    if !similar.is_empty() {
-                        ArtistRows { heading: "Similar artists".to_string(), similar: true }
+                } else {
+                    if !artists.is_empty() {
+                        ArtistRows { heading: "Artists".to_string(), similar: false }
                     }
-                    if nothing_visible {
-                        p { class: "muted", "nothing here" }
+                    if !albums.is_empty() {
+                        AlbumRows {}
                     }
+                    if !shelf.playlists.is_empty() {
+                        PlaylistRows {}
+                    }
+                    if !tracks.is_empty() {
+                        TrackRows {}
+                    }
+                }
+                if empty_search {
+                    p { class: "muted", "Type to search." }
+                } else if nothing_visible {
+                    p { class: "muted", "nothing here" }
                 }
             }
         }
     }
 }
 
+/// Grid for covers, list for the details that do not fit a tile. One switch
+/// for every screen that has both.
+#[component]
+pub(crate) fn ViewToggle() -> Element {
+    let library = use_context::<Library>();
+    let current = *library.tracks_view.read();
+
+    rsx! {
+        div { class: "view-toggle",
+            button {
+                class: if current == TracksView::Grid { "icon-btn active" } else { "icon-btn" },
+                title: "grid",
+                onclick: move |_| {
+                    let mut tracks_view = library.tracks_view;
+                    tracks_view.set(TracksView::Grid);
+                },
+                {icons::grid()}
+            }
+            button {
+                class: if current == TracksView::List { "icon-btn active" } else { "icon-btn" },
+                title: "list",
+                onclick: move |_| {
+                    let mut tracks_view = library.tracks_view;
+                    tracks_view.set(TracksView::List);
+                },
+                {icons::list()}
+            }
+        }
+    }
+}
 /// The sort chip and the menu it opens: what to order by, a rule, then which
 /// way round. Stays open across picks, since a sort is usually both.
 #[component]
@@ -1126,7 +1245,6 @@ fn MixedRows() -> Element {
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
     let selection = use_context::<Selection>().0;
-    let mut detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let matches = use_context::<SpaceMatches>();
@@ -1214,9 +1332,9 @@ fn MixedRows() -> Element {
                             if grid {
                                 {space_mark(local.0.read().contains(&track.id))}
                                 span { class: "title", "{track.title}" }
-                                {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                                {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
                             } else {
-                                {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                                {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
                                 span { class: "title", "{track.title}" }
                                 if local.0.read().contains(&track.id) {
                                     span { class: "in-space-dot", title: "analysed, on the map", "•" }
@@ -1247,9 +1365,9 @@ fn MixedRows() -> Element {
                                 span { class: "kind", "album" }
                                 {space_mark(reach.read().0.contains(&album.id))}
                                 span { class: "title", "{album.title}" }
-                                {artist_link(detail, album.artist_id, album.artist.clone(), "artist")}
+                                {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
                             } else {
-                                {artist_link(detail, album.artist_id, album.artist.clone(), "artist")}
+                                {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
                                 span { class: "title", "{album.title}" }
                                 span { class: "muted", "album" }
                             }
@@ -1262,7 +1380,7 @@ fn MixedRows() -> Element {
                             class: "{tile}",
                             onclick: {
                                 let artist = artist.clone();
-                                move |_| detail.set(Some(DetailSubject::Artist(artist.clone())))
+                                move |_| library.go(View::Artist(artist.clone()))
                             },
                             "data-menu": MenuTarget::ShelfArtist { index, similar: false }.tag(),
                             oncontextmenu: move |event: Event<MouseData>| {
@@ -1291,7 +1409,7 @@ fn MixedRows() -> Element {
                             class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
                             onclick: {
                                 let id = row.track_id;
-                                move |_| open_track(selection, detail, id)
+                                move |_| open_track(library, selection, id)
                             },
                             "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
                             oncontextmenu: {
@@ -1307,9 +1425,9 @@ fn MixedRows() -> Element {
                             }
                             if grid {
                                 span { class: "title", "{row.title}" }
-                                {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                                {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
                             } else {
-                                {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                                {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
                                 span { class: "title", "{row.title}" }
                             }
                             {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
@@ -1361,7 +1479,6 @@ fn SpaceRows() -> Element {
     let library = use_context::<Library>();
     let matches = use_context::<SpaceMatches>().0;
     let selection = use_context::<Selection>().0;
-    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let search = use_context::<Search>();
 
@@ -1421,7 +1538,7 @@ fn SpaceRows() -> Element {
                     },
                     onclick: {
                         let id = row.track_id;
-                        move |_| open_track(selection, detail, id)
+                        move |_| open_track(library, selection, id)
                     },
                     "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
                     oncontextmenu: {
@@ -1444,9 +1561,9 @@ fn SpaceRows() -> Element {
                     // rather than keeping the row order under a cover.
                     if grid {
                         span { class: "title", "{row.title}" }
-                        {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                        {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
                     } else {
-                        {artist_link(detail, row.artist_id, row.artist.clone(), "artist")}
+                        {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
                         span { class: "title", "{row.title}" }
                     }
                     {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
@@ -1539,7 +1656,6 @@ fn TrackRows() -> Element {
     let player = use_context::<Player>();
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
-    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
 
     let matches = use_context::<SpaceMatches>();
@@ -1610,9 +1726,9 @@ fn TrackRows() -> Element {
                         // in-space dot and the duration; a tile is the cover
                         // and just enough text to recognise it by.
                         span { class: "title", "{track.title}" }
-                        {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                        {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
                     } else {
-                        {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+                        {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
                         span { class: "title", "{track.title}" }
                         if !track.streamable {
                             span { class: "muted tag", "-" }
@@ -1637,7 +1753,6 @@ fn TrackRows() -> Element {
 fn AlbumRows() -> Element {
     let library = use_context::<Library>();
     let blocklist = use_context::<Blocklist>();
-    let detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let (liked_only, liked) = library.liked_state();
@@ -1675,7 +1790,7 @@ fn AlbumRows() -> Element {
                     Cover { url: album.image.clone() }
                     {space_mark(reach.read().0.contains(&album.id))}
                     span { class: "title", "{album.title}" }
-                    {artist_link(detail, album.artist_id, album.artist.clone(), "artist")}
+                    {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
                     {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                 }
             }
@@ -1684,10 +1799,9 @@ fn AlbumRows() -> Element {
 }
 
 #[component]
-fn ArtistRows(heading: String, similar: bool) -> Element {
+pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
     let library = use_context::<Library>();
     let blocklist = use_context::<Blocklist>();
-    let mut detail = use_context::<Detail>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let (liked_only, liked) = library.liked_state();
@@ -1712,7 +1826,7 @@ fn ArtistRows(heading: String, similar: bool) -> Element {
                     class: "tile",
                     onclick: {
                         let artist = artist.clone();
-                        move |_| detail.set(Some(DetailSubject::Artist(artist.clone())))
+                        move |_| library.go(View::Artist(artist.clone()))
                     },
                     "data-menu": MenuTarget::ShelfArtist { index, similar }.tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
