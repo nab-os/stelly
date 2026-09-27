@@ -488,7 +488,7 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let albums = shelf.visible_albums(&blocklist);
     let has_similar = !shelf.visible_artists(&blocklist, true).is_empty();
     let loading = *library.loading.read();
-    let grid = *library.tracks_view.read() == TracksView::Grid;
+    let grid = library.layout() == TracksView::Grid;
 
     rsx! {
         div { class: "page",

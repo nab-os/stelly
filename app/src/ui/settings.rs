@@ -4,6 +4,7 @@
 
 use super::pipeline::{Devices, PipelineControls, PipelineLog};
 use super::player::{quality_label, Player};
+use super::prefs;
 use super::Blocklist;
 use crate::qobuz::{FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
 use crate::ServerConfig;
@@ -102,7 +103,8 @@ fn ServerRow() -> Element {
     }
 }
 
-/// Stream quality. Asked for per track, so a change applies from the next one.
+/// Stream quality. Asked for per track, so a change applies from the next
+/// one. Saved, so it is also what the next session starts with.
 #[component]
 fn PlaybackRow() -> Element {
     let mut player = use_context::<Player>();
@@ -116,7 +118,10 @@ fn PlaybackRow() -> Element {
                     button {
                         key: "{format_id}",
                         class: if quality == format_id { "chip active" } else { "chip" },
-                        onclick: move |_| player.quality.set(format_id),
+                        onclick: move |_| {
+                            player.quality.set(format_id);
+                            prefs::update(|prefs| prefs.quality = Some(format_id));
+                        },
                         "{quality_label(format_id)}"
                     }
                 }
