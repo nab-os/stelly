@@ -47,3 +47,7 @@ priority = "optional"
 # executable takes its icon from the list above, which it does resolve.
 [bundle.windows]
 icon_path = "assets/icons/icon.ico"
+# dx defaults to the offline WebView2 installer, 180 MB of runtime in every
+# setup.exe for systems that already have it: Windows 10 and 11 ship it. The
+# bootstrapper is 2 MB and only downloads the runtime where it is missing.
+webview_install_mode = { EmbedBootstrapper = { silent = true } }
