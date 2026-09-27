@@ -8,6 +8,7 @@ use crate::api::{
     ApiError, BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope,
     Stage, SyncManifest,
 };
+use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::logbuffer::LogBuffer;
 use anyhow::{Context, Result};
@@ -171,6 +172,65 @@ impl Remote {
             .get(&format!("/api/tracks/{track_id}/url?format={format_id}"))
             .await?;
         Ok(found.url)
+    }
+
+    // --------------------------------------------------------------- session
+
+    pub async fn session(&self) -> Result<Session> {
+        self.get("/api/session").await
+    }
+
+    /// Send one change to the shared session. `Ok(false)` when the server
+    /// refused it for naming rows of a queue that has changed since, which is
+    /// a reason to catch up rather than an error to show.
+    pub async fn session_command(&self, command: &Command) -> Result<bool> {
+        let response = self
+            .http
+            .post(self.url("/api/session"))
+            .bearer_auth(&self.token)
+            .json(command)
+            .send()
+            .await
+            .with_context(|| format!("POST {}", self.url("/api/session")))?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(false);
+        }
+        Self::check(response).await?;
+        Ok(true)
+    }
+
+    /// Follow the shared session for as long as the receiver is kept.
+    ///
+    /// Reconnects on its own when the stream drops, saying so with `Lost`.
+    /// Sends `Unsupported` and stops when the server is older than the
+    /// session, and the app then plays on its own as it used to.
+    pub fn follow_session(&self) -> tokio::sync::mpsc::UnboundedReceiver<SessionFeed> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let http = self.http.clone();
+        let url = self.url("/api/session/events");
+        let token = self.token.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = sender.closed() => return,
+                    finished = read_session(&http, &url, &token, &sender) => match finished {
+                        Followed::Unsupported => {
+                            let _ = sender.send(SessionFeed::Unsupported);
+                            return;
+                        }
+                        Followed::Dropped => {
+                            if sender.send(SessionFeed::Lost).is_err() {
+                                return;
+                            }
+                        }
+                    },
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        });
+
+        receiver
     }
 
     pub async fn favorite_add(&self, kind: &str, id: &str) -> Result<()> {
@@ -465,6 +525,76 @@ impl Remote {
         Self::check(response).await?;
         Ok(())
     }
+}
+
+/// What the session stream says, as `follow_session` passes it on.
+pub enum SessionFeed {
+    Update(Update),
+    /// The stream dropped and is being reopened. The app keeps its copy.
+    Lost,
+    /// The server has no session to follow.
+    Unsupported,
+}
+
+enum Followed {
+    Dropped,
+    Unsupported,
+}
+
+/// The server sends a keep-alive every 15s, so this long without a byte means
+/// the connection died without saying so, as a phone's does when it changes
+/// networks.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Read one connection's worth of the session stream.
+async fn read_session(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+    sender: &tokio::sync::mpsc::UnboundedSender<SessionFeed>,
+) -> Followed {
+    let response = match http.get(url).bearer_auth(token).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            eprintln!("session stream: {err}");
+            return Followed::Dropped;
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Followed::Unsupported;
+    }
+    if !response.status().is_success() {
+        eprintln!("session stream refused: {}", response.status());
+        return Followed::Dropped;
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    while let Ok(Some(Ok(chunk))) = tokio::time::timeout(SILENCE, stream.next()).await {
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(end) = buffer.find("\n\n") {
+            let frame: String = buffer.drain(..end + 2).collect();
+            let data: String = frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim_start)
+                .collect();
+            if data.is_empty() {
+                // A keep-alive, which is only a comment.
+                continue;
+            }
+            match serde_json::from_str::<Update>(&data) {
+                Ok(update) => {
+                    if sender.send(SessionFeed::Update(update)).is_err() {
+                        return Followed::Dropped;
+                    }
+                }
+                Err(err) => eprintln!("session update unreadable: {err}"),
+            }
+        }
+    }
+    Followed::Dropped
 }
 
 #[cfg(not(target_os = "android"))]

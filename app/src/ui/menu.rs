@@ -487,7 +487,7 @@ fn QueueItems(index: usize) -> Element {
             button {
                 class: "menu-item",
                 onclick: move |_| {
-                    spawn_forever(async move { play_at(player, index).await });
+                    play_at(player, index);
                     menu.set(None);
                 },
                 "Play now"
