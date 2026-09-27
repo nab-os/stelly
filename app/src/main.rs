@@ -3,6 +3,10 @@
 //! Deliberately thin, everything else lives in the library, because Android
 //! has no `main` of its own: dioxus-desktop's JNI trampoline dlsym's this one.
 
+// Without this a release build on Windows opens a console next to the window.
+// Debug builds keep it, it is where eprintln! goes.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 fn main() {
     // Paired through TWO_KHZ_SERVER/TWO_KHZ_TOKEN or a stored pairing. Without
     // either, or with a server that does not answer, the window opens on the
