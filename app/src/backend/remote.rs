@@ -138,6 +138,12 @@ impl Remote {
             .await
     }
 
+    /// Portrait and biography. A server older than this route answers 404,
+    /// which the artist page treats as "nothing more to show".
+    pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
+        self.get(&format!("/api/artists/{artist_id}")).await
+    }
+
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         let albums: Vec<RemoteAlbum> = self
             .get(&format!("/api/artists/{artist_id}/albums?cap={cap}"))

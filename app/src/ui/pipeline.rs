@@ -160,8 +160,9 @@ pub fn use_pipeline_watch(pipeline: Pipeline) {
 
 // ------------------------------------------------------------------- view
 
+/// The corpus counts and the stages that grow it, as one settings row.
 #[component]
-pub fn PipelineView() -> Element {
+pub fn PipelineControls() -> Element {
     let pipeline = use_context::<Pipeline>();
     let crawler = use_context::<Crawler>();
 
@@ -169,7 +170,6 @@ pub fn PipelineView() -> Element {
     let crawling = crawler.running();
     let busy = running.is_some() || crawling;
     let corpus = pipeline.corpus.read().clone();
-    let log = pipeline.log.read().clone();
     let queued = pipeline.status.read().queued.clone();
 
     // Each hint names the stage that would fix it, and is derived from the
@@ -178,115 +178,117 @@ pub fn PipelineView() -> Element {
     let needs_layout = corpus.in_space > corpus.on_map;
 
     rsx! {
-        div { class: "pipeline",
-            section { class: "panel",
-                h2 { "Corpus" }
-                div { class: "counts",
-                    div { span { class: "count", "{corpus.tracks}" } span { class: "muted", "tracks" } }
-                    div { span { class: "count", "{corpus.analysed}" } span { class: "muted", "analysed" } }
-                    div { span { class: "count", "{corpus.to_analyse}" } span { class: "muted", "to analyse" } }
-                    div { span { class: "count", "{corpus.on_map}" } span { class: "muted", "on the map" } }
-                    div { span { class: "count", "{corpus.pending}" } span { class: "muted", "queued to crawl" } }
-                    div { span { class: "count", "{corpus.failed}" } span { class: "muted", "failed" } }
-                }
-                if needs_build {
-                    p { class: "muted notice",
-                        "The space holds {corpus.in_space} tracks but {corpus.buildable} are ready, run build space."
+        section { class: "panel setting pipeline",
+            h2 {
+                "Pipeline"
+                span { class: "spacer" }
+                if busy {
+                    button {
+                        class: "danger",
+                        onclick: move |_| pipeline.stop(crawler),
+                        "Stop"
                     }
                 }
-                if needs_layout {
-                    p { class: "muted notice",
-                        {format!("{} tracks in the space have no coordinates, run layout.",
-                                 corpus.in_space - corpus.on_map)}
-                    }
-                }
-                if !needs_build && !needs_layout && corpus.to_analyse == 0 {
-                    p { class: "muted", "Up to date. Crawl for more, or analyse after a crawl." }
+                button {
+                    class: "primary",
+                    disabled: busy,
+                    onclick: move |_| pipeline.start_full_run(),
+                    "Analyse → space → layout"
                 }
             }
-
-            section { class: "panel",
-                h2 { "Stages" }
-                p { class: "muted",
-                    "Running on the server. A stage started here keeps going if you close this window, use stop to end it."
+            div { class: "counts",
+                div { span { class: "count", "{corpus.tracks}" } span { class: "muted", "tracks" } }
+                div { span { class: "count", "{corpus.analysed}" } span { class: "muted", "analysed" } }
+                div { span { class: "count", "{corpus.to_analyse}" } span { class: "muted", "to analyse" } }
+                div { span { class: "count", "{corpus.on_map}" } span { class: "muted", "on the map" } }
+                div { span { class: "count", "{corpus.pending}" } span { class: "muted", "queued to crawl" } }
+                div { span { class: "count", "{corpus.failed}" } span { class: "muted", "failed" } }
+            }
+            if needs_build {
+                p { class: "muted notice",
+                    "The space holds {corpus.in_space} tracks but {corpus.buildable} are ready, run build space."
                 }
-                div { class: "actions",
-                    button {
-                        class: "primary",
-                        disabled: busy,
-                        onclick: move |_| pipeline.start_full_run(),
-                        "run analyse → space → layout"
-                    }
-                    if busy {
-                        button {
-                            class: "danger",
-                            onclick: move |_| pipeline.stop(crawler),
-                            "stop"
-                        }
-                    }
+            }
+            if needs_layout {
+                p { class: "muted notice",
+                    {format!("{} tracks in the space have no coordinates, run layout.",
+                             corpus.in_space - corpus.on_map)}
                 }
+            }
+            if !needs_build && !needs_layout && corpus.to_analyse == 0 {
+                p { class: "muted", "Up to date. Crawl for more, or analyse after a crawl." }
+            }
 
-                if let Some(message) = pipeline.error.read().clone() {
-                    p { class: "muted error", "{message}" }
-                }
+            if let Some(message) = pipeline.error.read().clone() {
+                p { class: "muted error", "{message}" }
+            }
 
-                ul { class: "stages",
-                    for stage in Stage::ALL {
-                        li {
-                            key: "{stage.label()}",
-                            class: if running == Some(stage) || (stage == Stage::Crawl && crawling) {
-                                "stage active"
+            ul { class: "stages",
+                for stage in Stage::ALL {
+                    li {
+                        key: "{stage.label()}",
+                        class: if running == Some(stage) || (stage == Stage::Crawl && crawling) {
+                            "stage active"
+                        } else {
+                            "stage"
+                        },
+                        div { class: "stage-name", "{stage.label()}" }
+                        div { class: "stage-blurb muted", "{stage.blurb()}" }
+                        div { class: "stage-run",
+                            if queued.contains(&stage) {
+                                span { class: "muted", "queued" }
+                            } else if stage == Stage::Crawl && crawling {
+                                button {
+                                    class: "danger",
+                                    onclick: move |_| crawler.request_stop(),
+                                    "stop"
+                                }
                             } else {
-                                "stage"
-                            },
-                            div { class: "stage-name", "{stage.label()}" }
-                            div { class: "stage-blurb muted", "{stage.blurb()}" }
-                            div { class: "stage-run",
-                                if queued.contains(&stage) {
-                                    span { class: "muted", "queued" }
-                                } else if stage == Stage::Crawl && crawling {
-                                    button {
-                                        class: "danger",
-                                        onclick: move |_| crawler.request_stop(),
-                                        "stop"
-                                    }
-                                } else {
-                                    button {
-                                        disabled: busy,
-                                        onclick: move |_| pipeline.start(stage, crawler),
-                                        "run"
-                                    }
+                                button {
+                                    disabled: busy,
+                                    onclick: move |_| pipeline.start(stage, crawler),
+                                    "run"
                                 }
                             }
                         }
                     }
                 }
-
-                if crawling {
-                    p { class: "muted ellipsis",
-                        "crawling: "
-                        {crawler.last().unwrap_or_default()}
-                    }
-                }
             }
 
-            section { class: "panel log-panel",
-                h2 {
-                    "Output"
-                    span { class: "spacer" }
-                    button { class: "chip", onclick: move |_| pipeline.clear_log(), "clear" }
-                }
-                pre { class: "log",
-                    if log.is_empty() {
-                        span { class: "muted", "Nothing run yet. Output from the pipeline appears here." }
-                    }
-                    for (index, line) in log.into_iter().enumerate() {
-                        div { key: "{index}", "{line}" }
-                    }
+            if crawling {
+                p { class: "muted ellipsis",
+                    "crawling: "
+                    {crawler.last().unwrap_or_default()}
                 }
             }
+            p { class: "muted",
+                "Stages run on the server, and keep going if you close the app. Stop is the only way to end one early."
+            }
+        }
+    }
+}
 
-            Devices {}
+/// What the pipeline has been printing, as the last settings row.
+#[component]
+pub fn PipelineLog() -> Element {
+    let pipeline = use_context::<Pipeline>();
+    let log = pipeline.log.read().clone();
+
+    rsx! {
+        section { class: "panel setting log-panel",
+            h2 {
+                "Pipeline output"
+                span { class: "spacer" }
+                button { class: "chip", onclick: move |_| pipeline.clear_log(), "clear" }
+            }
+            pre { class: "log",
+                if log.is_empty() {
+                    span { class: "muted", "Nothing run yet. Output from the pipeline appears here." }
+                }
+                for (index, line) in log.into_iter().enumerate() {
+                    div { key: "{index}", "{line}" }
+                }
+            }
         }
     }
 }
@@ -295,7 +297,7 @@ pub fn PipelineView() -> Element {
 /// scope itself, a `play` phone cannot mint itself a
 /// promotion.
 #[component]
-fn Devices() -> Element {
+pub fn Devices() -> Element {
     let pipeline = use_context::<Pipeline>();
     let mut name = use_signal(String::new);
     let mut scope = use_signal(|| Scope::Play);
@@ -319,8 +321,8 @@ fn Devices() -> Element {
     };
 
     rsx! {
-        section { class: "panel",
-            h2 { "Devices" }
+        section { class: "panel setting",
+            h2 { "Devices & tokens" }
             p { class: "muted",
                 "Each device gets its own token, so one phone can be revoked without re-pairing the rest. The token is shown once."
             }

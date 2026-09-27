@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/playlists/{id}", get(playlist_tracks))
         .route("/api/albums/{id}", get(album_tracks))
         .route("/api/albums/{id}/fetch", post(fetch_album))
+        .route("/api/artists/{id}", get(artist))
         .route("/api/artists/{id}/albums", get(artist_albums))
         .route("/api/artists/{id}/similar", get(similar_artists))
         .route("/api/artists/{id}/fetch", post(fetch_artist))
@@ -178,6 +179,14 @@ async fn album_tracks(
     Path(id): Path<String>,
 ) -> Reply<Vec<RemoteTrack>> {
     Ok(Json(state.hub.album_tracks(&id).await?))
+}
+
+async fn artist(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Path(id): Path<i64>,
+) -> Reply<RemoteArtist> {
+    Ok(Json(state.hub.artist(id).await?))
 }
 
 async fn artist_albums(

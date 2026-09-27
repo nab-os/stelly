@@ -411,7 +411,7 @@
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = "#8b90a3";
       ctx.font = "13px system-ui, sans-serif";
-      ctx.fillText("No layout yet, run layout from the pipeline view", 20, 30);
+      ctx.fillText("No layout yet, run layout from settings", 20, 30);
       return;
     }
 
@@ -467,6 +467,27 @@
     // marker rather than two.
     if (selected >= 0) marker(selected, "#ffffff", true);
     if (hover >= 0 && hover !== selected) marker(hover, "#7aa2f7", false);
+
+    placeCard();
+  }
+
+  // The selected point's card: Rust renders it, with the track's cover and
+  // names, and this pins it over the point every frame, so it rides along
+  // with a pan or a zoom. A DOM element over the canvas rather than something
+  // drawn into it, so it keeps the same size on screen at any zoom and can be
+  // clicked. The canvas fills its parent, so its coordinates are the card's.
+  function placeCard() {
+    const card = document.getElementById("map-card");
+    if (!card) return;
+    if (selected < 0 || width <= 0) {
+      card.style.visibility = "hidden";
+      return;
+    }
+    const [x, y] = toScreen(selected);
+    const away = x < -40 || y < -40 || x > width + 40 || y > height + 40;
+    card.style.visibility = away ? "hidden" : "visible";
+    card.style.left = `${x}px`;
+    card.style.top = `${y}px`;
   }
 
   /// A point worth looking at: halo, ring, core, and what it actually is.
@@ -506,8 +527,9 @@
       ctx.globalAlpha = 1;
     }
 
+    // The selected point has its card instead.
     const text = (meta.labels && meta.labels[index]) || "";
-    if (text) label(text, x, y, colour);
+    if (text && !persistent) label(text, x, y, colour);
   }
 
   function roundRect(x, y, w, h, r) {
@@ -877,7 +899,7 @@
 
   window.addEventListener("resize", resize);
 
-  // The canvas can resize without the window doing so: switching Explore panes
+  // The canvas can resize without the window doing so: opening the map
   // with `display: none` takes it from 0x0 to full with no resize event. `fit`
   // waits for a real rect for the same reason.
   let fitted = false;

@@ -581,6 +581,15 @@ impl QobuzClient {
         Ok((album, tracks))
     }
 
+    /// One artist on its own: name, portrait and biography, no discography.
+    pub async fn artist(&mut self, artist_id: i64) -> Result<RemoteArtist> {
+        self.login().await?;
+
+        let params = BTreeMap::from([("artist_id".to_string(), artist_id.to_string())]);
+        let data = self.request("artist/get", &params, None).await?;
+        RemoteArtist::parse(&data).with_context(|| format!("artist {artist_id} has no id"))
+    }
+
     /// Raw album objects for an artist, paginated through `artist/get`.
     pub async fn artist_albums_raw(&mut self, artist_id: i64, cap: usize) -> Result<Vec<Value>> {
         Ok(self.artist_albums_inner(artist_id, cap).await?.1)

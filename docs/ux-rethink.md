@@ -263,143 +263,45 @@ it build and hang together" but not "does the sheet's animation feel right",
 900px breakpoint land somewhere sensible", all genuinely open until someone
 runs `cargo run` from `app/` and taps through it.
 
-## Round two: places, and the side panel
+## Round two: generate as the side panel
 
-Proposal, not built. The open question above about a bottom tab bar said it
-would come back "if a genuine third destination shows up". It has: search is
-splitting off from favourites into its own screen, which with the map and the
-pipeline makes four places you go to, not two. At that count, a header chip
-per place and a bool per chip (`explore`, `map_open`) stops scaling.
+Built. Supersedes the rail proposal that stood here: the side panel is the
+generate tool itself, always showing, and everything else is a screen of the
+main area beside it.
 
-### What the app is made of
+- **Main area** (`MainScreen`, `ui/library.rs`): a slim top bar (back,
+  what the page is, favourites, settings) over one scroller. Screens are
+  `View` variants and `Library::history` is the way back: favourites (mixed,
+  exclusive tracks/albums/artists filters, liked-date sort, grid/list),
+  search (box plus an exclusive space/qobuz switch), album, artist, track,
+  playlists, settings.
+- **Detail pages** (`ui/screens.rs`): cover and names up top, verbs under
+  them, a rule, then the rest. Album rows carry play, a green A and a red B.
+  The track page lists every fact the catalogue and the space have, laid out
+  to be screenshotted. The artist page folds Qobuz's biography, which comes
+  from a new `GET /api/artists/{id}`; an older server just shows none.
+- **Generate panel** (`ui/side.rs`): seed, modes, path ends, result,
+  weights. Docked right above 900px; below it, slides in from the right
+  over the main area with a floating back arrow, and anything that
+  generates slides it in (`Generator::panel_open`).
+- **Floating buttons**, bottom right of the main area: the map (accent,
+  globe) and search (base colour, magnifier), plus the panel's own on a
+  phone.
+- **Map** covers the main area only. Picking a point selects it and shows a
+  card (cover, title, album, artist) that map.js pins to the point every
+  frame, so it follows a pan or zoom at a constant size; the card opens the
+  track page.
+- **Player** runs the full width of the window: seek line along its top
+  edge, cover and names (each opening its page), centred transport, then a
+  wheel-scrollable volume and the queue button. The full-screen player is
+  gone, its job is the track page's now. Stream quality moved to settings.
+- **Queue drawer** rises from the player: covers and names, drag to
+  reorder (long press first on touch), swipe away or hover-cross to remove,
+  a handle to drag it down on a phone (`queue-drag.js`).
+- **Settings** is one row per group: server and token, playback quality,
+  devices and their tokens, hidden artists, pipeline controls, pipeline
+  output. The pipeline is no longer a screen of its own.
 
-Sorted by what kind of thing each one is, because that decides where it lives:
-
-- **Places**, one showing at a time, you go there and stay: favourites,
-  search, map, pipeline.
-- **The inspector**, about whatever was tapped in a place: detail, and the
-  generate result that grows out of it.
-- **Chrome**, always there: the player bar.
-- **Overlays**, a focus mode you open and close: the full player, settings.
-
-Today the map is an overlay over the list and pipeline is a mode that
-swaps the whole body out. Both are really places, and treating them as
-something else is why they each got their own ad hoc toggle.
-
-### Wide (≥900px): rail, place, inspector
-
-```
-┌────┬──────────────────────────┬──────────────┐
-│ ♥  │                          │ ← detail     │
-│ ⌕  │   the current place      │              │
-│ ◎  │   (favourites / search / │ cover, verbs │
-│ ▤  │    map / pipeline)       │ generate ▸   │
-│    │                          │              │
-│ ⚙  │                          │              │
-├────┴──────────────────────────┴──────────────┤
-│ ▶  player bar                          map ◎ │
-└──────────────────────────────────────────────┘
-```
-
-- **Left rail**, icons with a label under each, ~64px wide. Top to bottom:
-  favourites, search, map, pipeline. Settings pinned to the bottom of the rail
-  as an icon button, still opening its modal, since it's an action rather
-  than a place (same reasoning as the ⚙ in the header today). The header
-  goes away: the title, track counts and hidden count move into the top of
-  favourites, where they were really describing the library anyway.
-- **Place**, the middle column, whatever the rail has lit.
-- **Right panel, the inspector.** This is the rework proper. Today it's one
-  scroll of detail, verbs, generate section, weights and result
-  (`TrackDetail` → `GenerateSection` → `WeightsDisclosure`). Proposed: two
-  levels, a small stack with a back arrow.
-  1. **Detail**: cover, title, badges, the play/queue/like verbs, and one
-     row per generate mode (neighbours, radio, path A/B, drift) as entries,
-     not inline controls.
-  2. **Generate**: pushed when a mode is picked. Mode tabs, the weights
-     disclosure, the `Recipe` label and the result list, with "← {track}"
-     at the top going back to the detail it came from. A second generate from
-     a result row replaces this level rather than stacking a third.
-
-  Albums and artists only ever use level one. The panel is empty (or folds
-  away, see open questions) until something is tapped, as now.
-
-The map being a place is the biggest single win here: tapping a point opens
-the inspector *beside* the map rather than a sheet on top of it, so you can
-read a track's detail and still see where it sits. "On the map" from the
-inspector switches the rail to the map and keeps the inspector open.
-
-### Phone (<900px): tabs, sheet, generate screen
-
-```
-┌──────────────────────┐
-│  the current place   │
-│                      │
-│                      │
-├──────────────────────┤
-│ ▶ player bar         │
-├──────────────────────┤
-│  ♥     ⌕     ◎    ⋯  │
-└──────────────────────┘
-```
-
-- **Bottom tab bar** in place of the rail: favourites, search, map, and `⋯`
-  holding pipeline and settings. Pipeline is an admin screen you visit
-  occasionally; a full tab for it on a 393px screen costs more than the
-  extra tap does.
-- **Detail** stays the bottom sheet it already is.
-- **Generate** becomes its own full screen, pushed from the sheet, with a
-  back arrow to the sheet. This is the "generate panel is a screen on phone"
-  part: a result list plus mode tabs plus weights does not fit in 85vh of
-  sheet without the sheet becoming a second app.
-- **Player bar** sits above the tab bar. The map chip on it goes, the map is
-  a tab now. Full player unchanged, an overlay at every width.
-
-### Search as its own place
-
-Favourites and search stop sharing one `LibraryPanel`. Each keeps its own
-history, so drilling into an album from favourites, going to search, and
-coming back lands you on that album, not on a reset list. Playlists stay under
-favourites, as a chip beside tracks/albums/artists; they're your stuff, not a
-search result. The search place opens with the box focused and the keyboard
-up on phone; the local-plus-Qobuz two-query model is unchanged.
-
-### State, roughly
-
-- `explore: Signal<bool>` and the place half of `map_open` become one
-  `Place { Favourites, Search, Map, Pipeline }` signal. `map_route` stays as
-  it is.
-- `Library.view` splits per place. Cheapest version: two `LibraryPanel`s,
-  each under its own `Library` context provider, both mounted and hidden by
-  class like the map is, so switching tabs costs nothing and loses nothing.
-- The inspector gets `Inspector { Detail, Generate }` next to the existing
-  `Detail` signal. `Generator` doesn't change; only where `GenerateSection`
-  renders does.
-- `map.js`'s constraint still holds: the canvas never unmounts, the map place
-  is the same `div` hidden by class. It moves from overlaying `.body` to being
-  one of its siblings.
-
-### Order to build it in
-
-1. `Place` enum and the rail/tab bar, with favourites, map and pipeline as
-   they are now, just reached differently. Nothing about search changes yet.
-2. Split search out into its own place and `Library` context.
-3. Inspector levels: pull `GenerateSection` + weights out of `TrackDetail`
-   into the second level; on phone, render that level as a full screen.
-4. Move the header's counts into favourites and delete the header.
-
-Each step ships on its own and leaves the app usable.
-
-### Open questions
-
-- **Empty inspector on wide screens.** Keep a 420px column showing an
-  empty state, or fold it away until something is tapped and let the place
-  take the width? Folding is better for the map and pipeline, worse for
-  layout stability while browsing (the list reflows every time you tap).
-  Leaning towards fold on map/pipeline, keep on favourites/search.
-- **Rail labels.** Icons alone are compact but ⌕/◎ aren't self-explanatory
-  for "map of the space". Labels under icons cost ~20px of width.
-- **Does the queue belong in the inspector?** On wide screens it could be a
-  third inspector level (or a tab on the panel) instead of a drawer. Left out
-  here to keep the change to what was asked.
-- **Pipeline on phone behind `⋯`**: fine if it's really occasional. If it's
-  checked every session while the crawl runs, it earns the fourth tab.
+Checked with `cargo check`, `cargo test` and `cargo clippy` on the app and
+`cargo check` on the server. Like everything above it in this document, not
+yet looked at in a running window.

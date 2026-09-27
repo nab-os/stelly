@@ -86,6 +86,9 @@ pub struct Generator {
     /// Whether the backend can turn a phrase into an embedding. Half of what
     /// drift needs; the engine answers the other half.
     pub tower: Signal<bool>,
+    /// Whether the panel is slid in, on a phone. A wide screen always shows
+    /// it and ignores this.
+    pub panel_open: Signal<bool>,
 }
 
 impl Generator {
@@ -106,6 +109,7 @@ impl Generator {
             even: Signal::new(false),
             status: Signal::new(None),
             tower: Signal::new(false),
+            panel_open: Signal::new(false),
         }
     }
 
@@ -130,6 +134,9 @@ impl Generator {
         let mut generator = self;
         generator.status.set(None);
         generator.busy.set(true);
+        // Asked for from a row or a path button, the result has to be
+        // somewhere to look at, which on a phone means sliding the panel in.
+        generator.panel_open.set(true);
 
         let count = *self.count.peek();
         let mode = *self.mode.peek();
