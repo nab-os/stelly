@@ -259,6 +259,9 @@ fn Shell() -> Element {
         volume: Signal::new(1.0),
         muted: Signal::new(false),
         queue_open: Signal::new(false),
+        devices: Signal::new(Vec::new()),
+        output: Signal::new(None),
+        me: Signal::new(None),
     });
 
     let library = use_context_provider(Library::new);
@@ -428,6 +431,7 @@ fn Shell() -> Element {
     });
 
     crate::ui::use_transport(player);
+    crate::ui::use_session(player);
 
     // Open on the user's own library, which is also what the crawl seeds from.
     use_future(move || async move {

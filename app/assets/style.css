@@ -811,6 +811,28 @@ span.path-end {
 .queue-btn { width: auto; padding: 0 9px; border-radius: 16px; gap: 6px; }
 .queue-count { font-size: 11px; font-variant-numeric: tabular-nums; }
 
+/* The output picker opens upwards from its button, over the bar, the same
+   card as a row's menu. Its backdrop is a sibling rather than its parent, so
+   the card can sit against the button instead of the window. */
+.output-picker { position: relative; }
+.output-btn { width: auto; min-width: 32px; padding: 0 9px; border-radius: 16px; gap: 6px; }
+.output-btn.active { color: var(--accent); }
+.output-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+/* Doubled up to outrank `.context-menu`, which comes later and is fixed to
+   the window: fixed, this bottom offset put the card above the screen. */
+.context-menu.output-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 31;
+}
+
 /* Floats above the bar rather than taking a row in it: it comes and goes,
    and the bar's height should not. */
 .player-status {
@@ -1133,6 +1155,8 @@ span.path-end {
   .volume { display: none; }
   .queue-btn { padding: 0 8px; height: 38px; }
   .queue-count { display: none; }
+  .output-btn { padding: 0 8px; height: 38px; }
+  .output-name { display: none; }
   .player .seek-line::-webkit-slider-thumb { opacity: 1; width: 10px; height: 10px; margin-top: -3.5px; }
   .player-status { max-width: calc(100% - 32px); }
 

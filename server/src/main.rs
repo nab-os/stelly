@@ -22,6 +22,7 @@ mod db;
 mod hub;
 mod login;
 mod pipeline;
+mod playback;
 mod qobuz;
 mod routes;
 // Shared with the client, which reads the slim copy through the same tables.
@@ -49,6 +50,8 @@ pub struct AppState {
     /// translate to and from it.
     pub hub: Arc<Hub>,
     pub auth: Arc<AuthStore>,
+    /// The queue and output every device shares.
+    pub playback: Arc<playback::Playback>,
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
 }
@@ -79,6 +82,13 @@ impl Failure {
     pub fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
@@ -318,6 +328,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     let state = AppState {
         hub: hub.clone(),
         auth: Arc::new(store),
+        playback: playback::Playback::new(),
         data_dir: data_dir.clone(),
         db_path: db_path.clone(),
     };

@@ -16,6 +16,7 @@ use two_khz::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
     SyncFile, SyncManifest,
 };
+use two_khz::session::{Command, Session, Update};
 use two_khz::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -45,6 +46,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/artists/{id}/fetch", post(fetch_artist))
         // --------------------------------------------------------- playback
         .route("/api/tracks/{id}/url", get(file_url))
+        .route("/api/session", get(session).post(session_command))
+        .route("/api/session/events", get(session_events))
         // ---------------------------------------------------- text steering
         .route("/api/embed", post(embed))
         .route("/api/embed/available", get(embed_available))
@@ -226,6 +229,77 @@ async fn file_url(
     Ok(Json(StreamUrl {
         url: state.hub.file_url(id, query.format).await?,
     }))
+}
+
+// ------------------------------------------------------------------ session
+
+async fn session(State(state): State<AppState>, _: PlayAuth) -> Reply<Session> {
+    Ok(Json(state.playback.snapshot()))
+}
+
+async fn session_command(
+    State(state): State<AppState>,
+    PlayAuth(device): PlayAuth,
+    Json(command): Json<Command>,
+) -> Reply<serde_json::Value> {
+    state
+        .playback
+        .command(&device, command)
+        .map_err(|_| Failure::conflict("the session changed before this reached it"))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Push the session to one device on every change.
+///
+/// Opening this is also what makes a device show up in the output picker, so
+/// it is held open for as long as the app runs. The queue is left out of an
+/// update when it has not changed since the last one on this stream, which is
+/// most of them: a position report every few seconds should not resend
+/// hundreds of tracks to every device.
+async fn session_events(
+    State(state): State<AppState>,
+    PlayAuth(device): PlayAuth,
+) -> impl IntoResponse {
+    let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);
+    let (mut published, listening) = state.playback.connect(&device);
+
+    tokio::spawn(async move {
+        let _listening = listening;
+        let mut sent_queue: Option<u64> = None;
+        loop {
+            tokio::select! {
+                changed = published.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                // Without this a closed stream would only be noticed on the
+                // next change, and the device would stay listed until then.
+                _ = sender.closed() => return,
+            }
+
+            let mut session = published.borrow_and_update().clone();
+            let same_queue = sent_queue == Some(session.queue_version);
+            if same_queue {
+                session.queue = Vec::new();
+            }
+            sent_queue = Some(session.queue_version);
+
+            let update = Update {
+                you: device.id,
+                same_queue,
+                session,
+            };
+            let Ok(event) = Event::default().json_data(&update) else {
+                return;
+            };
+            if sender.send(Ok(event)).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default())
 }
 
 #[derive(Deserialize)]
