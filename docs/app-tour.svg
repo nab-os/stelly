@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="770" viewBox="0 0 1200 770" font-family="system-ui, -apple-system, 'Segoe UI', Ubuntu, sans-serif">
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#8b90a3"/>
+  </marker>
+  <marker id="arrow-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#7aa2f7"/>
+  </marker>
+  <marker id="arrow-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M0,0 L10,5 L0,10 z" fill="#9ece6a"/>
+  </marker>
+  <marker id="arrow-orange" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M0,0 L10,5 L0,10 z" fill="#ff9e64"/>
+  </marker>
+</defs>
+<rect width="1200" height="770" fill="#12131a"/>
+<text x="40" y="52" font-size="28" fill="#e5e7ef" font-weight="bold" text-anchor="start">Finding your way around the app</text>
+<text x="40" y="80" font-size="15" fill="#8b90a3" font-weight="normal" text-anchor="start">One window: whatever you&#x27;re looking at on the left, the generate panel on the right, the player along the bottom.</text>
+<rect x="300" y="120" width="600" height="430" rx="12" fill="#0d0e13" stroke="#343846" stroke-width="1.5"/>
+<rect x="312" y="132" width="380" height="340" rx="8" fill="#1b1d26"/>
+<text x="326" y="156" font-size="11" fill="#8b90a3" font-weight="bold" text-anchor="start">FAVOURITES</text>
+<rect x="326" y="170" width="52" height="18" rx="9" fill="#23262f"/>
+<text x="352" y="183" font-size="9" fill="#8b90a3" font-weight="normal" text-anchor="middle">tracks</text>
+<rect x="384" y="170" width="52" height="18" rx="9" fill="#23262f"/>
+<text x="410" y="183" font-size="9" fill="#8b90a3" font-weight="normal" text-anchor="middle">albums</text>
+<rect x="442" y="170" width="52" height="18" rx="9" fill="#23262f"/>
+<text x="468" y="183" font-size="9" fill="#8b90a3" font-weight="normal" text-anchor="middle">artists</text>
+<rect x="326" y="202" width="60" height="60" rx="4" fill="#e0af68" opacity="0.55"/>
+<rect x="326" y="268" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="326" y="277" width="32" height="4" rx="2" fill="#23262f"/>
+<circle cx="428" cy="232" r="30" fill="#7aa2f7" opacity="0.55"/>
+<rect x="398" y="268" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="398" y="277" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="470" y="202" width="60" height="60" rx="4" fill="#ff9e64" opacity="0.55"/>
+<rect x="470" y="268" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="470" y="277" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="542" y="202" width="60" height="60" rx="4" fill="#bb9af7" opacity="0.55"/>
+<rect x="542" y="268" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="542" y="277" width="32" height="4" rx="2" fill="#23262f"/>
+<circle cx="644" cy="232" r="30" fill="#7dcfff" opacity="0.55"/>
+<rect x="614" y="268" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="614" y="277" width="32" height="4" rx="2" fill="#23262f"/>
+<circle cx="356" cy="318" r="30" fill="#9ece6a" opacity="0.55"/>
+<rect x="326" y="354" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="326" y="363" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="398" y="288" width="60" height="60" rx="4" fill="#f7768e" opacity="0.55"/>
+<rect x="398" y="354" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="398" y="363" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="470" y="288" width="60" height="60" rx="4" fill="#e0af68" opacity="0.55"/>
+<rect x="470" y="354" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="470" y="363" width="32" height="4" rx="2" fill="#23262f"/>
+<circle cx="572" cy="318" r="30" fill="#7dcfff" opacity="0.55"/>
+<rect x="542" y="354" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="542" y="363" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="614" y="288" width="60" height="60" rx="4" fill="#ff9e64" opacity="0.55"/>
+<rect x="614" y="354" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="614" y="363" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="326" y="374" width="60" height="60" rx="4" fill="#bb9af7" opacity="0.55"/>
+<rect x="326" y="440" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="326" y="449" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="398" y="374" width="60" height="60" rx="4" fill="#7aa2f7" opacity="0.55"/>
+<rect x="398" y="440" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="398" y="449" width="32" height="4" rx="2" fill="#23262f"/>
+<circle cx="500" cy="404" r="30" fill="#9ece6a" opacity="0.55"/>
+<rect x="470" y="440" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="470" y="449" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="542" y="374" width="60" height="60" rx="4" fill="#f7768e" opacity="0.55"/>
+<rect x="542" y="440" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="542" y="449" width="32" height="4" rx="2" fill="#23262f"/>
+<rect x="614" y="374" width="60" height="60" rx="4" fill="#e0af68" opacity="0.55"/>
+<rect x="614" y="440" width="50" height="5" rx="2" fill="#23262f"/>
+<rect x="614" y="449" width="32" height="4" rx="2" fill="#23262f"/>
+<circle cx="662" cy="440" r="18" fill="#7aa2f7"/>
+<circle cx="662" cy="440" r="9" fill="none" stroke="#12131a" stroke-width="1.8"/><ellipse cx="662" cy="440" rx="4" ry="9" fill="none" stroke="#12131a" stroke-width="1.5"/><line x1="653" y1="440" x2="671" y2="440" stroke="#12131a" stroke-width="1.5"/>
+<circle cx="618" cy="440" r="15" fill="#23262f" stroke="#343846"/><circle cx="616" cy="438" r="5" fill="none" stroke="#e5e7ef" stroke-width="1.6"/><line x1="620" y1="442" x2="624" y2="446" stroke="#e5e7ef" stroke-width="1.8"/>
+<rect x="704" y="132" width="184" height="340" rx="8" fill="#1b1d26"/>
+<text x="716" y="156" font-size="11" fill="#8b90a3" font-weight="bold" text-anchor="start">GENERATE</text>
+<text x="716" y="184" font-size="9" fill="#e5e7ef" font-weight="normal" text-anchor="start">neighbours</text>
+<text x="774" y="184" font-size="9" fill="#8b90a3" font-weight="normal" text-anchor="start">radio</text>
+<text x="808" y="184" font-size="9" fill="#8b90a3" font-weight="normal" text-anchor="start">path</text>
+<text x="840" y="184" font-size="9" fill="#8b90a3" font-weight="normal" text-anchor="start">drift</text>
+<line x1="716" y1="190" x2="764" y2="190" stroke="#7aa2f7" stroke-width="2"/>
+<rect x="716" y="210" width="160" height="4" rx="2" fill="#23262f"/>
+<rect x="716" y="210" width="70" height="4" rx="2" fill="#ff9e64"/>
+<circle cx="786" cy="212" r="6" fill="#e5e7ef"/>
+<rect x="716" y="230" width="64" height="22" rx="5" fill="#3b4a73"/>
+<text x="748" y="245" font-size="10" fill="#e5e7ef" font-weight="bold" text-anchor="middle">Generate</text>
+<rect x="786" y="230" width="44" height="22" rx="5" fill="#23262f"/>
+<text x="808" y="245" font-size="10" fill="#8b90a3" font-weight="normal" text-anchor="middle">Play</text>
+<rect x="836" y="230" width="44" height="22" rx="5" fill="#23262f"/>
+<text x="858" y="245" font-size="10" fill="#8b90a3" font-weight="normal" text-anchor="middle">Queue</text>
+<rect x="716" y="272" width="22" height="22" rx="3" fill="#bb9af7"/>
+<rect x="746" y="276" width="90" height="5" rx="2" fill="#23262f"/>
+<rect x="746" y="285" width="56" height="4" rx="2" fill="#23262f"/>
+<rect x="716" y="302" width="22" height="22" rx="3" fill="#7dcfff"/>
+<rect x="746" y="306" width="78" height="5" rx="2" fill="#23262f"/>
+<rect x="746" y="315" width="56" height="4" rx="2" fill="#23262f"/>
+<rect x="716" y="332" width="22" height="22" rx="3" fill="#9ece6a"/>
+<rect x="746" y="336" width="66" height="5" rx="2" fill="#23262f"/>
+<rect x="746" y="345" width="56" height="4" rx="2" fill="#23262f"/>
+<rect x="716" y="362" width="22" height="22" rx="3" fill="#f7768e"/>
+<rect x="746" y="366" width="90" height="5" rx="2" fill="#23262f"/>
+<rect x="746" y="375" width="56" height="4" rx="2" fill="#23262f"/>
+<rect x="716" y="392" width="22" height="22" rx="3" fill="#e0af68"/>
+<rect x="746" y="396" width="78" height="5" rx="2" fill="#23262f"/>
+<rect x="746" y="405" width="56" height="4" rx="2" fill="#23262f"/>
+<rect x="716" y="422" width="22" height="22" rx="3" fill="#7dcfff"/>
+<rect x="746" y="426" width="66" height="5" rx="2" fill="#23262f"/>
+<rect x="746" y="435" width="56" height="4" rx="2" fill="#23262f"/>
+<text x="716" y="458" font-size="9" fill="#8b90a3" font-weight="bold" text-anchor="start">TUNE THE SPACE</text>
+<path d="M866,451 L876,451 L871,457 z" fill="#8b90a3"/>
+<rect x="312" y="484" width="576" height="54" rx="8" fill="#1b1d26"/>
+<rect x="322" y="496" width="36" height="36" rx="4" fill="#ff9e64"/>
+<rect x="366" y="502" width="80" height="6" rx="3" fill="#e5e7ef"/>
+<rect x="366" y="516" width="110" height="5" rx="2" fill="#23262f"/>
+<circle cx="600.0" cy="510" r="13" fill="#23262f"/><path d="M596.0,503 L606.0,510 L596.0,517 z" fill="#e5e7ef"/><path d="M566.0,504 L558.0,510 L566.0,516 z" fill="#8b90a3"/><path d="M634.0,504 L642.0,510 L634.0,516 z" fill="#8b90a3"/>
+<rect x="322" y="529" width="556" height="3" rx="2" fill="#23262f"/>
+<rect x="322" y="529" width="160" height="3" rx="2" fill="#7aa2f7"/>
+<rect x="778" y="508" width="60" height="4" rx="2" fill="#7aa2f7"/>
+<line x1="854" y1="504" x2="870" y2="504" stroke="#e5e7ef" stroke-width="1.8"/>
+<line x1="854" y1="510" x2="870" y2="510" stroke="#e5e7ef" stroke-width="1.8"/>
+<line x1="854" y1="516" x2="870" y2="516" stroke="#e5e7ef" stroke-width="1.8"/>
+<line x1="372" y1="242" x2="250" y2="150" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="372" cy="242" r="4" fill="#ff9e64"/>
+<circle cx="250" cy="150" r="14" fill="#ff9e64"/><text x="250" y="155" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">1</text>
+<text x="228" y="148" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="end">Main area</text>
+<text x="228" y="167" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">Favourites to start with. Opens</text>
+<text x="228" y="183" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">artist, album and track pages,</text>
+<text x="228" y="199" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">search, settings.</text>
+<line x1="606" y1="444" x2="250" y2="330" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="606" cy="444" r="4" fill="#ff9e64"/>
+<circle cx="250" cy="330" r="14" fill="#ff9e64"/><text x="250" y="335" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">2</text>
+<text x="228" y="328" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="end">Search</text>
+<text x="228" y="347" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">Your analysed tracks or all of</text>
+<text x="228" y="363" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">Qobuz, from the same box.</text>
+<line x1="656" y1="456" x2="250" y2="440" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="656" cy="456" r="4" fill="#ff9e64"/>
+<circle cx="250" cy="440" r="14" fill="#ff9e64"/><text x="250" y="445" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">3</text>
+<text x="228" y="438" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="end">Map</text>
+<text x="228" y="457" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">Every analysed track as a dot.</text>
+<text x="228" y="473" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">Click one to see what it is,</text>
+<text x="228" y="489" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">click that to open it.</text>
+<line x1="352" y1="528" x2="250" y2="560" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="352" cy="528" r="4" fill="#ff9e64"/>
+<circle cx="250" cy="560" r="14" fill="#ff9e64"/><text x="250" y="565" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">4</text>
+<text x="228" y="558" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="end">Now playing</text>
+<text x="228" y="577" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">Cover, title, album and artist,</text>
+<text x="228" y="593" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">each opens its page.</text>
+<line x1="868" y1="172" x2="950" y2="150" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="868" cy="172" r="4" fill="#ff9e64"/>
+<circle cx="950" cy="150" r="14" fill="#ff9e64"/><text x="950" y="155" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">5</text>
+<text x="972" y="148" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Generate</text>
+<text x="972" y="167" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">The main tool. Pick a starting</text>
+<text x="972" y="183" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">track, a mode and how many,</text>
+<text x="972" y="199" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">then Generate. Play or queue</text>
+<text x="972" y="215" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">the result.</text>
+<line x1="858" y1="454" x2="950" y2="290" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="858" cy="454" r="4" fill="#ff9e64"/>
+<circle cx="950" cy="290" r="14" fill="#ff9e64"/><text x="950" y="295" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">6</text>
+<text x="972" y="288" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Tune the space</text>
+<text x="972" y="307" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Decide what “similar” means:</text>
+<text x="972" y="323" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">more tempo, less era, and so on.</text>
+<line x1="862" y1="510" x2="950" y2="520" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="862" cy="510" r="4" fill="#ff9e64"/>
+<circle cx="950" cy="520" r="14" fill="#ff9e64"/><text x="950" y="525" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">8</text>
+<text x="972" y="518" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Queue</text>
+<text x="972" y="537" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Drag to reorder, × to remove.</text>
+<text x="972" y="553" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">On a phone: long-press to drag,</text>
+<text x="972" y="569" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">swipe to remove.</text>
+<line x1="808" y1="510" x2="950" y2="400" stroke="#ff9e64" stroke-width="1.5"/>
+<circle cx="808" cy="510" r="4" fill="#ff9e64"/>
+<circle cx="950" cy="400" r="14" fill="#ff9e64"/><text x="950" y="405" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">7</text>
+<text x="972" y="398" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Volume</text>
+<text x="972" y="417" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Drag or scroll.</text>
+<rect x="40" y="620" width="1120" height="120" rx="12" fill="#1b1d26"/>
+<text x="64" y="652" font-size="17" fill="#e5e7ef" font-weight="bold" text-anchor="start">A first session</text>
+<circle cx="78" cy="690" r="14" fill="#7aa2f7"/><text x="78" y="695" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">1</text>
+<text x="102" y="680" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">Search for a song</text>
+<text x="102" y="698" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">you like, or click a</text>
+<text x="102" y="716" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">dot on the map</text>
+<line x1="276" y1="690" x2="320" y2="690" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="350" cy="690" r="14" fill="#7aa2f7"/><text x="350" y="695" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">2</text>
+<text x="374" y="680" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">Open it and check</text>
+<text x="374" y="698" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">it says “in space”,</text>
+<text x="374" y="716" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">or press fetch</text>
+<line x1="548" y1="690" x2="592" y2="690" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="622" cy="690" r="14" fill="#7aa2f7"/><text x="622" y="695" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">3</text>
+<text x="646" y="680" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">In Generate, choose</text>
+<text x="646" y="698" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">neighbours or radio</text>
+<text x="646" y="716" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">and press Generate</text>
+<line x1="820" y1="690" x2="864" y2="690" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<circle cx="894" cy="690" r="14" fill="#7aa2f7"/><text x="894" y="695" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">4</text>
+<text x="918" y="680" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">Play the list, then</text>
+<text x="918" y="698" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">tweak the sliders and</text>
+<text x="918" y="716" font-size="13" fill="#8b90a3" font-weight="normal" text-anchor="start">generate again</text>
+</svg>

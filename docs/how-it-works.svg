@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="580" viewBox="0 0 1200 580" font-family="system-ui, -apple-system, 'Segoe UI', Ubuntu, sans-serif">
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#8b90a3"/>
+  </marker>
+  <marker id="arrow-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#7aa2f7"/>
+  </marker>
+  <marker id="arrow-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M0,0 L10,5 L0,10 z" fill="#9ece6a"/>
+  </marker>
+  <marker id="arrow-orange" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M0,0 L10,5 L0,10 z" fill="#ff9e64"/>
+  </marker>
+</defs>
+<rect width="1200" height="580" fill="#12131a"/>
+<text x="40" y="52" font-size="28" fill="#e5e7ef" font-weight="bold" text-anchor="start">How 2kHz works</text>
+<text x="40" y="80" font-size="15" fill="#8b90a3" font-weight="normal" text-anchor="start">The server builds a map of your music once. Every device gets a copy and plays from Qobuz directly.</text>
+<rect x="30" y="116" width="170" height="380" rx="12" fill="#23262f"/>
+<text x="115" y="150" font-size="20" fill="#e5e7ef" font-weight="bold" text-anchor="middle">Qobuz</text>
+<text x="115" y="170" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">your subscription</text>
+<text x="115" y="205" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">artists, albums,</text>
+<text x="115" y="221" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">favourites</text>
+<text x="115" y="290" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">audio files</text>
+<rect x="250" y="116" width="480" height="380" rx="12" fill="#1b1d26"/>
+<text x="270" y="146" font-size="18" fill="#e5e7ef" font-weight="bold" text-anchor="start" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">two-khz-server</text>
+<text x="710" y="146" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">on your computer or a home server</text>
+<rect x="266" y="166" width="448" height="70" rx="10" fill="#23262f"/>
+<circle cx="294" cy="201.0" r="14" fill="#7aa2f7"/><text x="294" y="206.0" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">1</text>
+<text x="322" y="191" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Finds music</text>
+<text x="698" y="191" font-size="12" fill="#7aa2f7" font-weight="normal" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">crawl</text>
+<text x="322" y="210" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Starts from your favourites and spreads out</text>
+<text x="322" y="226" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">through similar artists.</text>
+<line x1="294" y1="216.0" x2="294" y2="267.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="266" y="248" width="448" height="70" rx="10" fill="#23262f"/>
+<circle cx="294" cy="283.0" r="14" fill="#7aa2f7"/><text x="294" y="288.0" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">2</text>
+<text x="322" y="273" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Listens to it</text>
+<text x="698" y="273" font-size="12" fill="#7aa2f7" font-weight="normal" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">analyse</text>
+<text x="322" y="292" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Takes the middle 90 seconds of each track and</text>
+<text x="322" y="308" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">measures tempo, key, loudness, timbre and mood.</text>
+<line x1="294" y1="298.0" x2="294" y2="349.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="266" y="330" width="448" height="70" rx="10" fill="#23262f"/>
+<circle cx="294" cy="365.0" r="14" fill="#7aa2f7"/><text x="294" y="370.0" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">3</text>
+<text x="322" y="355" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Places every track</text>
+<text x="698" y="355" font-size="12" fill="#7aa2f7" font-weight="normal" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">build-space</text>
+<text x="322" y="374" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">~80 numbers per track, so tracks that sound</text>
+<text x="322" y="390" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">alike end up close together.</text>
+<line x1="294" y1="380.0" x2="294" y2="431.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="266" y="412" width="448" height="70" rx="10" fill="#23262f"/>
+<circle cx="294" cy="447.0" r="14" fill="#7aa2f7"/><text x="294" y="452.0" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">4</text>
+<text x="322" y="437" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Draws the map</text>
+<text x="698" y="437" font-size="12" fill="#7aa2f7" font-weight="normal" text-anchor="end" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">layout</text>
+<text x="322" y="456" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Flattens the space to 2D so you can look at</text>
+<text x="322" y="472" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">it, coloured by genre.</text>
+<line x1="200" y1="201.0" x2="264" y2="201.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="200" y1="283.0" x2="264" y2="283.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<rect x="870" y="116" width="300" height="380" rx="12" fill="#1b1d26"/>
+<text x="890" y="146" font-size="18" fill="#e5e7ef" font-weight="bold" text-anchor="start">2kHz app</text>
+<text x="1150" y="146" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">desktop, Android</text>
+<rect x="886" y="166" width="268" height="130" rx="10" fill="#23262f"/>
+<circle cx="914" cy="191" r="14" fill="#ff9e64"/><text x="914" y="196" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">5</text>
+<text x="942" y="196" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Generate</text>
+<text x="942" y="218" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">neighbours · radio · path · drift</text>
+<text x="942" y="234" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start"></text>
+<text x="942" y="250" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Worked out on the device itself,</text>
+<text x="942" y="266" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">so moving a slider updates</text>
+<text x="942" y="282" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">the list instantly.</text>
+<rect x="886" y="308" width="268" height="70" rx="10" fill="#23262f"/>
+<circle cx="914" cy="333" r="14" fill="#7aa2f7"/><text x="914" y="338" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">6</text>
+<text x="942" y="338" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Browse</text>
+<text x="942" y="360" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">Favourites, search, the map,</text>
+<text x="942" y="376" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">artist and album pages.</text>
+<rect x="886" y="390" width="268" height="70" rx="10" fill="#23262f"/>
+<circle cx="914" cy="415" r="14" fill="#7aa2f7"/><text x="914" y="420" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">7</text>
+<text x="942" y="420" font-size="15" fill="#e5e7ef" font-weight="bold" text-anchor="start">Play</text>
+<text x="942" y="442" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="start">MP3 320, FLAC 16/44 or hi-res.</text>
+<line x1="734" y1="300" x2="866" y2="300" stroke="#7aa2f7" stroke-width="2.5" marker-end="url(#arrow-accent)"/>
+<text x="800.0" y="274" font-size="12" fill="#e5e7ef" font-weight="bold" text-anchor="middle">your map</text>
+<text x="800.0" y="289" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">is copied to</text>
+<text x="800.0" y="320" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">each device</text>
+<path d="M115,496 L115,540 L1020.0,540 L1020.0,500" fill="none" stroke="#9ece6a" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#arrow-a)"/>
+<rect x="317.5" y="527" width="500" height="26" fill="#12131a"/>
+<text x="567.5" y="545" font-size="13" fill="#9ece6a" font-weight="normal" text-anchor="middle">when you press play, the music streams from Qobuz straight to your device</text>
+</svg>
