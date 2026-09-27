@@ -161,6 +161,14 @@ pub fn client_data_dir() -> PathBuf {
         return dir;
     }
 
+    // Windows sets neither XDG_DATA_HOME nor HOME, so the fallback below would
+    // land in whatever directory the app was started from. Local rather than
+    // roaming: the synced space is too big to follow a profile around.
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(dir).join("two_khz");
+    }
+
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

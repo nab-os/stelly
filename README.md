@@ -307,6 +307,7 @@ on demand. A tag additionally opens a GitHub release with everything attached.
 |---|---|
 | Ubuntu 24.04 | `.deb`, `.AppImage`, `.tar.gz`, desktop and server separately |
 | Ubuntu 26.04 | the same, built on 26.04 |
+| Windows | x64 `-setup.exe` (per-user, no admin) and `.msi`, desktop only |
 | Android | one signed arm64 `.apk` |
 | Docker | `4gjr3z1t/2khz` and `ghcr.io/…/two-khz-server` |
 
