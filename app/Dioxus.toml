@@ -14,7 +14,12 @@ publisher = "two_khz"
 
 # Without these the bundler falls back to the stock Dioxus logo, and drops a
 # stray `.dx-default-icon.png` at the root of the .deb's filesystem.
+#
+# The .ico is the Windows executable's icon. It comes first because the Linux
+# bundlers decode it too, into its largest entry, the 256px PNG: listed before
+# that PNG, the real file lands on top of the copy.
 icon = [
+    "assets/icons/icon.ico",
     "assets/icons/32x32.png",
     "assets/icons/64x64.png",
     "assets/icons/128x128.png",
@@ -36,3 +41,9 @@ homepage = "https://github.com/nab-os/2kHz"
 [bundle.deb]
 section = "sound"
 priority = "optional"
+
+# The installer's icon. Not enough on its own: dx 0.7 hands this path to the
+# resource compiler as written, relative to nothing in particular, so the
+# executable takes its icon from the list above, which it does resolve.
+[bundle.windows]
+icon_path = "assets/icons/icon.ico"
