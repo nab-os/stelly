@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use two_khz::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, FULL_RUN};
+use two_khz::api::{BlockedArtist, Catalogued, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, FULL_RUN};
 use two_khz::logbuffer::LogBuffer;
 
 pub struct Hub {
@@ -286,6 +286,10 @@ impl Hub {
 
     pub async fn corpus(&self) -> Result<Corpus> {
         stages::corpus(&self.db_path)
+    }
+
+    pub async fn catalogued(&self, ids: &[String]) -> Result<Catalogued> {
+        stages::catalogued(&self.db_path, ids)
     }
 
     // -------------------------------------------------------------- crawling

@@ -5,7 +5,7 @@
 //! the sliders stay local. Audio does not proxy.
 
 use crate::api::{
-    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope,
+    ApiError, BlockedArtist, Catalogued, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope,
     Stage, SyncManifest,
 };
 use crate::session::{Command, Session, Update};
@@ -342,6 +342,14 @@ impl Remote {
             .post(&format!("/api/albums/{}/fetch", urlencode(album_id)), &())
             .await?;
         Ok(done.count)
+    }
+
+    pub async fn catalogued(&self, ids: &[String]) -> Result<Catalogued> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            ids: &'a [String],
+        }
+        self.post("/api/catalogue/albums", &Body { ids }).await
     }
 
     pub async fn corpus(&self) -> Result<Corpus> {

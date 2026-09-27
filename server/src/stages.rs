@@ -6,11 +6,11 @@
 
 use crate::pipeline::{analyse, assemble, layout, Job, Paths};
 use crate::qobuz::RateLimit;
-use crate::schema::{failures, features, frontier, tracks};
+use crate::schema::{albums, failures, features, frontier, tracks};
 use anyhow::{bail, Result};
 use diesel::prelude::*;
 use std::path::Path;
-use two_khz::api::{Corpus, Stage};
+use two_khz::api::{Catalogued, Corpus, Stage};
 
 /// Run one terminating stage to completion. Analyse holds a blocking database
 /// connection across awaits, so drive it on a thread of its own.
@@ -59,4 +59,19 @@ pub fn corpus(db_path: &Path) -> Result<Corpus> {
         in_space: 0,
         on_map: 0,
     })
+}
+
+/// Which of `ids` the catalogue holds, listed and with a tracklist.
+pub fn catalogued(db_path: &Path, ids: &[String]) -> Result<Catalogued> {
+    let conn = &mut crate::db::open_for_write(db_path)?;
+    let listed = albums::table
+        .filter(albums::id.eq_any(ids))
+        .select(albums::id)
+        .load(conn)?;
+    let tracked = tracks::table
+        .filter(tracks::album_id.eq_any(ids))
+        .select(tracks::album_id.assume_not_null())
+        .distinct()
+        .load(conn)?;
+    Ok(Catalogued { listed, tracked })
 }
