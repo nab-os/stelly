@@ -517,14 +517,9 @@ fn seek(player: Player, position: f64) {
     commit(player, Op::Seek { position });
 }
 
-/// Send the sound to another device.
-fn send_output(player: Player, device_id: i64) {
-    commit(
-        player,
-        Op::Output {
-            device_id: Some(device_id),
-        },
-    );
+/// Send the sound to another device, or nowhere.
+fn send_output(player: Player, device_id: Option<i64>) {
+    commit(player, Op::Output { device_id });
 }
 
 fn clock(seconds: f64) -> String {
@@ -678,7 +673,11 @@ pub fn PlayerBar() -> Element {
                             return;
                         }
                         let step = if dy < 0.0 { 0.05 } else { -0.05 };
-                        set_volume(*player.volume.peek() + step);
+                        // Read into a local first: a guard held as a call
+                        // argument lives through the call, and `set_volume`
+                        // writes the same signal.
+                        let level = *player.volume.peek() + step;
+                        set_volume(level);
                     },
                     button {
                         class: "icon-btn",
@@ -772,13 +771,26 @@ fn OutputPicker() -> Element {
                             key: "{device.device_id}",
                             class: if output == Some(device.device_id) { "menu-item checked" } else { "menu-item" },
                             onclick: move |_| {
-                                send_output(player, device.device_id);
+                                send_output(player, Some(device.device_id));
                                 open.set(false);
                             },
                             "{device.name}"
                             if device.device_id == me {
                                 span { class: "muted", " · this device" }
                             }
+                        }
+                    }
+                    // Stops the sound everywhere; the queue and the position
+                    // stay for whichever device plays next.
+                    if output.is_some() {
+                        div { class: "menu-rule" }
+                        button {
+                            class: "menu-item danger",
+                            onclick: move |_| {
+                                send_output(player, None);
+                                open.set(false);
+                            },
+                            "disconnect"
                         }
                     }
                 }
