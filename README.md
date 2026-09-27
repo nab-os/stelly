@@ -8,11 +8,20 @@ a direction you describe in words.
 Qobuz's API returns metadata only (no BPM, no key, no energy), so the acoustic
 half of every vector is computed from the audio itself.
 
-![The 2kHz desktop app](docs/screenshot.png)
+![Favourites in the 2kHz desktop app](docs/favourites.png)
 
-The library on the left, the space in the middle, a UMAP projection of 28,543
-tracks, with the selection's nearest neighbours drawn over it, and on the
-right, what that selection generated.
+Your favourites in the main area, the generate panel always on the right, and
+the player along the bottom. The two round buttons open search and the map.
+
+![The map of the space](docs/map.png)
+
+The map: a UMAP projection of every analysed track, coloured by genre, over
+the main area while the generate panel stays beside it.
+
+<img src="docs/phone.png" alt="The narrow, phone-sized layout" width="320">
+
+On a narrow screen the generate panel slides in from the right over the main
+area, from its own floating button.
 
 ## Shape of the system
 

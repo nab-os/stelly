@@ -14,7 +14,7 @@
 use super::generate::{Generator, Mode, PathEnd};
 use super::library::{request_analysis, Library};
 use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
-use super::{open_track, space_track, Blocklist, Detail, LocalIds, MapView, Selection};
+use super::{open_remote_track, space_track, Blocklist, LocalIds, MapView, Selection};
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
 use dioxus::core::spawn_forever;
@@ -189,7 +189,6 @@ fn ShelfTrackItems(index: usize) -> Element {
     let blocklist = use_context::<Blocklist>();
     let local = use_context::<LocalIds>();
     let selection = use_context::<Selection>().0;
-    let mut detail = use_context::<Detail>().0;
     let menu = use_context::<ContextMenu>().0;
     let map = use_context::<MapView>();
 
@@ -242,6 +241,18 @@ fn ShelfTrackItems(index: usize) -> Element {
             },
             "Add to queue"
         }
+        // A click on the row plays it, so the page is reached from here.
+        button {
+            class: "menu-item",
+            onclick: {
+                let track = track.clone();
+                move |_| {
+                    open_remote_track(library, selection, &local, track.clone());
+                    menu.set(None);
+                }
+            },
+            "Details"
+        }
 
         // Only for tracks the space actually holds. The rest of Qobuz has no
         // coordinates, so there is nothing to walk away from.
@@ -254,10 +265,6 @@ fn ShelfTrackItems(index: usize) -> Element {
                     // Browse, not route: this is one track, so nothing is
                     // dimmed and the rest of the space stays legible.
                     map.browse();
-                    // Closes rather than opens: the point is to see the map,
-                    // and a sheet on top of it would defeat that, the same
-                    // reason the sheet's own "On the map" button closes it.
-                    detail.set(None);
                     menu.set(None);
                 },
                 "Show on the map"
@@ -444,6 +451,9 @@ fn ShelfArtistItems(index: usize, similar: bool) -> Element {
 #[component]
 fn QueueItems(index: usize) -> Element {
     let player = use_context::<Player>();
+    let library = use_context::<Library>();
+    let local = use_context::<LocalIds>();
+    let selection = use_context::<Selection>().0;
     let menu = use_context::<ContextMenu>().0;
 
     let track = player.queue.read().get(index).cloned();
@@ -459,6 +469,19 @@ fn QueueItems(index: usize) -> Element {
         div { class: "menu-head",
             span { class: "title", "{track.title}" }
             span { class: "muted", "{track.artist}" }
+        }
+        button {
+            class: "menu-item",
+            onclick: {
+                let track = track.clone();
+                move |_| {
+                    let mut queue_open = player.queue_open;
+                    queue_open.set(false);
+                    open_remote_track(library, selection, &local, track.clone());
+                    menu.set(None);
+                }
+            },
+            "Details"
         }
         if !playing {
             button {
@@ -517,8 +540,7 @@ fn QueueItems(index: usize) -> Element {
 #[component]
 fn GenerationItems(track_id: i64) -> Element {
     let generator = use_context::<Generator>();
-    let selection = use_context::<Selection>().0;
-    let detail = use_context::<Detail>().0;
+    let mut selection = use_context::<Selection>().0;
     let mut menu = use_context::<ContextMenu>().0;
 
     // Path's second end is only worth offering once a first one exists, and
@@ -530,9 +552,8 @@ fn GenerationItems(track_id: i64) -> Element {
         button {
             class: "menu-item",
             onclick: move |_| {
-                // Opens the sheet too, so the result of asking is somewhere
-                // to look.
-                open_track(selection, detail, track_id);
+                // The seed the panel shows, above the result this makes.
+                selection.set(Some(track_id));
                 generator.request(Mode::Neighbours, track_id);
                 menu.set(None);
             },
@@ -541,7 +562,7 @@ fn GenerationItems(track_id: i64) -> Element {
         button {
             class: "menu-item",
             onclick: move |_| {
-                open_track(selection, detail, track_id);
+                selection.set(Some(track_id));
                 generator.request(Mode::Radio, track_id);
                 menu.set(None);
             },
@@ -578,7 +599,7 @@ fn GenerationItems(track_id: i64) -> Element {
             onclick: move |_| {
                 // Deliberately does not run: drift still needs a phrase, and
                 // inventing one would be inventing the intent.
-                open_track(selection, detail, track_id);
+                selection.set(Some(track_id));
                 generator.aim_drift();
                 menu.set(None);
             },
@@ -591,7 +612,6 @@ fn GenerationItems(track_id: i64) -> Element {
 fn SpaceTrackItems(track_id: i64) -> Element {
     let player = use_context::<Player>();
     let selection = use_context::<Selection>().0;
-    let mut detail = use_context::<Detail>().0;
     let menu = use_context::<ContextMenu>().0;
     let map = use_context::<MapView>();
 
@@ -612,9 +632,6 @@ fn SpaceTrackItems(track_id: i64) -> Element {
             onclick: move |_| {
                 selection.set(Some(track_id));
                 map.browse();
-                // See `ShelfTrackItems`' identical line: the point here is
-                // the map, and a sheet on top of it would hide it again.
-                detail.set(None);
                 menu.set(None);
             },
             "Show on the map"

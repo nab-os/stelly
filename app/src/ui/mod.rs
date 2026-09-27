@@ -6,22 +6,24 @@
 
 pub mod crawler;
 pub mod generate;
+pub mod icons;
 pub mod library;
 pub mod menu;
 pub mod pipeline;
 pub mod player;
 pub mod queue;
-pub mod sheet;
+pub mod screens;
+pub mod settings;
+pub mod side;
 
 pub use crawler::Crawler;
 pub use generate::Generator;
-pub use library::{open_initial, Library, LibraryPanel};
+pub use library::{open_initial, Library, MainScreen, View};
 pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
-pub use pipeline::{Pipeline, PipelineView};
-pub use player::{use_transport, FullPlayer, Player, PlayerBar};
+pub use pipeline::Pipeline;
+pub use player::{use_transport, Player, PlayerBar};
 pub use queue::QueueView;
-pub use sheet::{DetailSheet, PathPill};
-pub(crate) use sheet::{AlbumDetail, ArtistDetail};
+pub use side::{GeneratePanel, PathPill};
 
 use dioxus::prelude::*;
 use crate::api::BlockedArtist;
@@ -62,31 +64,14 @@ pub(crate) fn space_mark(in_space: bool) -> Element {
 }
 
 /// The map/generator's notion of "the track in hand", what a neighbours
-/// walk starts from, what the map highlights, what a path's A/B buttons
-/// name. Track-only, and only ever a space track: nothing else has
-/// coordinates to select.
+/// walk starts from, what the map highlights and pins its card to. Track-only,
+/// and only ever a space track: nothing else has coordinates to select.
 ///
-/// This used to also be the detail sheet's open flag, which is what made
-/// "close the sheet, keep the point highlighted on the map" impossible,
-/// the only way to dim the sheet was to deselect, and deselecting is what
-/// the map reads to know what to highlight. `Detail` is the sheet's own flag
-/// now; the two move together almost everywhere (see `open_track`) except
-/// the one place that needed them not to.
+/// Separate from what the main area shows: picking a point on the map selects
+/// it without leaving the map, and the generate panel keeps its seed while you
+/// browse somewhere else entirely.
 #[derive(Clone, Copy)]
 pub struct Selection(pub Signal<Option<i64>>);
-
-/// What the detail sheet is showing, if anything, a track (the space's or
-/// Qobuz's; nothing here requires the space), an album, or an artist.
-/// Independent of `Selection`; see its doc comment for why.
-#[derive(Clone, PartialEq)]
-pub enum DetailSubject {
-    Track(RemoteTrack),
-    Album(RemoteAlbum),
-    Artist(RemoteArtist),
-}
-
-#[derive(Clone, Copy)]
-pub struct Detail(pub Signal<Option<DetailSubject>>);
 
 /// A space track, as something to display or play. `None` when the id names
 /// nothing the space currently holds, selected, then the space was rebuilt
@@ -97,19 +82,39 @@ pub(crate) fn space_track(track_id: i64) -> Option<RemoteTrack> {
     Some(generate::as_remote(guard.navigator.catalog.get(row)))
 }
 
-/// Select a space track for the map and the generator, and open its detail
-/// sheet, the one action several different surfaces (a row, a map point, a
-/// menu item) all mean by "look at this track". Every one of them used to be
-/// a bare `selection.set(Some(id))`, back when that alone opened the sheet.
-///
-/// Not used by the sheet's own "On the map" button, which is the one place
-/// `Selection` and `Detail` are meant to move separately, see `Selection`'s
-/// doc comment.
-pub fn open_track(mut selection: Signal<Option<i64>>, mut detail: Signal<Option<DetailSubject>>, track_id: i64) {
+/// Select a space track for the map and the generator, and open its details
+/// in the main area, what a space row, a generated row and the map's card all
+/// mean by "look at this track".
+pub fn open_track(library: Library, mut selection: Signal<Option<i64>>, track_id: i64) {
     selection.set(Some(track_id));
     if let Some(track) = space_track(track_id) {
-        detail.set(Some(DetailSubject::Track(track)));
+        library.go(View::Track(track));
     }
+}
+
+/// A track's own details page, for a track that did not come from the space.
+/// Selects it too when the space holds it, so the generate panel and the map
+/// follow along.
+pub(crate) fn open_remote_track(library: Library, mut selection: Signal<Option<i64>>, local: &LocalIds, track: RemoteTrack) {
+    if local.0.peek().contains(&track.id) {
+        selection.set(Some(track.id));
+    }
+    library.go(View::Track(track));
+}
+
+/// The album a track sits on, as much of it as the track knows. The album page
+/// fetches the tracklist itself; the cover is assembled from the id.
+pub(crate) fn album_of(track: &RemoteTrack) -> Option<RemoteAlbum> {
+    let id = track.album_id.clone()?;
+    Some(RemoteAlbum {
+        image: crate::qobuz::cover_url(&id).or_else(|| track.image.clone()),
+        id,
+        title: track.album.clone(),
+        artist: track.artist.clone(),
+        artist_id: track.artist_id,
+        released: track.released.clone(),
+        ..Default::default()
+    })
 }
 
 /// The dimension weight sliders' values, keyed by block name. A context
@@ -150,8 +155,9 @@ impl Default for Search {
     }
 }
 
-/// The map overlay's state, so anything that wants to show something on the
-/// map can open it without the shell threading callbacks down to it.
+/// The map's state, so anything that wants to show something on the map can
+/// open it without the shell threading callbacks down to it. The map covers
+/// the main area, never the generate panel beside it.
 #[derive(Clone, Copy)]
 pub struct MapView {
     pub map_open: Signal<bool>,
@@ -174,17 +180,20 @@ impl MapView {
         self.map_open.set(true);
     }
 
-    /// For the one persistent map button (the player bar's): open it if it
-    /// is not showing, close it if it is. Every other caller wants `browse`
-    /// or `show_route`'s one-way "definitely open it", asking to see a
-    /// track on the map should never accidentally close a map that was
-    /// already open on something else.
+    /// For the floating map button: open it if it is not showing, close it if
+    /// it is. Every other caller wants `browse` or `show_route`'s one-way
+    /// "definitely open it", asking to see a track on the map should never
+    /// accidentally close a map that was already open on something else.
     pub fn toggle(mut self) {
-        if *self.map_open.read() {
+        if *self.map_open.peek() {
             self.map_open.set(false);
         } else {
             self.browse();
         }
+    }
+
+    pub fn close(mut self) {
+        self.map_open.set(false);
     }
 }
 
@@ -203,22 +212,21 @@ pub struct SpaceRow {
     pub album_id: String,
 }
 
-/// Open an artist's detail from just the id and name a row already carries.
-/// `albums_count` and a portrait are left `None`; `ArtistDetail` renders fine
-/// without them, and the discography it fetches is what the sheet is for.
-pub(crate) fn open_artist(mut detail: Signal<Option<DetailSubject>>, id: i64, name: String) {
-    detail.set(Some(DetailSubject::Artist(RemoteArtist {
+/// Open an artist's page from just the id and name a row already carries. The
+/// page fetches the portrait and biography itself.
+pub(crate) fn open_artist(library: Library, id: i64, name: String) {
+    library.go(View::Artist(RemoteArtist {
         id,
         name,
         ..Default::default()
-    })));
+    }));
 }
 
-/// An artist's name as a way to their detail sheet, wherever one appears,
-/// a library row or tile, a queue entry, the player. Almost all of those
-/// already have a click of their own (play the row, open the album, open
-/// "now playing"), hence `stop_propagation`: the name does its own thing and
-/// not the row's as well. Plain text when there is no id to go to.
+/// An artist's name as a way to their page, wherever one appears, a library
+/// row or tile, a queue entry, the player. Almost all of those already have a
+/// click of their own (play the row, open the album), hence
+/// `stop_propagation`: the name does its own thing and not the row's as well.
+/// Plain text when there is no id to go to.
 ///
 /// The link is its own span inside the column one: `.artist` is held to a
 /// minimum width so list rows line up, and with the handler on that span the
@@ -226,12 +234,7 @@ pub(crate) fn open_artist(mut detail: Signal<Option<DetailSubject>>, id: i64, na
 ///
 /// A function, not a component, for the same reason as `menu_button`: no
 /// hooks, and a props struct per row is not worth it.
-pub(crate) fn artist_link(
-    detail: Signal<Option<DetailSubject>>,
-    id: Option<i64>,
-    name: String,
-    class: &'static str,
-) -> Element {
+pub(crate) fn artist_link(library: Library, id: Option<i64>, name: String, class: &'static str) -> Element {
     match id {
         Some(id) => rsx! {
             span { class: "{class}",
@@ -242,7 +245,7 @@ pub(crate) fn artist_link(
                         let name = name.clone();
                         move |event: Event<MouseData>| {
                             event.stop_propagation();
-                            open_artist(detail, id, name.clone());
+                            open_artist(library, id, name.clone());
                         }
                     },
                     "{name}"
@@ -250,6 +253,27 @@ pub(crate) fn artist_link(
             }
         },
         None => rsx! { span { class: "{class}", "{name}" } },
+    }
+}
+
+/// As `artist_link`, for the album a track sits on.
+pub(crate) fn album_link(library: Library, track: &RemoteTrack, class: &'static str) -> Element {
+    let name = track.album.clone();
+    match album_of(track) {
+        Some(album) if !name.is_empty() => rsx! {
+            span { class: "{class}",
+                span {
+                    class: "clickable",
+                    title: "open {name}",
+                    onclick: move |event: Event<MouseData>| {
+                        event.stop_propagation();
+                        library.go(View::Album(album.clone()));
+                    },
+                    "{name}"
+                }
+            }
+        },
+        _ => rsx! { span { class: "{class}", "{name}" } },
     }
 }
 

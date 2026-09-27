@@ -1,12 +1,13 @@
 //! The play queue, as a drawer above the player bar.
 //!
-//! Reordering is by up/down rather than drag: a drag needs pointer capture and
-//! an autoscroll to be usable, and neither survives contact with a touch
-//! screen. Two buttons work identically everywhere.
+//! Opened and closed by the player's queue button; on a phone it also has a
+//! handle to drag it back down by. Rows reorder by dragging (after a long
+//! press, on a touch screen), and leave by a swipe or the red cross that
+//! shows on hover. The gestures live in `queue-drag.js`.
 
-use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
-use super::player::{clear_queue, move_to, play_at, Player};
-use super::{artist_link, Cover, Detail};
+use super::menu::{open_menu, ContextMenu, MenuTarget};
+use super::player::{clear_queue, move_to, play_at, remove_at, Player};
+use super::{album_link, artist_link, icons, Cover, Library};
 use crate::engine;
 use crate::qobuz::RemoteTrack;
 use dioxus::prelude::*;
@@ -71,19 +72,30 @@ fn sort_queue(mut player: Player) {
 #[component]
 pub fn QueueView() -> Element {
     let player = use_context::<Player>();
+    let library = use_context::<Library>();
     let mut queue_open = player.queue_open;
     let mut menu = use_context::<ContextMenu>().0;
-    let detail = use_context::<Detail>().0;
 
     // Long-lived: this component stays mounted whether or not the drawer is
-    // open, so the channel outlives any one drag. The script delegates from
-    // the document, so it does not care that the list comes and goes.
+    // open, so the channel outlives any one gesture. The script delegates
+    // from the document, so it does not care that the rows come and go.
     use_future(move || async move {
         let mut handle = document::eval(include_str!("../../assets/queue-drag.js"));
         while let Ok(message) = handle.recv::<serde_json::Value>().await {
             let at = |key| message.get(key).and_then(|v| v.as_u64()).map(|v| v as usize);
-            if let (Some(from), Some(to)) = (at("from"), at("to")) {
-                move_to(player, from, to);
+            match message.get("type").and_then(|v| v.as_str()) {
+                Some("move") => {
+                    if let (Some(from), Some(to)) = (at("from"), at("to")) {
+                        move_to(player, from, to);
+                    }
+                }
+                Some("remove") => {
+                    if let Some(index) = at("index") {
+                        remove_at(player, index);
+                    }
+                }
+                Some("close") => queue_open.set(false),
+                _ => {}
             }
         }
     });
@@ -93,64 +105,70 @@ pub fn QueueView() -> Element {
     let total = queue.len();
 
     rsx! {
-        if queue_open() {
-            section { class: "panel queue-drawer",
+        // Always mounted, so opening and closing can slide rather than pop.
+        section { class: if queue_open() { "panel queue-drawer open" } else { "panel queue-drawer" },
+            // Phone only: dragged down, or tapped, it closes the drawer.
+            div { class: "drawer-handle", title: "close" }
+
+            div { class: "queue-head",
                 h2 {
                     "Queue"
                     span { class: "muted", "{total} tracks" }
-                    span { class: "spacer" }
-                    button {
-                        class: "chip",
-                        title: "reorder what follows by the shortest route through the space",
-                        disabled: total < current + 3,
-                        onclick: move |_| sort_queue(player),
-                        "sort by distance"
-                    }
-                    button {
-                        class: "chip danger",
-                        title: "empty the queue and stop",
-                        disabled: total == 0,
-                        onclick: move |_| clear_queue(player),
-                        "clear"
-                    }
-                    button {
-                        class: "chip",
-                        onclick: move |_| queue_open.set(false),
-                        "close"
-                    }
                 }
+                span { class: "spacer" }
+                button {
+                    class: "chip",
+                    title: "reorder what follows by the shortest route through the space",
+                    disabled: total < current + 3,
+                    onclick: move |_| sort_queue(player),
+                    "sort by distance"
+                }
+                button {
+                    class: "chip danger",
+                    title: "empty the queue and stop",
+                    disabled: total == 0,
+                    onclick: move |_| clear_queue(player),
+                    "clear"
+                }
+            }
 
-                if total == 0 {
-                    p { class: "muted", "Nothing queued." }
-                } else {
-                    ol { class: "list queue-list",
-                        for (index, track) in queue.into_iter().enumerate() {
-                            li {
-                                key: "{index}-{track.id}",
-                                class: if index == current { "row playing" } else { "row" },
-                                onclick: move |_| {
-                                    spawn(async move { play_at(player, index).await });
-                                },
-                                "data-menu": MenuTarget::QueueEntry(index).tag(),
-                                oncontextmenu: move |event: Event<MouseData>| {
-                                    event.prevent_default();
-                                    open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));
-                                },
-                                Cover { url: track.image.clone(), class: "thumb" }
-                                {artist_link(detail, track.artist_id, track.artist.clone(), "artist")}
+            if total == 0 {
+                p { class: "muted", "Nothing queued." }
+            } else {
+                ol { class: "queue-list",
+                    for (index, track) in queue.into_iter().enumerate() {
+                        li {
+                            key: "{index}-{track.id}",
+                            class: if index == current { "queue-row playing" } else { "queue-row" },
+                            onclick: move |_| {
+                                spawn(async move { play_at(player, index).await });
+                            },
+                            // Right-click only: a long press here starts a
+                            // drag, see queue-drag.js.
+                            oncontextmenu: move |event: Event<MouseData>| {
+                                event.prevent_default();
+                                open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));
+                            },
+                            Cover { url: track.image.clone(), class: "thumb" }
+                            div { class: "queue-text",
                                 span { class: "title", "{track.title}" }
-                                span { class: "muted", "{track.duration_label()}" }
-                                // The drag handle. Only this has
-                                // `touch-action: none`, so a drag anywhere
-                                // else on the row still scrolls the list.
-                                // Precise moves stay in the menu.
-                                span {
-                                    class: "queue-grip",
-                                    title: "drag to reorder",
-                                    onclick: move |event| event.stop_propagation(),
-                                    "⠿"
+                                div { class: "queue-sub",
+                                    {artist_link(library, track.artist_id, track.artist.clone(), "muted")}
+                                    if !track.album.is_empty() {
+                                        span { class: "muted", "·" }
+                                        {album_link(library, &track, "muted")}
+                                    }
                                 }
-                                {menu_button(menu, MenuTarget::QueueEntry(index))}
+                            }
+                            span { class: "muted duration", "{track.duration_label()}" }
+                            button {
+                                class: "queue-remove",
+                                title: "remove from the queue",
+                                onclick: move |event: Event<MouseData>| {
+                                    event.stop_propagation();
+                                    remove_at(player, index);
+                                },
+                                {icons::close()}
                             }
                         }
                     }

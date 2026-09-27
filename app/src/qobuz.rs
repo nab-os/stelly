@@ -112,6 +112,10 @@ pub struct RemoteArtist {
     /// listing has one; everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
+    /// Qobuz's biography, as plain text. Only `artist/get` sends one, so only
+    /// the artist page ever has it.
+    #[serde(default)]
+    pub biography: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -339,8 +343,50 @@ impl RemoteArtist {
             albums_count: as_i64(value, "albums_count"),
             image: image(value),
             liked_at: as_i64(value, "favorited_at"),
+            biography: value
+                .get("biography")
+                .and_then(|bio| text(bio, "content"))
+                .map(|html| plain_text(&html))
+                .filter(|bio| !bio.is_empty()),
         })
     }
+}
+
+/// Qobuz biographies are HTML. Tags are dropped, a `<br>` or a closing `</p>`
+/// becomes a line break, and the handful of entities it uses are decoded.
+fn plain_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let Some(end) = rest[start..].find('>') else {
+            rest = "";
+            break;
+        };
+        let tag = rest[start + 1..start + end].trim().to_ascii_lowercase();
+        if tag.starts_with("br") || tag == "/p" {
+            out.push('\n');
+        }
+        rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+
+    let out = out
+        .replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+
+    // One paragraph per line; the blank ones nested block tags leave behind
+    // are dropped.
+    out.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 impl RemotePlaylist {
@@ -477,5 +523,11 @@ mod tests {
         // Too short to split, so there is nothing to guess from.
         assert_eq!(cover_url("12"), None);
         assert_eq!(cover_url(""), None);
+    }
+
+    #[test]
+    fn a_biography_loses_its_markup_but_keeps_its_paragraphs() {
+        let html = "<p>Born in <b>Leeds</b>&nbsp;in 1971.</p><p></p><p>Tom &amp; Jerry<br/>again</p>";
+        assert_eq!(plain_text(html), "Born in Leeds in 1971.\nTom & Jerry\nagain");
     }
 }

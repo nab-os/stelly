@@ -6,11 +6,11 @@
 use crate::backend::{self, backend};
 use crate::qobuz::FORMAT_MP3_320;
 use crate::ui::{
-    open_track, Blocklist, ContextMenu, ContextMenuView, Crawler, Detail, DetailSheet, FullPlayer,
-    Generator, Library, LibraryPanel, LocalIds, MapView, PathPill, Pipeline, PipelineView, Player,
-    PlayerBar, QueueView, Search, Selection, SpaceMatches, SpaceReach, SpaceRow, Weights,
+    icons, space_track, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel,
+    Generator, Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar,
+    QueueView, Search, Selection, SpaceMatches, SpaceReach, SpaceRow, View, Weights,
 };
-use crate::{engine, map, ServerConfig, Wiring};
+use crate::{engine, map, Wiring};
 use crate::ui::library::{names_track, Sort};
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
@@ -81,57 +81,6 @@ pub async fn sync_and_load() -> anyhow::Result<()> {
     crate::init_engine(&data_dir, &db_path)
 }
 
-/// The one search box.
-///
-/// Its own component, and deliberately propless, so Dioxus memoises it: it
-/// then re-renders when the text changes and at no other time.
-///
-/// That is not tidiness, it is the fix for a real bug. A controlled input in
-/// a webview is a race, the keystroke travels to Rust, a render patches
-/// `value` back into the DOM, and whatever was typed in the meantime is
-/// overwritten. Inside `Shell` this box re-rendered whenever anything else
-/// did, including when a search result landed, which is precisely when you
-/// are still typing. Characters went missing.
-#[component]
-fn SearchBox() -> Element {
-    let library = use_context::<Library>();
-    let search = use_context::<Search>();
-    let mut query = search.text;
-
-    rsx! {
-        div { class: "search-wrap header-search",
-            input {
-                class: "search",
-                placeholder: "artist, title or album, any order",
-                value: "{query}",
-                oninput: move |e| query.set(e.value()),
-                // Enter skips the debounce. The local list has already
-                // filtered; this is impatience with the round trip, and
-                // answering it late would be worse than not offering it.
-                onkeydown: move |event| {
-                    if event.key() != Key::Enter {
-                        return;
-                    }
-                    let mut search = search;
-                    let text = search.text.peek().trim().to_string();
-                    if text.is_empty() || text == *search.submitted.peek() {
-                        return;
-                    }
-                    search.submitted.set(text.clone());
-                    library.search_to(text);
-                },
-            }
-            if !query().is_empty() {
-                button {
-                    class: "clear-search",
-                    title: "clear",
-                    onclick: move |_| query.set(String::new()),
-                    "×"
-                }
-            }
-        }
-    }
-}
 
 /// The root: either the app, or the screen that gets you to the app.
 ///
@@ -249,163 +198,38 @@ fn Setup(ready: Signal<bool>) -> Element {
     }
 }
 
-/// Where the server address and token can be changed after the first run.
+/// The selected point's card on the map: cover, title, album, artist, and the
+/// way to the track's page. map.js pins it over the point on every frame, so
+/// it rides along with a pan or a zoom at the same size on screen.
 ///
-/// Saves and asks for a restart rather than reconnecting in place: the
-/// backend could be swapped, but the space the engine has mapped, the loaded
-/// catalogue and every panel's state all came from the old server.
+/// Rendered whenever the map is, empty when nothing is selected, because
+/// map.js looks it up by id and owns its position and visibility; a card
+/// that came and went would lose both between frames.
 #[component]
-fn Settings(open: Signal<bool>) -> Element {
-    let stored = use_signal(ServerConfig::load);
-    let mut address = use_signal(|| {
-        stored
-            .peek()
-            .as_ref()
-            .map(|c| c.base.clone())
-            .unwrap_or_else(|| "http://".into())
-    });
-    let mut token = use_signal(|| {
-        stored
-            .peek()
-            .as_ref()
-            .map(|c| c.token.clone())
-            .unwrap_or_default()
-    });
-    let mut status = use_signal(|| None::<String>);
+fn MapCard() -> Element {
+    let library = use_context::<Library>();
+    let map = use_context::<MapView>();
+    let selected = use_context::<Selection>().0;
 
-    let save = move |_| {
-        let base = address.peek().trim().trim_end_matches('/').to_string();
-        let secret = token.peek().trim().to_string();
-        if base.is_empty() || secret.is_empty() {
-            status.set(Some("Both the address and the token are needed.".into()));
-            return;
-        }
-
-        let config = ServerConfig {
-            base,
-            token: secret,
-        };
-        match config.save() {
-            Ok(()) => status.set(Some(
-                "Saved. Restart 2kHz to connect to it, the running process keeps the \
-                 server it started with."
-                    .into(),
-            )),
-            Err(err) => status.set(Some(format!("could not save: {err:#}"))),
-        }
-    };
-
-    let forget = move |_| {
-        match ServerConfig::clear() {
-            Ok(()) => {
-                address.set("http://".into());
-                token.set(String::new());
-                status.set(Some(
-                    "Pairing forgotten. Restart 2kHz to pair with a server again."
-                        .into(),
-                ));
-            }
-            Err(err) => status.set(Some(format!("could not clear the pairing: {err:#}"))),
-        }
-    };
+    let track = selected().and_then(space_track);
+    let target = track.clone();
 
     rsx! {
         div {
-            class: "modal-backdrop",
-            // Only a click that started and ended on the backdrop closes it,
-            // which a click landing on the panel does not.
-            onclick: move |_| open.set(false),
-
-            div {
-                class: "panel setup modal",
-                onclick: move |event| event.stop_propagation(),
-
-                h1 { "Settings" }
-                p { class: "muted",
-                    "Playing through a server. The space itself is navigated on this device."
+            id: "map-card",
+            class: "map-card",
+            onclick: move |_| {
+                if let Some(track) = target.clone() {
+                    map.close();
+                    library.go(View::Track(track));
                 }
-
-                label { "Server address" }
-                input {
-                    class: "search",
-                    placeholder: "http://nas.tailnet.ts.net:7700",
-                    value: "{address}",
-                    oninput: move |event| address.set(event.value()),
-                }
-
-                label { "Device token" }
-                input {
-                    class: "search",
-                    placeholder: "what `pair` printed",
-                    value: "{token}",
-                    oninput: move |event| token.set(event.value()),
-                }
-                p { class: "muted",
-                    "Pair a device on the server with "
-                    code { "two-khz-server pair --name phone --scope play" }
-                    "."
-                }
-
-                div { class: "actions",
-                    button { class: "primary", onclick: save, "save" }
-                    button { onclick: forget, "forget pairing" }
-                    span { class: "spacer" }
-                    button { onclick: move |_| open.set(false), "close" }
-                }
-
-                if let Some(message) = status.read().clone() {
-                    pre { class: "log", "{message}" }
-                }
-
-                HiddenArtists {}
-            }
-        }
-    }
-}
-
-/// The block list, with a way out of it. Used to sit at the foot of the
-/// browse column, riding along under whatever the shelf happened to be
-/// showing; a list you check on rarely is a settings-panel thing, not a
-/// permanent fixture of the screen a session spends the rest of its time in.
-#[component]
-fn HiddenArtists() -> Element {
-    let blocklist = use_context::<Blocklist>();
-    let hidden = blocklist.artists.read().clone();
-
-    // Collapsed by default: this list grows without bound, 115 entries on a
-    // well-used corpus.
-    let mut open = use_signal(|| false);
-
-    if hidden.is_empty() {
-        return rsx! {};
-    }
-
-    rsx! {
-        div { class: if open() { "hidden-artists open" } else { "hidden-artists" },
-            h3 { class: "shelf-head",
-                "Hidden ({hidden.len()})"
-                span { class: "spacer" }
-                button {
-                    class: "chip",
-                    onclick: move |_| { let next = !open(); open.set(next); },
-                    if open() { "hide list" } else { "show" }
-                }
-            }
-            if open() {
-                ul { class: "list",
-                    for entry in hidden {
-                        li { key: "{entry.artist_id}", class: "row",
-                            span { class: "title", "{entry.name}" }
-                            if let Some(reason) = entry.reason.clone() {
-                                span { class: "muted", "{reason}" }
-                            }
-                            button {
-                                class: "chip",
-                                onclick: move |_| blocklist.unblock.call(entry.artist_id),
-                                "unhide"
-                            }
-                        }
-                    }
+            },
+            if let Some(track) = track {
+                Cover { url: track.image.clone(), class: "thumb eager" }
+                div { class: "map-card-text",
+                    span { class: "title", "{track.title}" }
+                    span { class: "muted ellipsis", "{track.album}" }
+                    span { class: "muted ellipsis", "{track.artist}" }
                 }
             }
         }
@@ -415,21 +239,16 @@ fn HiddenArtists() -> Element {
 #[component]
 fn Shell() -> Element {
     let search = use_context_provider(Search::new);
-    // Read-only here: the box that writes it is `SearchBox`, kept separate so
+    // Read-only here: the box that writes it is `SearchBar`, kept separate so
     // the shell's renders cannot clobber what is being typed.
     let query = search.text;
     use_context_provider(|| {
         Weights(Signal::new(engine().lock().unwrap().space.default_weights()))
     });
 
-    // Shared with the Qobuz panel, which can select a track it recognises.
+    // The track in hand, for the generate panel and the map.
     let selection = use_context_provider(|| Selection(Signal::new(None)));
     let mut selected = selection.0;
-
-    // The detail sheet's own open flag, independent of `selected`, see
-    // `Selection`'s doc comment in `ui/mod.rs`.
-    let detail = use_context_provider(|| Detail(Signal::new(None)));
-    let mut detail_signal = detail.0;
 
     let player = use_context_provider(|| Player {
         queue: Signal::new(Vec::new()),
@@ -441,7 +260,6 @@ fn Shell() -> Element {
         volume: Signal::new(1.0),
         muted: Signal::new(false),
         queue_open: Signal::new(false),
-        full_open: Signal::new(false),
     });
 
     let library = use_context_provider(Library::new);
@@ -455,21 +273,13 @@ fn Shell() -> Element {
     crate::ui::crawler::use_crawl_status(crawler);
     crate::ui::pipeline::use_pipeline_watch(pipeline);
 
-    // Explore is the map and space tools; Pipeline builds the corpus. One
-    // window because they share the player and the database.
-    let mut explore = use_signal(|| true);
-
-    // Overlaid rather than a third view: changing a server address is a thing
-    // you do once, not a place you work.
-    let mut settings = use_signal(|| false);
-
     // One menu for every row in the window. Rows open it; it performs the
     // action itself, so no row has to carry a popup or a set of callbacks.
     use_context_provider(|| ContextMenu(Signal::new(None)));
 
-    // The map, opened on purpose rather than occupying the middle of the
-    // window. Most of the time you know what you are looking for and type it;
-    // the map is for the times you do not.
+    // The map, opened on purpose, over the main area, by its floating button.
+    // Most of the time you know what you are looking for and type it; the map
+    // is for the times you do not.
     let mut map_open = use_signal(|| false);
 
     // Whether the map is showing a route, which is also what decides the
@@ -491,7 +301,6 @@ fn Shell() -> Element {
                     Ok(_) => match crate::reload_engine(data_dir(), db_path()) {
                         Ok(()) => {
                             selected.set(None);
-                            detail_signal.set(None);
                             generator.clear();
                             document::eval(
                                 "window.twoKhzReloadPoints && window.twoKhzReloadPoints();",
@@ -681,10 +490,10 @@ fn Shell() -> Element {
             // Stable for two ticks, i.e. the user has stopped typing.
             if current == previous {
                 if current.is_empty() {
-                    // Emptying the box is a navigation, not a query.
+                    // Emptying the box empties the results; no round trip.
                     if !search.submitted.peek().is_empty() {
                         search.submitted.set(String::new());
-                        library.leave_search();
+                        library.clear_search();
                     }
                 } else if current.chars().count() >= 2 && current != *search.submitted.peek() {
                     search.submitted.set(current.clone());
@@ -741,15 +550,10 @@ fn Shell() -> Element {
             // An explicit null is the map saying the background was clicked.
             // Matched on the key being present rather than on the value
             // parsing, so a future message without one cannot clear the
-            // selection by accident.
+            // selection by accident. Selecting stays on the map: the point's
+            // card is the way on to its page.
             if let Some(value) = message.get("track_id") {
-                match value.as_f64().map(|id| id as i64) {
-                    Some(id) => open_track(selected, detail_signal, id),
-                    None => {
-                        selected.set(None);
-                        detail_signal.set(None);
-                    }
-                }
+                selected.set(value.as_f64().map(|id| id as i64));
             }
         }
     });
@@ -794,14 +598,6 @@ fn Shell() -> Element {
         );
         document::eval(&script);
     });
-
-    let (total_tracks, hidden_tracks) = {
-        blocked.read();
-        let guard = engine().lock().unwrap();
-        let catalog = &guard.navigator.catalog;
-        let visible = catalog.visible().count();
-        (visible, catalog.len() - visible)
-    };
 
     /// The most rows the scan will hand over. The list shows fewer to begin
     /// with and grows on request; this is the ceiling on what is kept ready.
@@ -884,106 +680,74 @@ fn Shell() -> Element {
 
     use_context_provider(|| SpaceMatches(filtered));
 
+    let map = MapView { map_open, map_route };
+    let mut panel_open = generator.panel_open;
+    let searching = matches!(&*library.view.read(), View::Search { .. });
+
     rsx! {
-        // `queue-open` lets a phone give the queue the list's whole height,
-        // see `.queue-drawer` in style.css.
-        div { class: if (player.queue_open)() { "app queue-open" } else { "app" },
-            header {
-                h1 { "2kHz" }
-                span { class: "muted", "{total_tracks} tracks" }
-                if hidden_tracks > 0 {
-                    span { class: "muted", "({hidden_tracks} hidden)" }
-                }
-                // Always here rather than behind an icon: a toggle just
-                // traded "an input taking header room" for "an extra tap
-                // before every search, and the icon itself vanishing behind
-                // the pipeline toggle", worse on both counts. `SearchBox`
-                // is a fixed-width flex item, so it costs the header a
-                // consistent amount of room rather than reflowing everything
-                // each time it would have opened and closed.
-                if explore() {
-                    SearchBox {}
-                }
-                // Pipeline switches the whole window to a different screen,
-                // `.nav-btn`, not a plain filter chip, because it means
-                // something different: this changes *which* page you're on,
-                // not what the current one shows. Same family as the map's
-                // toggle on the player bar.
-                button {
-                    class: if explore() { "chip nav-btn" } else { "chip nav-btn active" },
-                    title: if explore() { "open the pipeline" } else { "back to browsing" },
-                    onclick: move |_| { let now = explore(); explore.set(!now); },
-                    "pipeline"
-                }
-                // Settings opens a modal over whatever is already showing,
-                // never a state of its own to be "active" in, so it is
-                // deliberately not a chip: an icon button says "this is an
-                // action", not "this is a place".
-                button {
-                    class: "icon-btn",
-                    title: "server address and token",
-                    onclick: move |_| settings.set(true),
-                    "⚙"
-                }
-            }
+        div { class: "app",
+            // Everything above the player: the main area and, beside it, the
+            // generate panel. The queue drawer opens over both.
+            div { class: "workspace",
+                main { class: "main",
+                    MainScreen {}
 
-            if settings() {
-                Settings { open: settings }
-            }
-
-            // One column now, not two panes to switch between: the list is
-            // the whole of Explore, and the track sheet overlays it (or
-            // docks beside it on a wide screen, see `.sheet` in
-            // style.css) instead of being a second screen behind a tab.
-            div { class: if explore() { "body" } else { "body hidden" },
-                LibraryPanel {}
-
-                // Hidden, never unmounted, and never moved in this tree.
-                // map.js caches the canvas node, its 2d context, its
-                // listeners and a ResizeObserver at eval time and has no
-                // re-init path: a conditional render would leave it drawing
-                // into a detached node, and re-mounting would install a
-                // second copy of the whole script over the first.
-                div { class: if map_open() { "map-wrap" } else { "map-wrap hidden" },
-                    div { class: "map-bar",
-                        span { class: "muted", "the space" }
-                        span { class: "spacer" }
+                    // Over the main area only, never the panel beside it.
+                    // Hidden, never unmounted, and never moved in this tree:
+                    // map.js caches the canvas node, its 2d context, its
+                    // listeners and a ResizeObserver at eval time and has no
+                    // re-init path, so a conditional render would leave it
+                    // drawing into a detached node.
+                    div { class: if map_open() { "map-wrap" } else { "map-wrap hidden" },
+                        canvas { id: "map" }
+                        MapCard {}
                         if map_route() {
                             button {
-                                class: "chip active",
+                                class: "chip active map-route",
                                 title: "stop isolating the result",
                                 onclick: move |_| map_route.set(false),
-                                "showing a route"
+                                "showing a route ×"
                             }
                         }
+                    }
+
+                    // Bottom right of the main area, over the map as well,
+                    // since the map's own is how you close it again.
+                    div { class: "fabs",
+                        // Phone only: the panel is always showing otherwise.
                         button {
-                            class: "chip",
-                            title: "close the map",
-                            onclick: move |_| map_open.set(false),
-                            "×"
+                            class: "fab fab-generate",
+                            title: "generate",
+                            onclick: move |_| panel_open.set(true),
+                            {icons::spark()}
+                        }
+                        button {
+                            class: if searching { "fab fab-search active" } else { "fab fab-search" },
+                            title: if searching { "close search" } else { "search" },
+                            onclick: move |_| {
+                                map.close();
+                                library.toggle_search(search.text.peek().trim().to_string());
+                            },
+                            {icons::search()}
+                        }
+                        button {
+                            class: if map_open() { "fab fab-map active" } else { "fab fab-map" },
+                            title: if map_open() { "close the map" } else { "the map" },
+                            onclick: move |_| map.toggle(),
+                            {icons::globe()}
                         }
                     }
-                    canvas { id: "map" }
                 }
 
-                // A track, an album or an artist, and everything you can do
-                // with it. See `DetailSheet`'s doc comment for why this is
-                // its own open flag rather than piggybacking on `selected`.
-                DetailSheet {}
+                GeneratePanel {}
+
+                QueueView {}
             }
 
-            if !explore() {
-                PipelineView {}
-            }
-
-            // A half-built path survives losing the sheet it was started
-            // from, backgrounding the app, scrolling away, picking a
-            // second track from a different screen entirely.
+            // A half-built path survives the panel being slid away on a phone.
             PathPill {}
 
-            QueueView {}
             PlayerBar {}
-            FullPlayer {}
 
             // Last, so it paints over everything it can be opened from.
             ContextMenuView {}
