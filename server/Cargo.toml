@@ -21,6 +21,8 @@ axum = "0.8"
 bytemuck = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 md-5 = "0.11.0"
+# In-memory cache of Qobuz browse responses, so repeat visits skip the 2/s budget.
+moka = { version = "0.12", features = ["future"] }
 rand = "0.9"
 # `stream` for fetching model weights without holding 500MB in memory.
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "query", "stream"] }

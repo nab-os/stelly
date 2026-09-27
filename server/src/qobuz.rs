@@ -151,6 +151,9 @@ impl Default for RateLimit {
     }
 }
 
+/// Cloning is cheap and the clone draws on the same budget, which is how the
+/// server reads Qobuz for several devices at once.
+#[derive(Clone)]
 pub struct QobuzClient {
     credentials: Credentials,
     http: reqwest::Client,

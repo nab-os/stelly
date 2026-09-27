@@ -14,6 +14,7 @@
 //! credentials in flight, so anything further belongs behind a VPN or TLS.
 
 mod auth;
+mod cache;
 mod catalog;
 mod cli;
 mod crawl;
