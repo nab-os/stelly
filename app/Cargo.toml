@@ -71,10 +71,14 @@ optional = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 
-# The JNI entry point and logging; see src/mobile.rs.
+# The JNI entry point and logging; see src/mobile.rs. `jni` and `ndk-context`
+# are the versions tao already uses, for the playback notification in
+# src/ui/now_playing.rs.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
+jni = "0.21"
 log = "0.4"
+ndk-context = "0.1"
 
 [profile.release]
 opt-level = 3
