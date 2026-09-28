@@ -15,6 +15,7 @@ use crate::schema::layout;
 use anyhow::{bail, Result};
 use diesel::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use two_khz::space::Space;
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,11 @@ const SPREAD: f64 = 1.0;
 const NEGATIVE_SAMPLE_RATE: usize = 5;
 const REPULSION: f64 = 1.0;
 const SEED: u64 = 42;
+/// What one epoch costs per neighbour edge, in single-thread dot-product
+/// dimensions of the search: about 50ns against 0.3 to 0.5ns, measured.
+const EPOCH_COST: f64 = 120.0;
+/// Progress is reported in thousandths of the whole layout.
+const SCALE: u64 = 1000;
 
 /// Lay out the space as it stands, and store the coordinates. Returns how many
 /// tracks were placed.
@@ -51,7 +57,7 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<usize> {
     }
 
     job.log(format!("laying out {n} tracks ({d} dims)"));
-    job.advance("layout", 0, 1);
+    job.advance("layout", 0, SCALE);
     let coords = umap(&weighted.unit, n, d, options, job)?;
     if job.cancelled() {
         bail!("cancelled");
@@ -81,24 +87,33 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<usize> {
 pub fn umap(data: &[f32], n: usize, d: usize, options: &Options, job: &Job) -> Result<Vec<(f64, f64)>> {
     // Tiny corpora cannot have fifteen neighbours.
     let k = options.neighbours.min(n - 1).max(2);
+    let epochs = match options.epochs {
+        0 if n > 10_000 => 200,
+        0 => 500,
+        e => e,
+    };
+
+    // One bar over the two slow parts, each its share of the time, so it
+    // moves at an even pace: the search is n² dot products spread over the
+    // cores, an epoch visits every edge and its negative samples on one.
+    let search = (n * n * d) as f64 / threads(n) as f64;
+    let share = search / (search + epochs as f64 * (n * k) as f64 * EPOCH_COST);
+    let at = |fraction: f64| job.advance("layout", (fraction * SCALE as f64) as u64, SCALE);
 
     job.log(format!("  nearest {k} neighbours…"));
-    let knn = nearest(data, n, d, k);
+    let knn = nearest(data, n, d, k, &|rows| at(share * rows as f64 / n as f64));
     if job.cancelled() {
         bail!("cancelled");
     }
     let graph = fuzzy_graph(&knn, n, k);
 
     let (a, b) = fit_ab(options.min_dist, SPREAD);
-    let epochs = match options.epochs {
-        0 if n > 10_000 => 200,
-        0 => 500,
-        e => e,
-    };
     job.log(format!("  optimising {} edges over {epochs} epochs…", graph.len()));
 
     let mut embedding = initial(data, n, d);
-    optimise(&mut embedding, &graph, n, a, b, epochs, job)?;
+    optimise(&mut embedding, &graph, n, a, b, epochs, job, &|epoch| {
+        at(share + (1.0 - share) * epoch as f64 / epochs as f64)
+    })?;
     Ok(embedding)
 }
 
@@ -106,17 +121,22 @@ pub fn umap(data: &[f32], n: usize, d: usize, options: &Options, job: &Job) -> R
 
 /// (index, cosine distance) of each row's k nearest, self excluded, nearest
 /// first. Brute force, spread over the cores: quadratic, but a 30k corpus is
-/// seconds and the stage runs rarely.
-fn nearest(data: &[f32], n: usize, d: usize, k: usize) -> Vec<Vec<(usize, f64)>> {
-    let threads = std::thread::available_parallelism()
-        .map(|t| t.get())
-        .unwrap_or(4)
-        .min(n);
-    let chunk = n.div_ceil(threads);
+/// seconds and the stage runs rarely. `report` hears how many rows are done,
+/// now and then.
+fn nearest(
+    data: &[f32],
+    n: usize,
+    d: usize,
+    k: usize,
+    report: &(dyn Fn(usize) + Sync),
+) -> Vec<Vec<(usize, f64)>> {
+    let chunk = n.div_ceil(threads(n));
     let mut out: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let done = AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         for (t, slots) in out.chunks_mut(chunk).enumerate() {
+            let done = &done;
             scope.spawn(move || {
                 let mut scores = vec![0f32; n];
                 for (offset, slot) in slots.iter_mut().enumerate() {
@@ -131,11 +151,22 @@ fn nearest(data: &[f32], n: usize, d: usize, k: usize) -> Vec<Vec<(usize, f64)>>
                         .into_iter()
                         .map(|j| (j, (1.0 - scores[j] as f64).max(0.0)))
                         .collect();
+                    let rows = done.fetch_add(1, Ordering::Relaxed) + 1;
+                    if rows.is_multiple_of(256) {
+                        report(rows);
+                    }
                 }
             });
         }
     });
     out
+}
+
+fn threads(n: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|t| t.get())
+        .unwrap_or(4)
+        .min(n)
 }
 
 /// Each point's neighbourhood as fuzzy memberships, then the fuzzy union of
@@ -280,7 +311,8 @@ fn clip(v: f64) -> f64 {
 
 /// umap-learn's `optimize_layout_euclidean`: each edge is sampled in
 /// proportion to its weight, pulled together, and a few random points pushed
-/// away from its head.
+/// away from its head. `report` hears each epoch as it starts.
+#[allow(clippy::too_many_arguments)]
 fn optimise(
     embedding: &mut [(f64, f64)],
     edges: &[(usize, usize, f64)],
@@ -289,6 +321,7 @@ fn optimise(
     b: f64,
     epochs: usize,
     job: &Job,
+    report: &dyn Fn(usize),
 ) -> Result<()> {
     let max_weight = edges.iter().map(|e| e.2).fold(0.0, f64::max);
     // Edges too weak to be sampled even once are dropped, as umap-learn does.
@@ -309,7 +342,7 @@ fn optimise(
         if epoch % 25 == 0 && job.cancelled() {
             bail!("cancelled");
         }
-        job.advance("layout", epoch as u64, epochs as u64);
+        report(epoch);
         let alpha = 1.0 - epoch as f64 / epochs as f64;
         let now = epoch as f64;
 
