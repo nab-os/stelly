@@ -1,10 +1,11 @@
 //! Settings: one row per group, top to bottom, the server this device talks
-//! to, how it plays, which devices may talk to that server, who is hidden,
+//! to, the version it runs, how it plays, which devices may talk to that server, who is hidden,
 //! and the pipeline that builds the space, with its output last.
 
 use super::pipeline::{Devices, PipelineControls, PipelineLog};
 use super::player::{quality_label, Player};
 use super::prefs;
+use super::release::ReleaseRow;
 use super::Blocklist;
 use crate::qobuz::{FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
 use crate::ServerConfig;
@@ -15,6 +16,7 @@ pub fn SettingsScreen() -> Element {
     rsx! {
         div { class: "page settings",
             ServerRow {}
+            ReleaseRow {}
             PlaybackRow {}
             Devices {}
             HiddenArtists {}

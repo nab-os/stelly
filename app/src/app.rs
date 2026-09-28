@@ -7,7 +7,8 @@ use crate::backend::{self, backend, SyncStep};
 use crate::ui::{
     icons, space_track, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel,
     Generator, Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar,
-    QueueView, Search, Selection, SpaceMatches, SpaceReach, SpaceRow, View, Weights,
+    QueueView, ReleaseNotice, Releases, Search, Selection, SpaceMatches, SpaceReach, SpaceRow,
+    View, Weights,
 };
 use crate::{engine, map, Wiring};
 use crate::ui::library::{names_track, Sort};
@@ -340,6 +341,7 @@ fn Shell() -> Element {
     // One menu for every row in the window. Rows open it; it performs the
     // action itself, so no row has to carry a popup or a set of callbacks.
     use_context_provider(|| ContextMenu(Signal::new(None)));
+    Releases::provide();
 
     // The map, opened on purpose, over the main area, by its floating button.
     // Most of the time you know what you are looking for and type it; the map
@@ -857,6 +859,8 @@ fn Shell() -> Element {
 
     rsx! {
         div { class: "app",
+            ReleaseNotice {}
+
             // Everything above the player: the main area and, beside it, the
             // generate panel. The queue drawer opens over both.
             div { class: "workspace",

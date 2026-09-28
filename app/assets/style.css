@@ -62,6 +62,22 @@ code {
   position: relative;
 }
 
+/* A new release. Above the workspace rather than over it, so it pushes the
+   page down instead of hiding the top of it. */
+.release-notice {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 12px 0;
+  padding: 6px 8px 6px 14px;
+  border-radius: 8px;
+  background: var(--panel);
+  border-left: 3px solid var(--accent);
+}
+.release-notice > span { flex: 1; }
+.release-notice a, .setting a { color: var(--accent); }
+
 .panel {
   background: var(--panel);
   border-radius: 10px;
