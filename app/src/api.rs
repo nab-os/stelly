@@ -166,6 +166,39 @@ pub struct PipelineStatus {
     /// analysed, or waiting for the space and the layout to be rebuilt.
     #[serde(default)]
     pub adding: Vec<Target>,
+    /// Targets not started yet, in the order they will run.
+    #[serde(default)]
+    pub waiting: Vec<Target>,
+    /// How far the running stage has got, when it can tell.
+    #[serde(default)]
+    pub progress: Option<Progress>,
+}
+
+/// How far through one step of a stage: `catalogue`, `analyse`,
+/// `build-space` or `layout`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Progress {
+    pub step: String,
+    pub done: u64,
+    pub total: u64,
+    /// Since the step started, for an estimate of what is left.
+    pub seconds: f64,
+}
+
+impl Progress {
+    pub fn fraction(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.done as f64 / self.total as f64).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Seconds left at the rate so far, once there is a rate to go on.
+    pub fn remaining(&self) -> Option<f64> {
+        (self.done > 0 && self.done < self.total)
+            .then(|| self.seconds / self.done as f64 * (self.total - self.done) as f64)
+    }
 }
 
 /// A slice of a stage's output. Cursor-based, because locally the lines come

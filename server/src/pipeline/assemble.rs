@@ -26,6 +26,8 @@ const BPM_FOLD_LOW: f64 = 70.0;
 const BPM_FOLD_HIGH: f64 = 140.0;
 const N_STYLE_COMPONENTS: usize = 20;
 const N_SEMANTIC_COMPONENTS: usize = 40;
+/// Checkpoints `run` reports progress at.
+const STEPS: u64 = 6;
 
 /// Fixed, so the client can rely on it.
 pub const BLOCKS: [&str; 8] = [
@@ -92,26 +94,13 @@ pub fn fit_pca(rows: &[Vec<f64>], k: usize) -> (Vec<f64>, Vec<Vec<f64>>) {
         }
     }
 
+    // As a matrix product over blocks of rows, not an element-wise loop: on
+    // the 512 CLAP dimensions of a real catalogue that was most of the stage.
+    const BLOCK: usize = 2048;
     let mut covariance = nalgebra::DMatrix::<f64>::zeros(d, d);
-    let mut centred = vec![0f64; d];
-    for row in rows {
-        for (c, (v, m)) in centred.iter_mut().zip(row.iter().zip(&mean)) {
-            *c = v - m;
-        }
-        for i in 0..d {
-            let ci = centred[i];
-            if ci == 0.0 {
-                continue;
-            }
-            for j in i..d {
-                covariance[(i, j)] += ci * centred[j];
-            }
-        }
-    }
-    for i in 0..d {
-        for j in 0..i {
-            covariance[(i, j)] = covariance[(j, i)];
-        }
+    for chunk in rows.chunks(BLOCK) {
+        let centred = nalgebra::DMatrix::<f64>::from_fn(chunk.len(), d, |r, c| chunk[r][c] - mean[c]);
+        covariance += centred.tr_mul(&centred);
     }
 
     let eigen = covariance.symmetric_eigen();
@@ -292,7 +281,9 @@ fn dot(a: &[f32], b: &[f32]) -> f64 {
 
 /// Build `space.bin`, `space.json` and `semantic_pca.bin` from what is stored.
 pub async fn run(paths: &Paths, weights: Option<HashMap<String, f32>>, job: &Job) -> Result<()> {
+    job.advance("build-space", 0, STEPS);
     let rows = load_rows(&mut db::open_for_write(&paths.db_path)?)?;
+    job.advance("build-space", 1, STEPS);
     if rows.is_empty() {
         bail!("no analysed tracks; run analyse first");
     }
@@ -300,12 +291,14 @@ pub async fn run(paths: &Paths, weights: Option<HashMap<String, f32>>, job: &Job
     models::ensure(&paths.model_dir, &[models::CLAP_TEXT, models::CLAP_TOKENIZER], job).await?;
     let mut encoder = TextEncoder::load(&paths.model_dir)?
         .context("the CLAP text tower is missing after fetching it")?;
+    job.advance("build-space", 2, STEPS);
 
     let mut weights_all = default_weights();
     weights_all.extend(weights.unwrap_or_default());
     job.log(format!("building space from {} tracks", rows.len()));
 
     let (mood_directions, style_directions) = label_vectors(&mut encoder)?;
+    job.advance("build-space", 3, STEPS);
     build(&paths.data_dir, &rows, &mood_directions, &style_directions, &weights_all, job)
 }
 
@@ -389,6 +382,7 @@ fn build(
     let (style_mean, style_components) = fit_pca(&style_scores, N_STYLE_COMPONENTS);
     let style = project(&style_scores, &style_mean, &style_components);
     let style_names = (0..style_components.len()).map(|i| format!("style_pc{i}")).collect();
+    job.advance("build-space", 4, STEPS);
     blocks.push(("style", style, style_names));
 
     blocks.push((
@@ -408,6 +402,7 @@ fn build(
     let (semantic_mean, semantic_components) = fit_pca(&clap, N_SEMANTIC_COMPONENTS);
     let semantic = project(&clap, &semantic_mean, &semantic_components);
     let semantic_names = (0..semantic_components.len()).map(|i| format!("clap_pc{i}")).collect();
+    job.advance("build-space", 5, STEPS);
     blocks.push(("semantic", semantic, semantic_names));
 
     // Normalise and lay out, in the fixed order.
