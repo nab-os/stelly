@@ -4,6 +4,15 @@
 # dioxus-desktop exports its own JNI trampoline. See src/lib.rs.
 [application]
 name = "two_khz"
+# A playback service and notification on top of dx's own, see
+# android/MainActivity.kt.
+android_main_activity = "android/MainActivity.kt"
+android_manifest = "android/AndroidManifest.xml"
+
+[android]
+# Notification channels and startForegroundService.
+min_sdk = 26
+proguard_rules = ["android/playback.pro"]
 
 [web.app]
 title = "2kHz"
