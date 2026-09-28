@@ -288,8 +288,14 @@ fn progress_row(progress: &Progress) -> Element {
     if progress.step == "catalogue" {
         detail.push("cataloguing".to_string());
     }
-    if progress.total > 1 {
-        detail.push(format!("{}/{}", progress.done, progress.total));
+    // Albums and tracks are worth counting; build-space and layout count
+    // internal units, so they get a percentage.
+    if matches!(progress.step.as_str(), "catalogue" | "analyse") {
+        if progress.total > 1 {
+            detail.push(format!("{}/{}", progress.done, progress.total));
+        }
+    } else {
+        detail.push(format!("{percent:.0}%"));
     }
     if let Some(left) = progress.remaining() {
         detail.push(format!("{} left", span_of(left)));
