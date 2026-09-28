@@ -565,6 +565,13 @@ impl QobuzClient {
         self.request("album/get", &params, None).await
     }
 
+    /// The whole `track/get` payload, its album included.
+    pub async fn track_raw(&mut self, track_id: i64) -> Result<Value> {
+        self.login().await?;
+        let params = BTreeMap::from([("track_id".to_string(), track_id.to_string())]);
+        self.request("track/get", &params, None).await
+    }
+
     /// An album and its tracklist, in one request.
     pub async fn album_tracks(&mut self, album_id: &str) -> Result<(RemoteAlbum, Vec<RemoteTrack>)> {
         let data = self.album_raw(album_id).await?;

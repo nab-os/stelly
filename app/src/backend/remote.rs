@@ -5,8 +5,8 @@
 //! the sliders stay local. Audio does not proxy.
 
 use crate::api::{
-    ApiError, BlockedArtist, Catalogued, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope,
-    Stage, SyncManifest,
+    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope,
+    Stage, SyncManifest, Target,
 };
 use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -320,38 +320,6 @@ impl Remote {
         Ok(())
     }
 
-    // ------------------------------------------- extending the catalogue
-
-    pub async fn fetch_artist(&self, artist_id: i64) -> Result<usize> {
-        #[derive(serde::Deserialize)]
-        struct Fetched {
-            count: usize,
-        }
-        let done: Fetched = self
-            .post(&format!("/api/artists/{artist_id}/fetch"), &())
-            .await?;
-        Ok(done.count)
-    }
-
-    pub async fn fetch_album(&self, album_id: &str) -> Result<usize> {
-        #[derive(serde::Deserialize)]
-        struct Fetched {
-            count: usize,
-        }
-        let done: Fetched = self
-            .post(&format!("/api/albums/{}/fetch", urlencode(album_id)), &())
-            .await?;
-        Ok(done.count)
-    }
-
-    pub async fn catalogued(&self, ids: &[String]) -> Result<Catalogued> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            ids: &'a [String],
-        }
-        self.post("/api/catalogue/albums", &Body { ids }).await
-    }
-
     pub async fn corpus(&self) -> Result<Corpus> {
         self.get("/api/corpus").await
     }
@@ -391,6 +359,12 @@ impl Remote {
 
     pub async fn pipeline_start_full(&self) -> Result<()> {
         let _: serde_json::Value = self.post("/api/pipeline/start-full", &()).await?;
+        Ok(())
+    }
+
+    /// Put one track, album or artist on the map, ahead of the backlog.
+    pub async fn pipeline_add(&self, target: &Target) -> Result<()> {
+        let _: serde_json::Value = self.post("/api/pipeline/add", target).await?;
         Ok(())
     }
 

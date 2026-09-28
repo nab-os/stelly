@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use two_khz::api::{BlockedArtist, Catalogued, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, FULL_RUN};
+use two_khz::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN};
 use two_khz::logbuffer::LogBuffer;
 
 pub struct Hub {
@@ -57,12 +57,49 @@ struct CrawlJob {
 
 #[derive(Default)]
 struct PipelineJob {
-    running: Mutex<Option<Stage>>,
-    /// Stages still to run in a chained job, in the order they will run.
-    queued: Mutex<VecDeque<Stage>>,
+    queue: Mutex<Queue>,
     /// Shared with the running stage's `Job`, which is how it hears a stop.
     cancel: Arc<AtomicBool>,
+    /// Set along with `cancel` when a target interrupts the backlog's analyse,
+    /// so the runner carries on rather than treating it as a stop.
+    preempted: AtomicBool,
     generation: AtomicU64,
+}
+
+/// What the pipeline is doing and will do, under one lock so a target
+/// arriving between two stages cannot be lost.
+#[derive(Default)]
+struct Queue {
+    running: Option<Stage>,
+    /// What `running` is scoped to, when it is a targeted analyse.
+    target: Option<Target>,
+    /// Targets still to analyse. They go before `stages`, whatever is in it.
+    targets: VecDeque<Target>,
+    stages: VecDeque<Stage>,
+    /// Every target not on the map yet, for the pages that asked.
+    adding: Vec<Target>,
+}
+
+impl Queue {
+    fn next(&mut self) -> Option<(Stage, Option<Target>)> {
+        if let Some(target) = self.targets.pop_front() {
+            return Some((Stage::Analyse, Some(target)));
+        }
+        self.stages.pop_front().map(|stage| (stage, None))
+    }
+
+    /// Make build-space then layout the next stages, so what the targets add
+    /// reaches the map before the backlog carries on.
+    fn rebuild_next(&mut self) {
+        match self.stages.front() {
+            Some(Stage::BuildSpace) => {}
+            Some(Stage::Layout) => self.stages.push_front(Stage::BuildSpace),
+            _ => {
+                self.stages.push_front(Stage::Layout);
+                self.stages.push_front(Stage::BuildSpace);
+            }
+        }
+    }
 }
 
 impl Hub {
@@ -257,39 +294,8 @@ impl Hub {
 
     // ------------------------------------------- extending the catalogue
 
-    /// What a worker thread needs to talk to Qobuz and the database. The rate
-    /// limit is shared; everything else it builds for itself, because none of
-    /// it may cross a thread boundary mid-await.
-    async fn worker_context(&self) -> Result<(PathBuf, PathBuf, crate::qobuz::RateLimit)> {
-        let limit = self.qobuz()?.lock().await.rate_limit();
-        Ok((self.env_dir.clone(), self.db_path.clone(), limit))
-    }
-
-    pub async fn fetch_artist(&self, artist_id: i64) -> Result<usize> {
-        let (env_dir, db_path, limit) = self.worker_context().await?;
-        off_thread(move || async move {
-            let (mut conn, mut client) = worker_parts(&env_dir, &db_path, limit)?;
-            crawl::discover_artist(&mut conn, &mut client, artist_id).await
-        })
-        .await
-    }
-
-    pub async fn fetch_album(&self, album_id: &str) -> Result<usize> {
-        let (env_dir, db_path, limit) = self.worker_context().await?;
-        let album_id = album_id.to_string();
-        off_thread(move || async move {
-            let (mut conn, mut client) = worker_parts(&env_dir, &db_path, limit)?;
-            crawl::crawl_one_album(&mut conn, &mut client, &album_id).await
-        })
-        .await
-    }
-
     pub async fn corpus(&self) -> Result<Corpus> {
         stages::corpus(&self.db_path)
-    }
-
-    pub async fn catalogued(&self, ids: &[String]) -> Result<Catalogued> {
-        stages::catalogued(&self.db_path, ids)
     }
 
     // -------------------------------------------------------------- crawling
@@ -363,9 +369,63 @@ impl Hub {
         if stage == Stage::Crawl {
             return self.crawl_start(two_khz::api::DEFAULT_MAX_DISTANCE).await;
         }
-        if self.pipeline.running.lock().unwrap().is_some() {
-            return Ok(());
+        {
+            let mut queue = self.pipeline.queue.lock().unwrap();
+            if queue.running.is_some() {
+                return Ok(());
+            }
+            queue.stages.push_back(stage);
         }
+        self.drain().await
+    }
+
+    pub async fn pipeline_start_full(&self) -> Result<()> {
+        {
+            let mut queue = self.pipeline.queue.lock().unwrap();
+            if queue.running.is_some() {
+                return Ok(());
+            }
+            queue.stages.extend(FULL_RUN);
+        }
+        self.drain().await
+    }
+
+    /// Put one track, album or artist on the map, ahead of everything else.
+    /// A backlog analyse in progress is interrupted and resumes once the
+    /// target is laid out; anything else finishes first.
+    pub async fn pipeline_add(&self, target: Target) -> Result<()> {
+        {
+            let mut queue = self.pipeline.queue.lock().unwrap();
+            if queue.adding.contains(&target) {
+                return Ok(());
+            }
+            if queue.running == Some(Stage::Analyse) && queue.target.is_none() {
+                self.log.push(format!("pausing the backlog for {target}"));
+                queue.stages.push_front(Stage::Analyse);
+                self.pipeline.preempted.store(true, Ordering::SeqCst);
+                self.pipeline.cancel.store(true, Ordering::SeqCst);
+            }
+            queue.targets.push_back(target.clone());
+            queue.adding.push(target);
+            queue.rebuild_next();
+        }
+        self.drain().await
+    }
+
+    /// Run the queue until it empties, unless it already is being run.
+    async fn drain(&self) -> Result<()> {
+        let first = {
+            let mut queue = self.pipeline.queue.lock().unwrap();
+            if queue.running.is_some() {
+                return Ok(());
+            }
+            let Some((stage, target)) = queue.next() else {
+                return Ok(());
+            };
+            queue.running = Some(stage);
+            queue.target = target.clone();
+            (stage, target)
+        };
 
         // The account's budget, for analyse to share with browsing. Only
         // analyse talks to Qobuz: without credentials build-space and layout
@@ -379,28 +439,34 @@ impl Hub {
         let paths = self.paths.clone();
 
         job.cancel.store(false, Ordering::SeqCst);
-        *job.running.lock().unwrap() = Some(stage);
 
         tokio::spawn(async move {
-            // A loop rather than recursion: a chained run is just the next
+            // A loop rather than recursion: the next step is just the next
             // stage, and boxing a recursive future to say so would be worse.
-            let mut current = Some(stage);
+            let mut current = Some(first);
 
-            while let Some(stage) = current {
-                *job.running.lock().unwrap() = Some(stage);
-                log.push(format!("$ two-khz-server {}", stage.command()));
+            while let Some((stage, target)) = current {
+                match &target {
+                    Some(target) => log.push(format!("$ two-khz-server {} {}", stage.command(), target.flag())),
+                    None => log.push(format!("$ two-khz-server {}", stage.command())),
+                }
 
                 let sink = log.clone();
                 let reporter = Job::new(move |line| sink.push(line), job.cancel.clone());
-                let (paths, limit) = (paths.clone(), limit.clone());
+                let (paths, limit, scope) = (paths.clone(), limit.clone(), target.clone());
                 let outcome = off_thread(move || async move {
-                    stages::run(stage, &paths, limit, &reporter).await
+                    stages::run(stage, scope.as_ref(), &paths, limit, &reporter).await
                 })
                 .await;
 
-                match outcome {
+                let mut queue = job.queue.lock().unwrap();
+                let preempted = job.preempted.swap(false, Ordering::SeqCst);
+                let cancelled = !preempted && job.cancel.load(Ordering::SeqCst);
+
+                match &outcome {
+                    _ if preempted => log.push(format!("{} paused", stage.label())),
+                    _ if cancelled => log.push("cancelled"),
                     Ok(()) => log.push(format!("{} finished", stage.label())),
-                    Err(_) if job.cancel.load(Ordering::SeqCst) => log.push("cancelled"),
                     Err(err) => log.push(format!("{} failed: {err:#}", stage.label())),
                 }
 
@@ -408,40 +474,49 @@ impl Hub {
                     job.generation.fetch_add(1, Ordering::SeqCst);
                 }
 
-                current = if job.cancel.load(Ordering::SeqCst) {
-                    job.queued.lock().unwrap().clear();
-                    None
-                } else {
-                    job.queued.lock().unwrap().pop_front()
-                };
-            }
+                // A target that failed will not reach the map; one that
+                // analysed has, once a layout after it is done.
+                if let (Some(target), Err(_)) = (&target, &outcome) {
+                    queue.adding.retain(|t| t != target);
+                }
+                if stage == Stage::Layout {
+                    let waiting = queue.targets.clone();
+                    queue.adding.retain(|t| waiting.contains(t));
+                }
 
-            *job.running.lock().unwrap() = None;
+                if preempted {
+                    job.cancel.store(false, Ordering::SeqCst);
+                }
+                current = if cancelled { None } else { queue.next() };
+                queue.running = current.as_ref().map(|(stage, _)| *stage);
+                queue.target = current.as_ref().and_then(|(_, target)| target.clone());
+            }
         });
 
         Ok(())
     }
 
-    pub async fn pipeline_start_full(&self) -> Result<()> {
-        if self.pipeline.running.lock().unwrap().is_some() {
-            return Ok(());
-        }
-        *self.pipeline.queued.lock().unwrap() = FULL_RUN[1..].iter().copied().collect();
-        self.pipeline_start(FULL_RUN[0]).await
-    }
-
     pub async fn pipeline_stop(&self) -> Result<()> {
+        {
+            let mut queue = self.pipeline.queue.lock().unwrap();
+            queue.stages.clear();
+            queue.targets.clear();
+            queue.adding.clear();
+        }
+        self.pipeline.preempted.store(false, Ordering::SeqCst);
         self.pipeline.cancel.store(true, Ordering::SeqCst);
-        self.pipeline.queued.lock().unwrap().clear();
         self.crawl.stop.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     pub async fn pipeline_status(&self) -> Result<PipelineStatus> {
+        let queue = self.pipeline.queue.lock().unwrap();
         Ok(PipelineStatus {
-            running: *self.pipeline.running.lock().unwrap(),
-            queued: self.pipeline.queued.lock().unwrap().iter().copied().collect(),
+            running: queue.running,
+            queued: queue.stages.iter().copied().collect(),
             generation: self.pipeline.generation.load(Ordering::SeqCst),
+            target: queue.target.clone(),
+            adding: queue.adding.clone(),
         })
     }
 

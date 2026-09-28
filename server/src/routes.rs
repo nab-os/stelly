@@ -13,8 +13,8 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use two_khz::api::{
-    BlockedArtist, Catalogued, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
-    SyncFile, SyncManifest,
+    BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
+    SyncFile, SyncManifest, Target,
 };
 use two_khz::session::{Command, Session, Update};
 use two_khz::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -39,12 +39,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/playlists", get(playlists).post(export_playlist))
         .route("/api/playlists/{id}", get(playlist_tracks))
         .route("/api/albums/{id}", get(album_tracks))
-        .route("/api/albums/{id}/fetch", post(fetch_album))
         .route("/api/artists/{id}", get(artist))
         .route("/api/artists/{id}/albums", get(artist_albums))
         .route("/api/artists/{id}/similar", get(similar_artists))
-        .route("/api/artists/{id}/fetch", post(fetch_artist))
-        .route("/api/catalogue/albums", post(catalogued))
         // --------------------------------------------------------- playback
         .route("/api/tracks/{id}/url", get(file_url))
         .route("/api/session", get(session).post(session_command))
@@ -70,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pipeline", get(pipeline_status))
         .route("/api/pipeline/start", post(pipeline_start))
         .route("/api/pipeline/start-full", post(pipeline_start_full))
+        .route("/api/pipeline/add", post(pipeline_add))
         .route("/api/pipeline/stop", post(pipeline_stop))
         .route("/api/pipeline/log", get(pipeline_log))
         // ------------------------------------------------------------- sync
@@ -415,48 +413,7 @@ async fn favorite_remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-// ---------------------------------------------- extending the catalogue
-
-#[derive(serde::Serialize)]
-struct Fetched {
-    count: usize,
-}
-
-/// Bounded, so `play`: one album is one request, one discography a handful.
-async fn fetch_album(
-    State(state): State<AppState>,
-    _: PlayAuth,
-    Path(id): Path<String>,
-) -> Reply<Fetched> {
-    Ok(Json(Fetched {
-        count: state.hub.fetch_album(&id).await?,
-    }))
-}
-
-async fn fetch_artist(
-    State(state): State<AppState>,
-    _: PlayAuth,
-    Path(id): Path<i64>,
-) -> Reply<Fetched> {
-    Ok(Json(Fetched {
-        count: state.hub.fetch_artist(id).await?,
-    }))
-}
-
-#[derive(Deserialize)]
-struct CataloguedBody {
-    ids: Vec<String>,
-}
-
-/// A POST for the body, not the effect: an artist page asks after every
-/// album on it, which is more ids than a query string should carry.
-async fn catalogued(
-    State(state): State<AppState>,
-    _: PlayAuth,
-    Json(body): Json<CataloguedBody>,
-) -> Reply<Catalogued> {
-    Ok(Json(state.hub.catalogued(&body.ids).await?))
-}
+// ------------------------------------------------------------------- counts
 
 async fn corpus(State(state): State<AppState>, _: PlayAuth) -> Reply<Corpus> {
     Ok(Json(state.hub.corpus().await?))
@@ -518,6 +475,17 @@ async fn pipeline_start_full(
     _: PipelineAuth,
 ) -> Reply<serde_json::Value> {
     state.hub.pipeline_start_full().await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `play`, though it runs stages: it is bounded, one track, album or
+/// discography, and it is what the detail pages offer on every device.
+async fn pipeline_add(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(target): Json<Target>,
+) -> Reply<serde_json::Value> {
+    state.hub.pipeline_add(target).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

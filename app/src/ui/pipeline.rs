@@ -171,6 +171,7 @@ pub fn PipelineControls() -> Element {
     let busy = running.is_some() || crawling;
     let corpus = pipeline.corpus.read().clone();
     let queued = pipeline.status.read().queued.clone();
+    let adding = pipeline.status.read().adding.len();
 
     // Each hint names the stage that would fix it, and is derived from the
     // same question that stage asks.
@@ -213,6 +214,11 @@ pub fn PipelineControls() -> Element {
                 p { class: "muted notice",
                     {format!("{} tracks in the space have no coordinates, run layout.",
                              corpus.in_space - corpus.on_map)}
+                }
+            }
+            if adding > 0 {
+                p { class: "muted notice",
+                    "{adding} asked for by name, going into the space ahead of the backlog."
                 }
             }
             if !needs_build && !needs_layout && corpus.to_analyse == 0 {

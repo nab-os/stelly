@@ -12,6 +12,7 @@ use diesel::prelude::*;
 use diesel::upsert::excluded;
 use serde_json::Value;
 use std::collections::HashSet;
+use two_khz::api::Target;
 
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -464,39 +465,108 @@ pub async fn crawl(
     Ok(stats)
 }
 
-/// Pull an artist's discography into the catalogue and queue their albums.
+// ------------------------------------------------------------------ targets
+
+/// Pull one target into the catalogue now, at seed distance 0, and return the
+/// tracks it names. A tracklist already in the catalogue costs no request.
 ///
-/// Deliberately does not fetch every tracklist: a prolific artist is hundreds
-/// of albums, which at 2/s is minutes of a frozen button. Returns how many
-/// albums were queued.
-pub async fn discover_artist(
+/// Every tracklist is fetched, even for a prolific artist, since what follows
+/// is analysing them. The albums are marked done on the frontier so a crawl
+/// does not ask again; an artist is still queued, so a crawl takes the
+/// similar-artist hop from them.
+pub async fn catalogue_target(
     conn: &mut SqliteConnection,
     client: &mut QobuzClient,
-    artist_id: i64,
-) -> Result<usize> {
+    target: &Target,
+    log: &dyn Fn(String),
+) -> Result<Vec<i64>> {
     client.login().await?;
+    match target {
+        Target::Track(track_id) => {
+            let known: Option<Option<String>> = tracks::table
+                .find(track_id)
+                .select(tracks::album_id)
+                .first(conn)
+                .optional()?;
+            if known.is_none() {
+                // The album first: once the track has a row, the album would
+                // look catalogued and the rest of it would never be.
+                let track = client.track_raw(*track_id).await?;
+                if let Some(album_id) = track.get("album").and_then(|a| as_id_string(a, "id")) {
+                    catalogue_album(conn, client, &album_id).await?;
+                }
+                upsert_track(conn, &track, None, None, 0)?
+                    .with_context(|| format!("track {track_id} has no id"))?;
+            }
+            let title: String = tracks::table.find(track_id).select(tracks::title).first(conn)?;
+            log(format!("  {title}"));
+            Ok(vec![*track_id])
+        }
+        Target::Album(album_id) => {
+            catalogue_album(conn, client, album_id).await?;
+            let found = album_tracks(conn, std::slice::from_ref(album_id))?;
+            let title: String = albums::table.find(album_id).select(albums::title).first(conn)?;
+            log(format!("  {title}: {} tracks", found.len()));
+            Ok(found)
+        }
+        Target::Artist(artist_id) => {
+            // Their own releases, as the artist page lists them, not every
+            // album that credits them.
+            let own: Vec<Value> = client
+                .artist_albums_raw(*artist_id, 1000)
+                .await?
+                .into_iter()
+                .filter(|album| {
+                    album
+                        .get("artist")
+                        .and_then(|a| as_i64(a, "id"))
+                        .is_none_or(|id| id == *artist_id)
+                })
+                .collect();
 
-    let albums = client.artist_albums_raw(artist_id, 1000).await?;
-    let mut queued = 0;
-    for album in &albums {
-        if let Some(album_id) = upsert_album(conn, album)? {
-            enqueue(conn, "album", &album_id, 0)?;
-            queued += 1;
+            let mut album_ids = Vec::with_capacity(own.len());
+            for (n, album) in own.iter().enumerate() {
+                let Some(album_id) = upsert_album(conn, album)? else { continue };
+                // A region-locked album must not lose the rest.
+                if let Err(err) = catalogue_album(conn, client, &album_id).await {
+                    log(format!("  ! album {album_id}: {err:#}"));
+                    continue;
+                }
+                let title = text(album, "title").unwrap_or_default();
+                log(format!("  {}/{} {title}", n + 1, own.len()));
+                album_ids.push(album_id);
+            }
+            enqueue(conn, "artist", &artist_id.to_string(), 0)?;
+
+            let found = album_tracks(conn, &album_ids)?;
+            log(format!("  {} albums, {} tracks", album_ids.len(), found.len()));
+            Ok(found)
         }
     }
-
-    // Queue the artist too, so a later crawl still takes the similar-artist
-    // hop from here.
-    enqueue(conn, "artist", &artist_id.to_string(), 0)?;
-    Ok(queued)
 }
 
-/// Crawl a single album's tracklist.
-pub async fn crawl_one_album(
-    conn: &mut SqliteConnection,
-    client: &mut QobuzClient,
-    album_id: &str,
-) -> Result<usize> {
-    client.login().await?;
-    expand_album(conn, client, album_id, 0).await
+/// An album's tracklist, unless the catalogue already has it.
+async fn catalogue_album(conn: &mut SqliteConnection, client: &mut QobuzClient, album_id: &str) -> Result<()> {
+    if album_tracks(conn, &[album_id.to_string()])?.is_empty() {
+        expand_album(conn, client, album_id, 0).await?;
+    }
+    diesel::insert_into(frontier::table)
+        .values((
+            frontier::kind.eq("album"),
+            frontier::ref_id.eq(album_id),
+            frontier::priority.eq(0),
+            frontier::state.eq("done"),
+        ))
+        .on_conflict((frontier::kind, frontier::ref_id))
+        .do_update()
+        .set(frontier::state.eq("done"))
+        .execute(conn)?;
+    Ok(())
+}
+
+fn album_tracks(conn: &mut SqliteConnection, album_ids: &[String]) -> Result<Vec<i64>> {
+    Ok(tracks::table
+        .filter(tracks::album_id.eq_any(album_ids))
+        .select(tracks::id)
+        .load(conn)?)
 }

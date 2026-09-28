@@ -14,6 +14,7 @@ use super::{
     SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
+use crate::api::Target;
 use crate::backend::backend;
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 
@@ -818,35 +819,20 @@ fn space_groups(query: &str) -> (Vec<RemoteAlbum>, Vec<RemoteArtist>) {
     )
 }
 
-// --------------------------------------------------------------- crawl hook
+// ------------------------------------------------------------ adding to space
 
-/// Fetch an artist or album into the catalogue, here and now. An album's
-/// tracklist lands immediately and a discography is queued; only feature
-/// extraction still belongs to the pipeline.
-pub(crate) fn request_analysis(library: Library, kind: &str, id: &str, label: &str) {
+/// Put an album or artist on the map, ahead of the rest of the backlog. The
+/// notice says it was asked for; the pipeline output in settings says how far
+/// it has got.
+pub(crate) fn add_to_space(library: Library, target: Target, label: &str) {
     let mut library = library;
-    let (kind, id, label) = (kind.to_string(), id.to_string(), label.to_string());
-
-    library.notice.set(Some(format!("fetching {label}…")));
-
+    let label = label.to_string();
     spawn(async move {
-        match fetch_into_catalog(&kind, &id).await {
-            Ok(count) => {
-                let what = if kind == "artist" { "albums queued" } else { "tracks" };
-                library.notice.set(Some(format!(
-                    "{label}: {count} {what}. Run analyse from the pipeline view to extract features."
-                )));
-            }
-            Err(err) => library.notice.set(Some(format!("{err:#}"))),
-        }
+        library.notice.set(Some(match backend().pipeline_add(&target).await {
+            Ok(()) => format!("adding {label} to the space…"),
+            Err(err) => format!("{err:#}"),
+        }));
     });
-}
-
-async fn fetch_into_catalog(kind: &str, id: &str) -> anyhow::Result<usize> {
-    match kind {
-        "artist" => backend().fetch_artist(id.parse()?).await,
-        _ => backend().fetch_album(id).await,
-    }
 }
 
 // --------------------------------------------------------------- components
