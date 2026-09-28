@@ -23,6 +23,15 @@ body {
   font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+/* Drawn by hand. WebKitGTK's own scrollbars are overlays that fade out, and
+   they are composited above everything, so the main area's bar showed
+   through the panels and screens laid over it. A styled one is painted with
+   its scroller and stacks like the rest of the page. */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--row-hover); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
 .muted { color: var(--muted); font-size: 12px; }
 .error { color: var(--danger); }
 .notice { color: var(--accent); }
