@@ -556,6 +556,16 @@ ol.list .row::before {
 .hero-line.muted { font-size: 13px; }
 .hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 
+/* Add to space, filling as the pipeline gets its target onto the map. */
+button.adding:disabled {
+  opacity: 1;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(to right,
+    rgba(122, 162, 247, 0.35) var(--progress),
+    var(--row) var(--progress));
+}
+
 .badge.in-space {
   display: inline-flex;
   align-items: center;
@@ -987,6 +997,10 @@ span.path-end {
 .stage.active { background: var(--row); border-left-color: var(--accent); }
 .stage-name { font-weight: 600; }
 .stage-blurb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-progress { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.stage-progress .muted { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bar { flex: 1; height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); transition: width 0.2s linear; }
 
 .log {
   min-height: 160px;

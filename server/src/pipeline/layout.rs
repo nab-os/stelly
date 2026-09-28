@@ -51,6 +51,7 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<usize> {
     }
 
     job.log(format!("laying out {n} tracks ({d} dims)"));
+    job.advance("layout", 0, 1);
     let coords = umap(&weighted.unit, n, d, options, job)?;
     if job.cancelled() {
         bail!("cancelled");
@@ -308,6 +309,7 @@ fn optimise(
         if epoch % 25 == 0 && job.cancelled() {
             bail!("cancelled");
         }
+        job.advance("layout", epoch as u64, epochs as u64);
         let alpha = 1.0 - epoch as f64 / epochs as f64;
         let now = epoch as f64;
 

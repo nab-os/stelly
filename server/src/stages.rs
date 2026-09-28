@@ -3,31 +3,71 @@
 //! Stages run in this process. The crawl has its own loop in `hub`, since it
 //! runs until stopped rather than until done; the other three come through
 //! here, from the pipeline view and the command line alike.
+//!
+//! Analyse can be pointed at one track, album or artist, which it catalogues
+//! first, so a single album reaches the space without the backlog.
 
 use crate::pipeline::{analyse, assemble, layout, Job, Paths};
-use crate::qobuz::RateLimit;
-use crate::schema::{albums, failures, features, frontier, tracks};
+use crate::qobuz::{Credentials, QobuzClient, RateLimit};
+use crate::schema::{failures, features, frontier, tracks};
+use crate::{crawl, db};
 use anyhow::{bail, Result};
 use diesel::prelude::*;
 use std::path::Path;
-use two_khz::api::{Catalogued, Corpus, Stage};
+use two_khz::api::{Corpus, Stage, Target};
 
 /// Run one terminating stage to completion. Analyse holds a blocking database
 /// connection across awaits, so drive it on a thread of its own.
-pub async fn run(stage: Stage, paths: &Paths, limiter: RateLimit, job: &Job) -> Result<()> {
-    match stage {
-        Stage::Crawl => bail!("the crawl runs from its own loop, not as a stage"),
-        Stage::Analyse => {
+pub async fn run(stage: Stage, target: Option<&Target>, paths: &Paths, limiter: RateLimit, job: &Job) -> Result<()> {
+    match (stage, target) {
+        (Stage::Crawl, _) => bail!("the crawl runs from its own loop, not as a stage"),
+        (Stage::Analyse, Some(target)) => {
+            analyse_target(target, paths, limiter, analyse::Options::default(), job).await?;
+        }
+        (Stage::Analyse, None) => {
             analyse::run(paths, limiter, &analyse::Options::default(), job).await?;
         }
-        Stage::BuildSpace => {
+        (Stage::BuildSpace, _) => {
             assemble::run(paths, None, job).await?;
         }
-        Stage::Layout => {
+        (Stage::Layout, _) => {
             layout::run(paths, &layout::Options::default(), job)?;
         }
     }
     Ok(())
+}
+
+/// Catalogue one target, then analyse its tracks and nothing else. Past
+/// failures are retried: asking by name is asking again. An error when none
+/// of it could be analysed, so the caller does not wait for it on the map.
+pub async fn analyse_target(
+    target: &Target,
+    paths: &Paths,
+    limiter: RateLimit,
+    options: analyse::Options,
+    job: &Job,
+) -> Result<analyse::Stats> {
+    job.log(format!("cataloguing {target}"));
+    let ids = {
+        let conn = &mut db::open_for_write(&paths.db_path)?;
+        let credentials = Credentials::from_env(&paths.env_dir)?;
+        let mut client = QobuzClient::sharing(credentials, limiter.clone());
+        crawl::catalogue_target(conn, &mut client, target, job).await?
+    };
+    if ids.is_empty() {
+        bail!("{target} has no tracks");
+    }
+
+    let options = analyse::Options {
+        only: Some(ids),
+        retry_failed: true,
+        ..options
+    };
+    let stats = analyse::run(paths, limiter, &options, job).await?;
+    if stats.total > 0 && stats.done == 0 && !job.cancelled() {
+        bail!("none of {target} could be analysed");
+    }
+    Ok(stats)
 }
 
 /// Re-read the counts that tell you what still needs running. `in_space` and
@@ -59,19 +99,4 @@ pub fn corpus(db_path: &Path) -> Result<Corpus> {
         in_space: 0,
         on_map: 0,
     })
-}
-
-/// Which of `ids` the catalogue holds, listed and with a tracklist.
-pub fn catalogued(db_path: &Path, ids: &[String]) -> Result<Catalogued> {
-    let conn = &mut crate::db::open_for_write(db_path)?;
-    let listed = albums::table
-        .filter(albums::id.eq_any(ids))
-        .select(albums::id)
-        .load(conn)?;
-    let tracked = tracks::table
-        .filter(tracks::album_id.eq_any(ids))
-        .select(tracks::album_id.assume_not_null())
-        .distinct()
-        .load(conn)?;
-    Ok(Catalogued { listed, tracked })
 }

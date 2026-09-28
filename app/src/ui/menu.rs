@@ -12,9 +12,10 @@
 //! since gone.
 
 use super::generate::{Generator, Mode, PathEnd};
-use super::library::{request_analysis, Library};
+use super::library::{add_to_space, Library};
 use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
 use super::{open_remote_track, space_track, Blocklist, LocalIds, MapView, Selection};
+use crate::api::Target;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
 use dioxus::core::spawn_forever;
@@ -361,7 +362,7 @@ fn ShelfAlbumItems(index: usize) -> Element {
         div { class: "menu-rule" }
         button {
             class: "menu-item",
-            title: "fetch this tracklist into the catalogue",
+            title: "analyse this album and put it on the map",
             onclick: move |_| {
                 let found = library
                     .shelf
@@ -370,11 +371,11 @@ fn ShelfAlbumItems(index: usize) -> Element {
                     .get(index)
                     .map(|album| (album.id.clone(), album.title.clone()));
                 if let Some((id, title)) = found {
-                    request_analysis(library, "album", &id, &title);
+                    add_to_space(library, Target::Album(id), &title);
                 }
                 menu.set(None);
             },
-            "Fetch into catalogue"
+            "Add to space"
         }
 
         if let Some((artist_id, name)) = artist {
@@ -424,14 +425,14 @@ fn ShelfArtistItems(index: usize, similar: bool) -> Element {
         }
         button {
             class: "menu-item",
-            title: "fetch this discography into the catalogue",
+            title: "analyse every album of theirs and put them on the map",
             onclick: move |_| {
                 if let Some((id, name)) = artist_at() {
-                    request_analysis(library, "artist", &id.to_string(), &name);
+                    add_to_space(library, Target::Artist(id), &name);
                 }
                 menu.set(None);
             },
-            "Fetch discography"
+            "Add to space"
         }
 
         div { class: "menu-rule" }

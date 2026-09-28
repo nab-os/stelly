@@ -124,6 +124,12 @@ cargo run --release -- status                   # what is done, what is due
 Every stage is resumable: the crawl frontier lives in SQLite and analysis skips
 what it has already done, so Ctrl-C and rerun is always safe.
 
+To skip the queue for one thing, `analyse --track ID`, `--album ID` or
+`--artist ID` catalogues it first if need be and analyses only that. In the
+app, **Add to space** on a track, album or artist page does the same, then
+rebuilds the space and the map. A backlog `analyse` already running pauses
+for it and picks up where it was afterwards.
+
 `analyse` stores the CLAP embedding and the descriptors and nothing derived, so
 the mood and style scores, the weights and the PCA are all rebuilt by
 `build-space` in seconds, change a label in `server/src/pipeline/labels.rs`
@@ -226,7 +232,8 @@ refuses to act rather than guessing.
 ## Devices and the network
 
 Two scopes, both authenticated: `play` is browsing, syncing and minting a stream
-URL; `pipeline` is crawling and analysis. Each device gets its own token, stored
+URL, and **Add to space**, which is bounded; `pipeline` is crawling and
+analysing the whole backlog. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
 
 The devices share one queue. The speaker button in the player bar lists the
