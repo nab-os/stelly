@@ -17,6 +17,7 @@ pub mod qobuz;
 pub mod schema;
 pub mod session;
 pub mod space;
+pub mod update;
 
 /// The window, and everything in it. Shared by every platform that has one.
 #[cfg(feature = "gui")]

@@ -636,7 +636,7 @@ async fn read_session(
 }
 
 #[cfg(not(target_os = "android"))]
-fn http_client() -> reqwest::Client {
+pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
@@ -649,7 +649,7 @@ fn http_client() -> reqwest::Client {
 /// store, the one Conscrypt updates through its APEX on 14+, and whatever
 /// the user installed, which is how a private CA in front of nginx gets in.
 #[cfg(target_os = "android")]
-fn http_client() -> reqwest::Client {
+pub(crate) fn http_client() -> reqwest::Client {
     const STORES: [&str; 3] = [
         "/apex/com.android.conscrypt/cacerts",
         "/system/etc/security/cacerts",

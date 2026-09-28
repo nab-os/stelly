@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod player;
 pub mod prefs;
 pub mod queue;
+pub mod release;
 pub mod screens;
 pub mod settings;
 pub mod side;
@@ -26,6 +27,7 @@ pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget}
 pub use pipeline::Pipeline;
 pub use player::{use_session, use_transport, Player, PlayerBar};
 pub use queue::QueueView;
+pub use release::{ReleaseNotice, Releases};
 pub use side::{GeneratePanel, PathPill};
 
 use dioxus::prelude::*;
