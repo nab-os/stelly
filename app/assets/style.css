@@ -222,8 +222,7 @@ button.danger:hover:not(:disabled),
 
 /* --------------------------------------------------------- floating buttons
    Bottom right of the main area, over the map too: the map's own button is
-   how it closes again. The map is the primary action and wears the accent;
-   search is quieter, the base colour. */
+   how it closes again. The map wears the accent. */
 
 .fabs {
   position: absolute;
@@ -248,13 +247,8 @@ button.danger:hover:not(:disabled),
 .fab-map:hover:not(:disabled) { background: #8fb3ff; }
 .fab-map.active { box-shadow: 0 0 0 3px var(--panel), 0 0 0 5px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
 
-.fab-search { width: 44px; height: 44px; background: var(--row-hover); color: var(--text); }
-.fab-search .icon { width: 20px; height: 20px; }
-.fab-search:hover:not(:disabled) { background: #363a47; }
-.fab-search.active { color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
-
 /* Phone only, see the `@media` block. */
-.fab-generate { display: none; }
+.topbar-generate { display: none; }
 
 /* --------------------------------------------------------------------- map
    Over the main area. The background must stay opaque and must stay
@@ -1163,7 +1157,7 @@ span.path-end {
 /* ============================================================== phone
    The generate panel leaves the row and slides in from the right, over the
    main area but not the player, with a floating arrow to send it back. A
-   third floating button, the panel's own, brings it in. */
+   button in the top bar, the panel's own, brings it in. */
 
 @media (max-width: 900px) {
   .workspace { padding: 0; gap: 0; }
@@ -1213,15 +1207,7 @@ span.path-end {
   }
   .side-back .icon { width: 20px; height: 20px; }
 
-  .fab-generate {
-    display: grid;
-    width: 44px;
-    height: 44px;
-    background: var(--row-hover);
-    color: var(--accent);
-  }
-  .fab-generate .icon { width: 20px; height: 20px; }
-  .fab-generate.active { box-shadow: inset 0 0 0 2px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
+  .topbar-generate { display: inline-grid; }
   /* Over the generate panel, under the queue drawer. */
   .fabs { right: 14px; bottom: 14px; gap: 10px; z-index: 26; }
 
