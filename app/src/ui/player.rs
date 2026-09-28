@@ -251,7 +251,9 @@ fn follow(player: Player) {
         if mirror.loaded.take().is_some() {
             mirror.loading = None;
             mirror.sounding = false;
+            drop(mirror);
             transport("twoKhzStop");
+            announce();
         }
         return;
     };
@@ -402,6 +404,26 @@ fn report_position(player: Player) {
         }
     };
     commit(player, op);
+}
+
+/// Tell the system what the element holds, for the notification and the lock
+/// screen. Only Android needs telling, see `now_playing`.
+fn announce() {
+    #[cfg(target_os = "android")]
+    {
+        let mirror = mirror();
+        if mirror.loading.is_some() {
+            return;
+        }
+        let track = mirror
+            .session()
+            .current()
+            .filter(|track| mirror.loaded.is_some_and(|(_, id)| id == track.id))
+            .cloned();
+        let (playing, heard) = (mirror.sounding, mirror.heard);
+        drop(mirror);
+        super::now_playing::show(track.as_ref(), playing, heard);
+    }
 }
 
 /// Push the level at the audio element. Muting sends 0 rather than setting
@@ -827,6 +849,7 @@ pub fn use_transport(player: Player) {
                     if due {
                         report_position(player);
                     }
+                    announce();
                 }
                 Some("playing") => {
                     let playing = message
@@ -834,8 +857,12 @@ pub fn use_transport(player: Player) {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     sounding(player, playing, number("position"));
+                    announce();
                 }
-                Some("loaded") => loaded(player),
+                Some("loaded") => {
+                    loaded(player);
+                    announce();
+                }
                 Some("ended") => {
                     let index = {
                         let mut mirror = mirror();
@@ -872,6 +899,23 @@ pub fn use_transport(player: Player) {
                     _ => {}
                 },
                 _ => {}
+            }
+        }
+    });
+
+    // The notification's buttons, which go through the session like the
+    // bar's own.
+    #[cfg(target_os = "android")]
+    use_future(move || async move {
+        use super::now_playing::{buttons, Button};
+        let mut buttons = buttons().await;
+        while let Some(button) = buttons.recv().await {
+            match button {
+                Button::Play => commit(player, Op::Play),
+                Button::Pause => commit(player, Op::Pause),
+                Button::Next => step(player, 1),
+                Button::Previous => step(player, -1),
+                Button::Seek(position) => seek(player, position),
             }
         }
     });

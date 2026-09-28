@@ -9,6 +9,8 @@ pub mod generate;
 pub mod icons;
 pub mod library;
 pub mod menu;
+#[cfg(target_os = "android")]
+mod now_playing;
 pub mod pipeline;
 pub mod player;
 pub mod prefs;
