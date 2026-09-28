@@ -1,5 +1,6 @@
 //! What this device remembers between runs, besides the pairing: the stream
-//! quality, and grid or list for each kind of page.
+//! quality, grid or list for each kind of page, and what to say about new
+//! releases.
 //!
 //! Its own file next to `server.json` rather than inside it: forgetting the
 //! pairing should not also forget how the lists were laid out.
@@ -18,6 +19,11 @@ use std::path::PathBuf;
 pub struct Prefs {
     pub quality: Option<u32>,
     pub layouts: HashMap<ViewKind, TracksView>,
+    /// Off stops asking GitHub about releases at all. `None` is on.
+    pub release_checks: Option<bool>,
+    /// The release whose notice was closed. Only that one: the next release
+    /// is announced again.
+    pub dismissed_release: Option<String>,
 }
 
 impl Prefs {
@@ -38,6 +44,10 @@ impl Prefs {
         self.quality
             .filter(|q| [FORMAT_MP3_320, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES].contains(q))
             .unwrap_or(FORMAT_MP3_320)
+    }
+
+    pub fn checks_releases(&self) -> bool {
+        self.release_checks.unwrap_or(true)
     }
 
     fn save(&self) -> anyhow::Result<()> {
