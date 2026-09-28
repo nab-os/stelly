@@ -15,7 +15,7 @@ use super::{
     album_link, artist_link, open_remote_track, space_mark, Blocklist, Cover, LocalIds, MapView,
     Pipeline, Selection, SpaceReach,
 };
-use crate::api::{Target, MIN_TRACK_SECONDS};
+use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::prelude::*;
@@ -62,6 +62,33 @@ impl Held {
     }
 }
 
+/// How far `target` is on its way to the map, and what is happening to it.
+/// Its own analyse is most of the bar; the rebuild after is shared with
+/// whatever else is being added.
+fn on_its_way(status: &PipelineStatus, target: &Target) -> (f64, &'static str) {
+    let step = status.progress.as_ref();
+    let fraction = step.map_or(0.0, Progress::fraction);
+    let doing = |name: &str| step.is_some_and(|p| p.step == name);
+
+    if status.waiting.contains(target) {
+        (0.0, "waiting its turn")
+    } else if status.target.as_ref() == Some(target) {
+        if doing("analyse") {
+            (0.1 + 0.6 * fraction, "analysing")
+        } else if doing("catalogue") {
+            (0.1 * fraction, "cataloguing")
+        } else {
+            (0.0, "starting")
+        }
+    } else if status.running == Some(Stage::BuildSpace) {
+        (0.7 + 0.1 * fraction, "building the space")
+    } else if status.running == Some(Stage::Layout) {
+        (0.8 + 0.2 * fraction, "laying out the map")
+    } else {
+        (0.7, "waiting for the rest to be analysed")
+    }
+}
+
 /// "In your space" when it already is, "Adding…" while the server works on it,
 /// otherwise the button that asks it to: catalogue, analyse, then rebuild the
 /// space and the map, ahead of the rest of the backlog.
@@ -76,11 +103,15 @@ fn add_or_badge(
         return rsx! { span { class: "badge in-space", "in your space" } };
     }
     if pipeline.status.read().adding.contains(&target) {
+        let (fraction, doing) = on_its_way(&pipeline.status.read(), &target);
+        let percent = (fraction * 100.0).round();
         return rsx! {
             button {
-                title: "being analysed, then built into the space and laid out; progress is in settings",
+                class: "adding",
+                style: "--progress: {percent}%",
+                title: "{doing}; the pipeline output in settings has the detail",
                 disabled: true,
-                "Adding…"
+                "Adding… {percent}%"
             }
         };
     }

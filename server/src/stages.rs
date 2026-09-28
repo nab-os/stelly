@@ -52,7 +52,7 @@ pub async fn analyse_target(
         let conn = &mut db::open_for_write(&paths.db_path)?;
         let credentials = Credentials::from_env(&paths.env_dir)?;
         let mut client = QobuzClient::sharing(credentials, limiter.clone());
-        crawl::catalogue_target(conn, &mut client, target, &|line| job.log(line)).await?
+        crawl::catalogue_target(conn, &mut client, target, job).await?
     };
     if ids.is_empty() {
         bail!("{target} has no tracks");

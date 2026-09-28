@@ -21,13 +21,20 @@ pub mod models;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use two_khz::api::Progress;
+
+/// Where a `Job` leaves its progress: the step, and when that step began.
+pub type ProgressSlot = Arc<Mutex<Option<(Progress, Instant)>>>;
 
 /// Where a stage's progress goes, and whether it should stop.
 #[derive(Clone)]
 pub struct Job {
     sink: Arc<dyn Fn(&str) + Send + Sync>,
     cancel: Arc<AtomicBool>,
+    /// How far along the current step is, for a status to show as a bar.
+    progress: ProgressSlot,
 }
 
 impl Job {
@@ -35,7 +42,14 @@ impl Job {
         Self {
             sink: Arc::new(sink),
             cancel,
+            progress: Arc::default(),
         }
+    }
+
+    /// Report progress into `slot`, where whoever runs the job can read it.
+    pub fn reporting(mut self, slot: ProgressSlot) -> Self {
+        self.progress = slot;
+        self
     }
 
     /// Progress to stderr, as the command line wants it. Never cancelled.
@@ -50,6 +64,32 @@ impl Job {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
+
+    /// `done` of `total` through `step`. The clock restarts when the step
+    /// changes, so the time spent is the step's own.
+    pub fn advance(&self, step: &str, done: u64, total: u64) {
+        let mut slot = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        let started = match &*slot {
+            Some((current, started)) if current.step == step => *started,
+            _ => Instant::now(),
+        };
+        let progress = Progress {
+            step: step.to_string(),
+            done,
+            total,
+            seconds: started.elapsed().as_secs_f64(),
+        };
+        *slot = Some((progress, started));
+    }
+}
+
+/// What a status reports from a `Job`'s progress slot.
+pub fn progress_of(slot: &ProgressSlot) -> Option<Progress> {
+    let slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+    slot.as_ref().map(|(progress, started)| Progress {
+        seconds: started.elapsed().as_secs_f64(),
+        ..progress.clone()
+    })
 }
 
 /// Where everything lives on this machine.

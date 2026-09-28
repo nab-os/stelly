@@ -334,6 +334,7 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
     let in_flight_cap = workers * 2 + fetchers;
     let started = Instant::now();
     let mut finished = 0usize;
+    job.advance("analyse", 0, stats.total as u64);
 
     let fail = |conn: &mut SqliteConnection, stats: &mut Stats, track_id: i64, reason: &str| -> Result<()> {
         record_failure(conn, track_id, reason)?;
@@ -378,6 +379,7 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
                     Err(err) => {
                         fail(&mut conn, &mut stats, track_id, &format!("{err:#}"))?;
                         finished += 1;
+                        job.advance("analyse", finished as u64, stats.total as u64);
                     }
                 }
             }
@@ -391,6 +393,7 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
                     Err(reason) => fail(&mut conn, &mut stats, track_id, &reason)?,
                 }
                 finished += 1;
+                job.advance("analyse", finished as u64, stats.total as u64);
 
                 if finished.is_multiple_of(10) {
                     let rate = finished as f64 / started.elapsed().as_secs_f64().max(1e-6);

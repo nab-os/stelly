@@ -6,7 +6,7 @@
 //! server cannot write a client's signals.
 
 use crate::cache::Cache;
-use crate::pipeline::{Job, Paths};
+use crate::pipeline::{progress_of, Job, Paths, ProgressSlot};
 use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::schema::{frontier, tracks};
 use crate::stages;
@@ -64,6 +64,8 @@ struct PipelineJob {
     /// so the runner carries on rather than treating it as a stop.
     preempted: AtomicBool,
     generation: AtomicU64,
+    /// The running stage's, cleared between stages.
+    progress: ProgressSlot,
 }
 
 /// What the pipeline is doing and will do, under one lock so a target
@@ -452,7 +454,9 @@ impl Hub {
                 }
 
                 let sink = log.clone();
-                let reporter = Job::new(move |line| sink.push(line), job.cancel.clone());
+                *job.progress.lock().unwrap() = None;
+                let reporter = Job::new(move |line| sink.push(line), job.cancel.clone())
+                    .reporting(job.progress.clone());
                 let (paths, limit, scope) = (paths.clone(), limit.clone(), target.clone());
                 let outcome = off_thread(move || async move {
                     stages::run(stage, scope.as_ref(), &paths, limit, &reporter).await
@@ -487,6 +491,7 @@ impl Hub {
                 if preempted {
                     job.cancel.store(false, Ordering::SeqCst);
                 }
+                *job.progress.lock().unwrap() = None;
                 current = if cancelled { None } else { queue.next() };
                 queue.running = current.as_ref().map(|(stage, _)| *stage);
                 queue.target = current.as_ref().and_then(|(_, target)| target.clone());
@@ -517,6 +522,8 @@ impl Hub {
             generation: self.pipeline.generation.load(Ordering::SeqCst),
             target: queue.target.clone(),
             adding: queue.adding.clone(),
+            waiting: queue.targets.iter().cloned().collect(),
+            progress: progress_of(&self.pipeline.progress),
         })
     }
 

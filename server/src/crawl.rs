@@ -5,6 +5,7 @@
 //! interruptible.
 
 use crate::db::{coalesce, least};
+use crate::pipeline::Job;
 use crate::qobuz::QobuzClient;
 use crate::schema::{albums, artists, blocked_artists, frontier, tracks};
 use anyhow::{Context, Result};
@@ -478,9 +479,10 @@ pub async fn catalogue_target(
     conn: &mut SqliteConnection,
     client: &mut QobuzClient,
     target: &Target,
-    log: &dyn Fn(String),
+    job: &Job,
 ) -> Result<Vec<i64>> {
     client.login().await?;
+    job.advance("catalogue", 0, 1);
     match target {
         Target::Track(track_id) => {
             let known: Option<Option<String>> = tracks::table
@@ -499,14 +501,16 @@ pub async fn catalogue_target(
                     .with_context(|| format!("track {track_id} has no id"))?;
             }
             let title: String = tracks::table.find(track_id).select(tracks::title).first(conn)?;
-            log(format!("  {title}"));
+            job.log(format!("  {title}"));
+            job.advance("catalogue", 1, 1);
             Ok(vec![*track_id])
         }
         Target::Album(album_id) => {
             catalogue_album(conn, client, album_id).await?;
             let found = album_tracks(conn, std::slice::from_ref(album_id))?;
             let title: String = albums::table.find(album_id).select(albums::title).first(conn)?;
-            log(format!("  {title}: {} tracks", found.len()));
+            job.log(format!("  {title}: {} tracks", found.len()));
+            job.advance("catalogue", 1, 1);
             Ok(found)
         }
         Target::Artist(artist_id) => {
@@ -525,21 +529,24 @@ pub async fn catalogue_target(
                 .collect();
 
             let mut album_ids = Vec::with_capacity(own.len());
+            let total = own.len() as u64;
             for (n, album) in own.iter().enumerate() {
+                job.advance("catalogue", n as u64, total);
                 let Some(album_id) = upsert_album(conn, album)? else { continue };
                 // A region-locked album must not lose the rest.
                 if let Err(err) = catalogue_album(conn, client, &album_id).await {
-                    log(format!("  ! album {album_id}: {err:#}"));
+                    job.log(format!("  ! album {album_id}: {err:#}"));
                     continue;
                 }
                 let title = text(album, "title").unwrap_or_default();
-                log(format!("  {}/{} {title}", n + 1, own.len()));
+                job.log(format!("  {}/{} {title}", n + 1, own.len()));
                 album_ids.push(album_id);
             }
             enqueue(conn, "artist", &artist_id.to_string(), 0)?;
 
             let found = album_tracks(conn, &album_ids)?;
-            log(format!("  {} albums, {} tracks", album_ids.len(), found.len()));
+            job.log(format!("  {} albums, {} tracks", album_ids.len(), found.len()));
+            job.advance("catalogue", total, total);
             Ok(found)
         }
     }
