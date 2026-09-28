@@ -17,7 +17,29 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// What a sync is doing, as far as someone waiting on it cares.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SyncStep {
+    /// Asking the server what it holds and comparing digests.
+    #[default]
+    Checking,
+    Downloading,
+    Done,
+}
+
+/// How far a sync has got. Totals count only the files that were stale.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SyncProgress {
+    pub step: SyncStep,
+    /// The one coming down, while `Downloading`.
+    pub file: String,
+    pub files_done: usize,
+    pub files_total: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
 
 pub struct Remote {
     http: reqwest::Client,
@@ -27,6 +49,8 @@ pub struct Remote {
     /// Where synced artefacts land, and where the engine loads them from.
     data_dir: PathBuf,
     log: Arc<LogBuffer>,
+    /// How far the running `sync_space` has got, for the loading screen.
+    sync: Arc<Mutex<SyncProgress>>,
     /// Whether the SSE task is already running. The log is pushed, not polled,
     /// so a stage that prints nothing for minutes costs nothing to watch.
     streaming: Arc<AtomicBool>,
@@ -41,6 +65,7 @@ impl Remote {
             token: token.into(),
             data_dir,
             log: Arc::new(LogBuffer::default()),
+            sync: Arc::new(Mutex::new(SyncProgress::default())),
             streaming: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -474,18 +499,30 @@ impl Remote {
     /// Bring the local copy of the space up to date. Digest-compared per file,
     /// not by generation alone: a restart resets the counter.
     pub async fn sync_space(&self) -> Result<bool> {
+        self.set_sync(SyncProgress::default());
         let manifest: SyncManifest = self.get("/api/sync/manifest").await?;
         std::fs::create_dir_all(&self.data_dir)
             .with_context(|| format!("creating {}", self.data_dir.display()))?;
 
-        let mut changed = false;
+        let stale: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|file| {
+                local_digest(&self.data_dir.join(&file.name)).as_deref() != Some(file.digest.as_str())
+            })
+            .collect();
+        let mut progress = SyncProgress {
+            step: SyncStep::Downloading,
+            files_total: stale.len(),
+            bytes_total: stale.iter().map(|file| file.bytes).sum(),
+            ..SyncProgress::default()
+        };
 
-        for file in &manifest.files {
+        for file in &stale {
+            progress.file = file.name.clone();
+            self.set_sync(progress.clone());
+
             let target = self.data_dir.join(&file.name);
-            if local_digest(&target).as_deref() == Some(file.digest.as_str()) {
-                continue;
-            }
-
             let response = self
                 .http
                 .get(self.url(&format!("/api/sync/{}", urlencode(&file.name))))
@@ -493,19 +530,38 @@ impl Remote {
                 .send()
                 .await
                 .with_context(|| format!("downloading {}", file.name))?;
-            let bytes = Self::check(response).await?.bytes().await?;
+            let mut body = Self::check(response).await?.bytes_stream();
 
             // Write beside the target and rename: an interrupted sync must
             // not leave a half-written space.bin for the engine to map.
             let staging = target.with_extension("partial");
-            std::fs::write(&staging, &bytes)
+            let mut out = std::fs::File::create(&staging)
                 .with_context(|| format!("writing {}", staging.display()))?;
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk.with_context(|| format!("downloading {}", file.name))?;
+                std::io::Write::write_all(&mut out, &chunk)
+                    .with_context(|| format!("writing {}", staging.display()))?;
+                progress.bytes_done += chunk.len() as u64;
+                self.set_sync(progress.clone());
+            }
+            drop(out);
             std::fs::rename(&staging, &target)
                 .with_context(|| format!("replacing {}", target.display()))?;
-            changed = true;
+            progress.files_done += 1;
         }
 
-        Ok(changed)
+        progress.step = SyncStep::Done;
+        self.set_sync(progress);
+        Ok(!stale.is_empty())
+    }
+
+    /// Where the running sync is, or where the last one stopped.
+    pub fn sync_progress(&self) -> SyncProgress {
+        self.sync.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_sync(&self, progress: SyncProgress) {
+        *self.sync.lock().unwrap_or_else(|e| e.into_inner()) = progress;
     }
 
     // ------------------------------------------------------------ devices

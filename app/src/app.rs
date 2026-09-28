@@ -3,7 +3,7 @@
 //! In the library rather than `main.rs` because an Android build has no
 //! `main`: the APK loads the .so and calls `start_app`.
 
-use crate::backend::{self, backend};
+use crate::backend::{self, backend, SyncStep};
 use crate::ui::{
     icons, space_track, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel,
     Generator, Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar,
@@ -47,69 +47,144 @@ pub(crate) fn db_path() -> &'static std::path::Path {
     DB_PATH.get().expect("set by bootstrap")
 }
 
-/// Wire up the backend, sync, and load the space. Fallible but not fatal: an
-/// unpaired or unreachable client opens on the setup screen.
+/// Wire up the backend from the environment or a stored pairing. Fallible but
+/// not fatal: an unpaired client opens on the setup screen. The sync waits for
+/// the window, where the loading screen can show it.
 pub fn bootstrap() -> anyhow::Result<()> {
-    let wiring = Wiring::from_env()?;
+    wire(Wiring::from_env()?);
+    Ok(())
+}
 
-    let data_dir = wiring.data_dir().to_path_buf();
-    let db_path = wiring.db_path();
-    let _ = DATA_DIR.set(data_dir.clone());
-    let _ = DB_PATH.set(db_path.clone());
-
+fn wire(wiring: Wiring) {
+    let _ = DATA_DIR.set(wiring.data_dir().to_path_buf());
+    let _ = DB_PATH.set(wiring.db_path());
     backend::init(wiring.into_backend());
-
-    // Sync before the engine loads: it memory-maps what it finds and will not
-    // look again until told to.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(backend().sync_space())?;
-
-    crate::init_engine(&data_dir, &db_path)
 }
 
-/// Re-run the parts of `bootstrap` a freshly paired device needs, against
-/// the backend the setup screen has just installed.
-pub async fn sync_and_load() -> anyhow::Result<()> {
+/// Sync, then load what came down. The sync goes first: the engine
+/// memory-maps what it finds and will not look again until told to.
+async fn sync_and_load() -> anyhow::Result<()> {
     backend().sync_space().await?;
-    let data_dir = crate::client_data_dir();
-    let db_path = data_dir.join("catalog.db");
-    let _ = DATA_DIR.set(data_dir.clone());
-    let _ = DB_PATH.set(db_path.clone());
-    crate::init_engine(&data_dir, &db_path)
+    // Off the UI thread, so the loading screen keeps moving while the
+    // catalogue is read in.
+    tokio::task::spawn_blocking(|| crate::init_engine(data_dir(), db_path())).await?
 }
 
+/// Where the root is: fetching the space, asking for a pairing, or the app.
+#[derive(Clone, PartialEq)]
+enum Phase {
+    Loading,
+    /// With why the last attempt failed, if there was one.
+    Setup(Option<String>),
+    Ready,
+}
 
-/// The root: either the app, or the screen that gets you to the app.
+/// The root: either the app, or the screens that get you to the app.
 ///
-/// Two components rather than an early return, Dioxus counts hooks per
+/// Separate components rather than an early return, Dioxus counts hooks per
 /// scope, and changing that count between renders panics.
 #[component]
 pub fn App() -> Element {
-    let ready = use_signal(crate::engine_ready);
+    let phase = use_signal(|| {
+        if crate::engine_ready() {
+            Phase::Ready
+        } else if backend::wired() {
+            Phase::Loading
+        } else {
+            Phase::Setup(None)
+        }
+    });
 
     rsx! {
         style { {include_str!("../assets/style.css")} }
-        if ready() {
-            Shell {}
-        } else {
-            Setup { ready }
+        match phase() {
+            Phase::Ready => rsx! { Shell {} },
+            Phase::Loading => rsx! { Connect { phase } },
+            Phase::Setup(error) => rsx! { Setup { phase, error } },
         }
     }
+}
+
+/// The first sync, on launch or right after pairing, behind a loading screen.
+/// A failure goes back to the setup screen, which says what went wrong.
+#[component]
+fn Connect(phase: Signal<Phase>) -> Element {
+    use_future(move || async move {
+        match sync_and_load().await {
+            Ok(()) => phase.set(Phase::Ready),
+            Err(err) => phase.set(Phase::Setup(Some(format!(
+                "{err:#}\n\nIf the address and token are right, the server may not have \
+                 built a space yet, run build-space and layout on it."
+            )))),
+        }
+    });
+
+    rsx! {
+        Loading { title: "Fetching the catalogue" }
+    }
+}
+
+/// What a sync is up to, polled from the backend: it runs outside any scope
+/// and cannot write a signal itself.
+#[component]
+pub fn Loading(title: &'static str) -> Element {
+    let mut progress = use_signal(|| backend().sync_progress());
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let now = backend().sync_progress();
+            if *progress.peek() != now {
+                progress.set(now);
+            }
+        }
+    });
+
+    let progress = progress.read();
+    let (detail, fraction) = match progress.step {
+        SyncStep::Checking => ("asking the server what changed…".to_string(), None),
+        SyncStep::Downloading => (
+            format!(
+                "downloading {} ({} of {}), {} of {}",
+                progress.file,
+                progress.files_done + 1,
+                progress.files_total,
+                megabytes(progress.bytes_done),
+                megabytes(progress.bytes_total),
+            ),
+            Some(progress.bytes_done as f64 / progress.bytes_total.max(1) as f64),
+        ),
+        SyncStep::Done => ("loading the space…".to_string(), None),
+    };
+
+    rsx! {
+        div { class: "loading",
+            h1 { "{title}" }
+            div { class: if fraction.is_some() { "loading-bar" } else { "loading-bar busy" },
+                div {
+                    class: "loading-fill",
+                    style: "width: {fraction.unwrap_or(0.0) * 100.0:.1}%",
+                }
+            }
+            p { class: "muted", "{detail}" }
+        }
+    }
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 /// Pairing, for a device not configured through the environment. The address
 /// and token are typed once and written beside the synced space.
 #[component]
-fn Setup(ready: Signal<bool>) -> Element {
+fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
     let mut address = use_signal(|| {
         crate::ServerConfig::load()
             .map(|c| c.base)
             .unwrap_or_else(|| "http://".into())
     });
     let mut token = use_signal(String::new);
-    let mut status = use_signal(|| None::<String>);
+    let mut status = use_signal(|| error);
     let mut busy = use_signal(|| false);
 
     let connect = move |_| {
@@ -137,21 +212,8 @@ fn Setup(ready: Signal<bool>) -> Element {
                 return;
             }
 
-            backend::init(Wiring::remote(base, secret).into_backend());
-
-            match crate::app::sync_and_load().await {
-                Ok(()) => {
-                    status.set(None);
-                    ready.set(true);
-                }
-                Err(err) => {
-                    status.set(Some(format!(
-                        "{err:#}\n\nIf the address and token are right, the server may not have \
-                         built a space yet, run build-space and layout on it."
-                    )));
-                    busy.set(false);
-                }
-            }
+            wire(Wiring::remote(base, secret));
+            phase.set(Phase::Loading);
         });
     };
 
@@ -293,24 +355,33 @@ fn Shell() -> Element {
 
     // A rebuilt space means the loaded one is stale. Remotely the bytes have
     // to come down first; `sync_space` is a no-op locally, so this stays one
-    // path.
+    // path. The loading screen covers the app meanwhile, rather than leaving
+    // it answering from a space that is about to be swapped out.
+    let mut resyncing = use_signal(|| false);
     use_effect(move || {
         let generation = *pipeline.generation.read();
 
         spawn(async move {
             if generation > 0 {
-                match backend().sync_space().await {
-                    Ok(_) => match crate::reload_engine(data_dir(), db_path()) {
-                        Ok(()) => {
-                            selected.set(None);
-                            generator.clear();
-                            document::eval(
-                                "window.twoKhzReloadPoints && window.twoKhzReloadPoints();",
-                            );
-                        }
-                        Err(err) => eprintln!("could not reload the rebuilt space: {err:#}"),
-                    },
-                    Err(err) => eprintln!("could not sync the rebuilt space: {err:#}"),
+                resyncing.set(true);
+                let reloaded = match backend().sync_space().await {
+                    Ok(_) => tokio::task::spawn_blocking(|| crate::reload_engine(data_dir(), db_path()))
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .and_then(|loaded| loaded)
+                        .map_err(|err| (err, "reload")),
+                    Err(err) => Err((err, "sync")),
+                };
+                resyncing.set(false);
+                match reloaded {
+                    Ok(()) => {
+                        selected.set(None);
+                        generator.clear();
+                        document::eval(
+                            "window.twoKhzReloadPoints && window.twoKhzReloadPoints();",
+                        );
+                    }
+                    Err((err, what)) => eprintln!("could not {what} the rebuilt space: {err:#}"),
                 }
             }
 
@@ -870,6 +941,12 @@ fn Shell() -> Element {
 
             // Last, so it paints over everything it can be opened from.
             ContextMenuView {}
+
+            if resyncing() {
+                div { class: "loading-overlay",
+                    Loading { title: "Updating the space" }
+                }
+            }
         }
     }
 }

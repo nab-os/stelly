@@ -9,7 +9,7 @@
 pub mod remote;
 
 pub use crate::logbuffer::LogBuffer;
-pub use remote::{Remote, SessionFeed};
+pub use remote::{Remote, SessionFeed, SyncProgress, SyncStep};
 use std::sync::RwLock;
 
 /// The one backend there is. Named for what callers use it as.
@@ -29,6 +29,12 @@ static BACKEND: RwLock<Option<&'static Backend>> = RwLock::new(None);
 pub fn init(backend: Backend) {
     let backend: &'static Backend = Box::leak(Box::new(backend));
     *BACKEND.write().unwrap_or_else(|e| e.into_inner()) = Some(backend);
+}
+
+/// Whether a pairing has been wired up, from the environment, a stored one,
+/// or the setup screen.
+pub fn wired() -> bool {
+    BACKEND.read().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 pub fn backend() -> &'static Backend {
