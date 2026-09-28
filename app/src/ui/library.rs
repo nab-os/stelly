@@ -522,6 +522,20 @@ impl Library {
         }
     }
 
+    /// The settings button: open settings, or leave them again if they are
+    /// the screen showing, the same way the search button does.
+    pub(crate) fn toggle_settings(self) {
+        if matches!(&*self.view.peek(), View::Settings) {
+            if self.history.peek().is_empty() {
+                self.show(View::Favourites { scope: Scope::Everything });
+            } else {
+                self.back();
+            }
+        } else {
+            self.go(View::Settings);
+        }
+    }
+
     /// Refine the search in place. Only while the search screen is showing:
     /// the debounce behind this fires a beat after the last keystroke, and
     /// by then you may have tapped your way somewhere else. Replaces rather
@@ -884,9 +898,7 @@ pub fn MainScreen() -> Element {
                     title: "settings",
                     onclick: move |_| {
                         map.close();
-                        if !settings {
-                            library.go(View::Settings);
-                        }
+                        library.toggle_settings();
                     },
                     {icons::settings()}
                 }
