@@ -326,7 +326,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     let hub = Arc::new(Hub::new(paths));
 
     let state = AppState {
-        hub: hub.clone(),
+        hub,
         auth: Arc::new(store),
         playback: playback::Playback::new(),
         data_dir: data_dir.clone(),
@@ -338,7 +338,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
         // The slim catalogue has to follow the space: a client syncing new
         // vectors against an old catalogue draws the right points with the
         // wrong labels.
-        tokio::spawn(watch_generation(hub, db_path, data_dir));
+        tokio::spawn(rebuild_catalog(db_path, data_dir));
 
         let listener = tokio::net::TcpListener::bind(address).await?;
         println!("two-khz-server listening on http://{address}");
@@ -355,28 +355,20 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     served
 }
 
-/// Rebuild `catalog.db` whenever a stage has rewritten the space.
-async fn watch_generation(hub: Arc<Hub>, db_path: PathBuf, data_dir: PathBuf) {
-    let mut seen = u64::MAX;
-
-    loop {
-        if let Ok(status) = hub.pipeline_status().await {
-            if status.generation != seen {
-                // Including the first pass: a catalogue left by an older
-                // server may not match the schema clients now read.
-                let target = data_dir.join("catalog.db");
-                match catalog::build(&db_path, &target) {
-                    Ok(bytes) => println!(
-                        "rebuilt {} ({:.1} MB)",
-                        target.display(),
-                        bytes as f64 / 1_048_576.0
-                    ),
-                    Err(err) => eprintln!("could not rebuild the slim catalogue: {err:#}"),
-                }
-                seen = status.generation;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+/// Rebuild `catalog.db` once at startup: a catalogue left by an older server
+/// may not match the schema clients now read. After that the hub rebuilds it
+/// with every stage that rewrites the space.
+async fn rebuild_catalog(db_path: PathBuf, data_dir: PathBuf) {
+    let target = data_dir.join("catalog.db");
+    let shown = target.clone();
+    match tokio::task::spawn_blocking(move || catalog::build(&db_path, &target)).await {
+        Ok(Ok(bytes)) => println!(
+            "rebuilt {} ({:.1} MB)",
+            shown.display(),
+            bytes as f64 / 1_048_576.0
+        ),
+        Ok(Err(err)) => eprintln!("could not rebuild the slim catalogue: {err:#}"),
+        Err(err) => eprintln!("could not rebuild the slim catalogue: {err}"),
     }
 }
 

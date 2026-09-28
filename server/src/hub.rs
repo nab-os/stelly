@@ -11,7 +11,7 @@ use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, Remot
 use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
-use crate::{crawl, db};
+use crate::{catalog, crawl, db};
 use anyhow::{Context, Result};
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
 use std::collections::VecDeque;
@@ -457,11 +457,26 @@ impl Hub {
                 *job.progress.lock().unwrap() = None;
                 let reporter = Job::new(move |line| sink.push(line), job.cancel.clone())
                     .reporting(job.progress.clone());
-                let (paths, limit, scope) = (paths.clone(), limit.clone(), target.clone());
+                let (stage_paths, limit, scope) = (paths.clone(), limit.clone(), target.clone());
                 let outcome = off_thread(move || async move {
-                    stages::run(stage, scope.as_ref(), &paths, limit, &reporter).await
+                    stages::run(stage, scope.as_ref(), &stage_paths, limit, &reporter).await
                 })
                 .await;
+
+                // Before the generation moves, not after: a client syncs as
+                // soon as it sees the new one, and the layout only reaches it
+                // through catalog.db. Rebuilt later, the client keeps the old
+                // map until the next stage.
+                if stage.rebuilds_space() {
+                    let (source, target) = (paths.db_path.clone(), paths.data_dir.join("catalog.db"));
+                    let built = tokio::task::spawn_blocking(move || catalog::build(&source, &target))
+                        .await
+                        .context("the worker thread panicked")
+                        .and_then(|built| built);
+                    if let Err(err) = built {
+                        log.push(format!("could not rebuild the slim catalogue: {err:#}"));
+                    }
+                }
 
                 let mut queue = job.queue.lock().unwrap();
                 let preempted = job.preempted.swap(false, Ordering::SeqCst);
