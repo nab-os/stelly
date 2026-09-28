@@ -2,8 +2,8 @@
 //! main area rather than a sheet over it.
 //!
 //! What you can do with a thing sits at the top, under its cover: play it,
-//! like it, fetch it into the catalogue, or, for a track the space holds, name
-//! it as either end of a path. The generate panel beside the main area is where
+//! like it, add it to the space, or, for a track the space holds, name it as
+//! either end of a path. The generate panel beside the main area is where
 //! that path, or any other walk, then shows up.
 
 use super::generate::{Generator, PathEnd};
@@ -13,8 +13,9 @@ use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, Player};
 use super::{
     album_link, artist_link, open_remote_track, space_mark, Blocklist, Cover, LocalIds, MapView,
-    Selection, SpaceReach,
+    Pipeline, Selection, SpaceReach,
 };
+use crate::api::{Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::prelude::*;
@@ -43,82 +44,62 @@ fn toggle_like(
     });
 }
 
-/// Pull an album's tracklist, or an artist's discography, into the catalogue
-/// now. Only feature extraction still waits for the pipeline, which the
-/// status line says.
-fn fetch(
-    kind: &'static str,
-    id: String,
-    label: String,
-    mut status: Signal<Option<String>>,
-    mut fetched: Resource<bool>,
-) {
-    status.set(Some(format!("fetching {label}…")));
-    spawn(async move {
-        let result = match kind {
-            "artist" => match id.parse() {
-                Ok(artist_id) => backend().fetch_artist(artist_id).await,
-                Err(_) => return,
-            },
-            _ => backend().fetch_album(&id).await,
-        };
-        if result.is_ok() {
-            fetched.restart();
-        }
-        status.set(Some(match result {
-            Ok(count) if kind == "artist" => {
-                format!("{label}: {count} albums queued. Analyse from settings to add them to the space.")
-            }
-            Ok(count) => {
-                format!("{label}: {count} tracks fetched. Analyse from settings to add them to the space.")
-            }
-            Err(err) => format!("{err:#}"),
-        }));
-    });
+/// How much of a page's album or discography the loaded space holds.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    None,
+    Some,
+    All,
 }
 
-/// Whether the catalogue already has everything a page's Fetch would pull in:
-/// each of `ids` listed, for an artist, or with its tracklist, for an album.
-/// `ids` is read inside, so a page reused for another album or artist, or an
-/// artist's discography landing, asks again.
-fn use_fetched(ids: impl Fn() -> Vec<String> + 'static, tracklists: bool) -> Resource<bool> {
-    use_resource(move || {
-        let ids = ids();
-        async move {
-            if ids.is_empty() {
-                return false;
-            }
-            let Ok(found) = backend().catalogued(&ids).await else {
-                return false;
-            };
-            let have = if tracklists { found.tracked } else { found.listed };
-            ids.iter().all(|id| have.contains(id))
+impl Held {
+    fn of(held: usize, total: usize) -> Self {
+        match held {
+            0 => Held::None,
+            n if n >= total => Held::All,
+            _ => Held::Some,
         }
-    })
+    }
 }
 
-/// "In your space" when it already is, the button that would put it there
-/// when it is not. One slot, so the page never offers to fetch what it has.
-/// Fetched but not yet analysed, the button says so and has nothing to do.
-fn fetch_or_badge(
-    in_space: bool,
-    fetched: Resource<bool>,
+/// "In your space" when it already is, "Adding…" while the server works on it,
+/// otherwise the button that asks it to: catalogue, analyse, then rebuild the
+/// space and the map, ahead of the rest of the backlog.
+fn add_or_badge(
+    held: Held,
+    target: Target,
     title: &'static str,
-    onclick: impl FnMut(Event<MouseData>) + 'static,
+    mut status: Signal<Option<String>>,
 ) -> Element {
-    if in_space {
-        rsx! { span { class: "badge in-space", "in your space" } }
-    } else if fetched() == Some(true) {
-        rsx! {
+    let mut pipeline = consume_context::<Pipeline>();
+    if held == Held::All {
+        return rsx! { span { class: "badge in-space", "in your space" } };
+    }
+    if pipeline.status.read().adding.contains(&target) {
+        return rsx! {
             button {
-                title: "in the catalogue; analyse from settings to add it to the space",
+                title: "being analysed, then built into the space and laid out; progress is in settings",
                 disabled: true,
-                "Fetched"
+                "Adding…"
             }
-        }
-    } else {
-        rsx! {
-            button { title: "{title}", onclick, "Fetch" }
+        };
+    }
+    rsx! {
+        button {
+            title: "{title}",
+            onclick: move |_| {
+                let target = target.clone();
+                status.set(None);
+                spawn(async move {
+                    match backend().pipeline_add(&target).await {
+                        // Ahead of the next poll, so the button does not
+                        // offer the same thing twice.
+                        Ok(()) => pipeline.status.write().adding.push(target),
+                        Err(err) => status.set(Some(format!("{err:#}"))),
+                    }
+                });
+            },
+            if held == Held::Some { "Add the rest" } else { "Add to space" }
         }
     }
 }
@@ -217,14 +198,6 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
         }
     });
 
-    let album_id = track.album_id.clone();
-    let fetched = use_fetched(
-        move || match &*library.view.read() {
-            View::Track(track) => track.album_id.iter().cloned().collect(),
-            _ => Vec::new(),
-        },
-        true,
-    );
     let quality = if track.hires { "hi-res available" } else { "CD quality" };
     let credits: Vec<String> = track
         .performers
@@ -275,15 +248,12 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                         }
                     }
                     div { class: "hero-actions",
-                        {fetch_or_badge(in_space, fetched, "fetch this track's album into the catalogue", {
-                            let album_id = album_id.clone();
-                            let label = track.album.clone();
-                            move |_| {
-                                if let Some(id) = album_id.clone() {
-                                    fetch("album", id, label.clone(), status, fetched);
-                                }
-                            }
-                        })}
+                        {add_or_badge(
+                            if in_space { Held::All } else { Held::None },
+                            Target::Track(track.id),
+                            "analyse this track and put it on the map",
+                            status,
+                        )}
                         PathButtons { track_id: track.id, enabled: in_space, compact: false }
                         if in_space {
                             button {
@@ -365,14 +335,6 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
 
     library.ensure_liked_loaded();
     let liked = library.liked().albums.contains(&album.id);
-    let in_space = reach.read().0.contains(&album.id);
-    let fetched = use_fetched(
-        move || match &*library.view.read() {
-            View::Album(album) => vec![album.id.clone()],
-            _ => Vec::new(),
-        },
-        true,
-    );
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
     // `ShelfTrack` indices address the same list.
@@ -381,6 +343,19 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
     let loading = *library.loading.read();
     let now_playing = player.current().map(|t| t.id);
     let local_ids = local.0.read().clone();
+    // Counted over the tracklist rather than asked of the album: one track
+    // added on its own puts the album in the space, but not the rest of it.
+    // Interludes too short to analyse never will be, so they do not count.
+    let analysable: Vec<i64> = tracks
+        .iter()
+        .filter(|t| t.duration.is_none_or(|d| d >= MIN_TRACK_SECONDS))
+        .map(|t| t.id)
+        .collect();
+    let held = if loading || analysable.is_empty() {
+        if reach.read().0.contains(&album.id) { Held::All } else { Held::None }
+    } else {
+        Held::of(analysable.iter().filter(|id| local_ids.contains(id)).count(), analysable.len())
+    };
 
     // An album reached from a track only knows what the track did; the
     // tracklist fills in the rest once it lands.
@@ -439,10 +414,12 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                             },
                             {icons::heart(liked)}
                         }
-                        {fetch_or_badge(in_space, fetched, "fetch this tracklist into the catalogue", {
-                            let (id, title) = (album.id.clone(), album.title.clone());
-                            move |_| fetch("album", id.clone(), title.clone(), status, fetched)
-                        })}
+                        {add_or_badge(
+                            held,
+                            Target::Album(album.id.clone()),
+                            "analyse this album and put it on the map",
+                            status,
+                        )}
                     }
                     if let Some(message) = status() {
                         p { class: "muted", "{message}" }
@@ -523,18 +500,6 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
 
     library.ensure_liked_loaded();
     let followed = library.liked().artists.contains(&artist.id);
-    let in_space = reach.read().1.contains(&artist.id);
-    // The discography as Qobuz has it, which is what the fetch lists. Hidden
-    // ones included: the fetch does not skip them either.
-    let catalogued = use_fetched(
-        move || {
-            if *library.loading.read() {
-                return Vec::new();
-            }
-            library.shelf.read().albums.iter().map(|album| album.id.clone()).collect()
-        },
-        false,
-    );
 
     // The portrait and biography, which nothing that links here carries. A
     // server from before that route answers 404; the page just goes without.
@@ -557,6 +522,16 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let has_similar = !shelf.visible_artists(&blocklist, true).is_empty();
     let loading = *library.loading.read();
     let grid = library.layout() == TracksView::Grid;
+    // Over the discography the page lists, which is what adding them takes.
+    let held = {
+        let reach = reach.read();
+        if loading || shelf.albums.is_empty() {
+            if reach.1.contains(&artist.id) { Held::Some } else { Held::None }
+        } else {
+            let count = shelf.albums.iter().filter(|album| reach.0.contains(&album.id)).count();
+            Held::of(count, shelf.albums.len())
+        }
+    };
 
     rsx! {
         div { class: "page",
@@ -577,10 +552,12 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                             },
                             {icons::heart(followed)}
                         }
-                        {fetch_or_badge(in_space, catalogued, "fetch this discography into the catalogue", {
-                            let (id, name) = (artist.id, artist.name.clone());
-                            move |_| fetch("artist", id.to_string(), name.clone(), status, catalogued)
-                        })}
+                        {add_or_badge(
+                            held,
+                            Target::Artist(artist.id),
+                            "analyse every album of theirs and put them on the map",
+                            status,
+                        )}
                         button {
                             class: "danger",
                             onclick: {

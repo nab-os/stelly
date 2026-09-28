@@ -61,18 +61,43 @@ impl Stage {
 /// until the frontier empties, so it is not queued behind other work.
 pub const FULL_RUN: [Stage; 3] = [Stage::Analyse, Stage::BuildSpace, Stage::Layout];
 
-// --------------------------------------------------------- the catalogue
+// ------------------------------------------------------------- the targets
 
-/// Which of a set of albums the server's catalogue already has, for a page to
-/// say "fetched" rather than offer to fetch again. Two answers, because the
-/// two fetches write different things: an artist's lists the albums, an
-/// album's pulls in its tracklist.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Catalogued {
-    /// In `albums`: listed, whether or not its tracks are.
-    pub listed: Vec<String>,
-    /// With at least one row in `tracks`.
-    pub tracked: Vec<String>,
+/// Shorter tracks are not analysed, not worth the request. Here so a page
+/// counting what it could add to the space leaves them out too.
+pub const MIN_TRACK_SECONDS: i64 = 45;
+
+/// Something asked for by name, to be added to the space ahead of the rest of
+/// the catalogue: catalogued, analysed, then built and laid out with the rest.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
+pub enum Target {
+    /// Just the one track, though its album's tracklist is catalogued too.
+    Track(i64),
+    Album(String),
+    /// The artist's own releases, every track of each.
+    Artist(i64),
+}
+
+impl Target {
+    /// The `analyse` flag that asks for the same thing by hand.
+    pub fn flag(&self) -> String {
+        match self {
+            Target::Track(id) => format!("--track {id}"),
+            Target::Album(id) => format!("--album {id}"),
+            Target::Artist(id) => format!("--artist {id}"),
+        }
+    }
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Target::Track(id) => write!(f, "track {id}"),
+            Target::Album(id) => write!(f, "album {id}"),
+            Target::Artist(id) => write!(f, "artist {id}"),
+        }
+    }
 }
 
 // --------------------------------------------------------------- the counts
@@ -134,6 +159,13 @@ pub struct PipelineStatus {
     /// Bumped when a space-rebuilding stage finishes. The client re-reads
     /// (local) or re-syncs (remote) when it differs from what it loaded.
     pub generation: u64,
+    /// What the running analyse is scoped to, when it is not the backlog.
+    #[serde(default)]
+    pub target: Option<Target>,
+    /// Everything asked for by name that is not on the map yet: waiting, being
+    /// analysed, or waiting for the space and the layout to be rebuilt.
+    #[serde(default)]
+    pub adding: Vec<Target>,
 }
 
 /// A slice of a stage's output. Cursor-based, because locally the lines come
@@ -153,13 +185,6 @@ pub struct BlockedArtist {
     pub artist_id: i64,
     pub name: String,
     pub reason: Option<String>,
-}
-
-/// What the "fetch" buttons did: an album's tracklist, or an artist's
-/// discography queued for the frontier.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct FetchResult {
-    pub count: usize,
 }
 
 // ----------------------------------------------------------------- the sync

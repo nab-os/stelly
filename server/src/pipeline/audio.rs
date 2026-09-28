@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 pub const EXCERPT_SECONDS: f64 = 90.0;
-/// Shorter tracks are not worth the request.
-pub const MIN_TRACK_SECONDS: i64 = 45;
+pub use two_khz::api::MIN_TRACK_SECONDS;
 /// Below this an excerpt is noise; a seek past the end lands here too.
 pub const MIN_EXCERPT_SECONDS: f64 = 20.0;
 /// Extra audio fetched past the window, so a bitrate estimate that is slightly

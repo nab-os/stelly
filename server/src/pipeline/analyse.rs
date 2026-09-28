@@ -48,6 +48,8 @@ pub struct Options {
     pub workers: usize,
     /// Excerpts fetched at once; 0 follows `workers`.
     pub fetchers: usize,
+    /// Just these tracks, rather than every pending one.
+    pub only: Option<Vec<i64>>,
 }
 
 impl Default for Options {
@@ -58,6 +60,7 @@ impl Default for Options {
             cache_gb: 20.0,
             workers: 0,
             fetchers: 0,
+            only: None,
         }
     }
 }
@@ -88,7 +91,7 @@ fn unanalysed() -> _ {
 
 /// Tracks with no features, stale features, and optionally past failures.
 /// The user's own library first.
-fn pending_tracks(conn: &mut SqliteConnection, limit: usize, retry_failed: bool) -> Result<Vec<Pending>> {
+fn pending_tracks(conn: &mut SqliteConnection, options: &Options) -> Result<Vec<Pending>> {
     let mut query = tracks::table
         .left_join(features::table)
         .left_join(failures::table)
@@ -97,11 +100,14 @@ fn pending_tracks(conn: &mut SqliteConnection, limit: usize, retry_failed: bool)
         .order((tracks::seed_distance.asc(), tracks::id.asc()))
         .select((tracks::id, tracks::title, tracks::duration))
         .into_boxed();
-    if !retry_failed {
+    if !options.retry_failed {
         query = query.filter(failures::track_id.nullable().is_null());
     }
-    if limit > 0 {
-        query = query.limit(limit as i64);
+    if let Some(ids) = &options.only {
+        query = query.filter(tracks::id.eq_any(ids));
+    }
+    if options.limit > 0 {
+        query = query.limit(options.limit as i64);
     }
     Ok(query.load(conn)?)
 }
@@ -281,7 +287,7 @@ async fn fetch(
 /// a thread of its own, as `stages` does.
 pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job) -> Result<Stats> {
     let mut conn = db::open_for_write(&paths.db_path)?;
-    let todo = pending_tracks(&mut conn, options.limit, options.retry_failed)?;
+    let todo = pending_tracks(&mut conn, options)?;
     if todo.is_empty() {
         job.log("nothing to analyse");
         return Ok(Stats::default());
