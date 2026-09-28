@@ -166,3 +166,30 @@ pub fn list() -> Element {
         circle { cx: "4.5", cy: "18", r: "1" }
     })
 }
+
+/// Round marks for artists, square for albums, taken in turn: one list with
+/// every kind of thing in it.
+pub fn mixed() -> Element {
+    stroked(rsx! {
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "5", cy: "4.5", r: "2" }
+            rect { x: "3", y: "7.5", width: "4", height: "4", rx: "0.5" }
+            circle { cx: "5", cy: "14.5", r: "2" }
+            rect { x: "3", y: "17.5", width: "4", height: "4", rx: "0.5" }
+        }
+        path { d: "M10 4.5h10M10 9.5h10M10 14.5h10M10 19.5h10" }
+    })
+}
+
+/// The same marks as `mixed`, gathered by kind.
+pub fn split() -> Element {
+    stroked(rsx! {
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "5", cy: "3.5", r: "2" }
+            circle { cx: "5", cy: "8.5", r: "2" }
+            rect { x: "3", y: "13.5", width: "4", height: "4", rx: "0.5" }
+            rect { x: "3", y: "18.5", width: "4", height: "4", rx: "0.5" }
+        }
+        path { d: "M10 3.5h10M10 8.5h10M10 15.5h10M10 20.5h10" }
+    })
+}

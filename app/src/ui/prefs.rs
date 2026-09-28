@@ -1,11 +1,11 @@
 //! What this device remembers between runs, besides the pairing: the stream
-//! quality, grid or list for each kind of page, and what to say about new
-//! releases.
+//! quality, grid or list for each kind of page, whether mixed pages split
+//! by kind, and what to say about new releases.
 //!
 //! Its own file next to `server.json` rather than inside it: forgetting the
 //! pairing should not also forget how the lists were laid out.
 
-use super::library::{TracksView, ViewKind};
+use super::library::{Grouping, TracksView, ViewKind};
 use crate::client_data_dir;
 use crate::qobuz::{FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ use std::path::PathBuf;
 pub struct Prefs {
     pub quality: Option<u32>,
     pub layouts: HashMap<ViewKind, TracksView>,
+    /// Mixed views in one list, or split by kind.
+    pub grouping: Grouping,
     /// Off stops asking GitHub about releases at all. `None` is on.
     pub release_checks: Option<bool>,
     /// The release whose notice was closed. Only that one: the next release
@@ -84,6 +86,7 @@ mod tests {
         };
         prefs.layouts.insert(ViewKind::Mixed, TracksView::List);
         prefs.layouts.insert(ViewKind::Artist, TracksView::Grid);
+        prefs.grouping = Grouping::Split;
 
         let text = serde_json::to_string(&prefs).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&text).unwrap(), prefs);
@@ -94,6 +97,7 @@ mod tests {
         let prefs: Prefs = serde_json::from_str(r#"{"layouts":{"albums":"list"}}"#).unwrap();
         assert_eq!(prefs.quality(), FORMAT_MP3_320);
         assert_eq!(prefs.layouts.get(&ViewKind::Albums), Some(&TracksView::List));
+        assert_eq!(prefs.grouping, Grouping::Mixed);
     }
 
     #[test]

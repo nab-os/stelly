@@ -855,7 +855,6 @@ fn Shell() -> Element {
     let map = MapView { map_open, map_route };
     let mut panel_open = generator.panel_open;
     let covered = narrow() && panel_open();
-    let searching = matches!(&*library.view.read(), View::Search { .. });
 
     rsx! {
         div { class: "app",
@@ -887,34 +886,12 @@ fn Shell() -> Element {
                     }
 
                     // Bottom right of the main area, over the map as well,
-                    // since the map's own is how you close it again. On a
-                    // phone, over the generate panel too: the other two act
-                    // on the main area, so from there they slide the panel
-                    // away first, and answer to what is under it only once
-                    // it can be seen.
+                    // since its own button is how you close it again. On a
+                    // phone, over the generate panel too: the map is the main
+                    // area's, so from there it slides the panel away first,
+                    // and answers to what is under it only once it can be
+                    // seen.
                     div { class: "fabs",
-                        // Phone only: the panel is always showing otherwise.
-                        button {
-                            class: if covered { "fab fab-generate active" } else { "fab fab-generate" },
-                            title: if covered { "close generate" } else { "generate" },
-                            onclick: move |_| panel_open.set(!covered),
-                            {icons::spark()}
-                        }
-                        button {
-                            class: if searching && !covered { "fab fab-search active" } else { "fab fab-search" },
-                            title: if searching && !covered { "close search" } else { "search" },
-                            onclick: move |_| {
-                                map.close();
-                                if covered {
-                                    panel_open.set(false);
-                                    if searching {
-                                        return;
-                                    }
-                                }
-                                library.toggle_search(search.text.peek().trim().to_string());
-                            },
-                            {icons::search()}
-                        }
                         button {
                             class: if map_open() && !covered { "fab fab-map active" } else { "fab fab-map" },
                             title: if map_open() && !covered { "close the map" } else { "the map" },
