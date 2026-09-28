@@ -10,8 +10,8 @@ use super::prefs::{self, Prefs};
 use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
 use super::settings::SettingsScreen;
 use super::{
-    artist_link, open_track, Blocklist, Cover, LocalIds, MapView, Search, Selection, SpaceMatches,
-    SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
+    artist_link, open_remote_track, open_track, Blocklist, Cover, Generator, LocalIds, MapView,
+    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
 use crate::api::Target;
@@ -262,6 +262,18 @@ pub enum ViewKind {
     Artist,
 }
 
+/// Whether a mixed view keeps its tracks, albums and artists in one list, or
+/// gives each kind its own section. Either way the sort orders what is in
+/// each list, and only mixed views have the choice: a narrowed one holds a
+/// single kind already.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Grouping {
+    #[default]
+    Mixed,
+    Split,
+}
+
 /// Whatever the current view loaded. One struct rather than a per-view enum:
 /// search fills three of these at once, and an artist fills two.
 #[derive(Clone, Default, PartialEq)]
@@ -301,6 +313,8 @@ pub struct Library {
     /// each, they are the same kind of decision made twice, and a search
     /// result shows both at once.
     layouts: Signal<std::collections::HashMap<ViewKind, TracksView>>,
+    /// Mixed views in one list or a section per kind. Saved, like `layouts`.
+    grouping: Signal<Grouping>,
     /// Narrows a search to what is already favourited. Off by default: most
     /// searches are for something new, not a re-check of what is already
     /// kept.
@@ -333,6 +347,7 @@ pub(crate) struct Liked {
 
 impl Library {
     pub fn new() -> Self {
+        let prefs = Prefs::load();
         Self {
             view: Signal::new(View::Favourites { scope: Scope::Everything }),
             shelf: Signal::new(Shelf::default()),
@@ -344,7 +359,8 @@ impl Library {
             forward: Signal::new(Vec::new()),
             pending: Signal::new(None),
             notice: Signal::new(None),
-            layouts: Signal::new(Prefs::load().layouts),
+            layouts: Signal::new(prefs.layouts),
+            grouping: Signal::new(prefs.grouping),
             liked_only: Signal::new(false),
             source: Signal::new(Source::Qobuz),
             liked: Signal::new(None),
@@ -371,6 +387,16 @@ impl Library {
         prefs::update(|prefs| {
             prefs.layouts.insert(kind, layout);
         });
+    }
+
+    pub(crate) fn grouping(&self) -> Grouping {
+        *self.grouping.read()
+    }
+
+    pub(crate) fn set_grouping(&self, grouping: Grouping) {
+        let mut signal = self.grouping;
+        signal.set(grouping);
+        prefs::update(|prefs| prefs.grouping = grouping);
     }
 
     /// Fetch the three favourited-id sets, once. Safe to call every time the
@@ -858,6 +884,8 @@ pub(crate) fn add_to_space(library: Library, target: Target, label: &str) {
 pub fn MainScreen() -> Element {
     let library = use_context::<Library>();
     let map = use_context::<MapView>();
+    let search = use_context::<Search>();
+    let mut panel_open = use_context::<Generator>().panel_open;
     let view = library.view.read().clone();
     let has_history = !library.history.read().is_empty();
 
@@ -866,6 +894,7 @@ pub fn MainScreen() -> Element {
     use_effect(move || library.drive());
 
     let home = matches!(view, View::Favourites { .. });
+    let searching = matches!(view, View::Search { .. });
     let settings = matches!(view, View::Settings);
 
     rsx! {
@@ -884,6 +913,15 @@ pub fn MainScreen() -> Element {
                 }
                 h2 { class: "ellipsis", "{view.label()}" }
                 span { class: "spacer" }
+                // Phone only: beside the main area the panel is always there.
+                // On a phone it slides over this bar, and closes by its own
+                // arrow.
+                button {
+                    class: "icon-btn topbar-generate",
+                    title: "make a playlist",
+                    onclick: move |_| panel_open.set(true),
+                    {icons::spark()}
+                }
                 button {
                     class: if home { "icon-btn active" } else { "icon-btn" },
                     title: "home",
@@ -892,6 +930,15 @@ pub fn MainScreen() -> Element {
                         library.home();
                     },
                     {icons::home()}
+                }
+                button {
+                    class: if searching { "icon-btn active" } else { "icon-btn" },
+                    title: if searching { "close search" } else { "search" },
+                    onclick: move |_| {
+                        map.close();
+                        library.toggle_search(search.text.peek().trim().to_string());
+                    },
+                    {icons::search()}
                 }
                 button {
                     class: if settings { "icon-btn active" } else { "icon-btn" },
@@ -1104,6 +1151,9 @@ fn BrowseScreen() -> Element {
             }
             span { class: "spacer" }
             SortMenu {}
+            if mixed {
+                GroupingToggle {}
+            }
             ViewToggle {}
         }
 
@@ -1204,6 +1254,32 @@ pub(crate) fn ViewToggle() -> Element {
         }
     }
 }
+
+/// One list, or a section per kind. Beside grid and list, and only on a mixed
+/// view, the one kind of page with more than one kind of thing in it.
+#[component]
+fn GroupingToggle() -> Element {
+    let library = use_context::<Library>();
+    let current = library.grouping();
+
+    rsx! {
+        div { class: "view-toggle",
+            button {
+                class: if current == Grouping::Mixed { "icon-btn active" } else { "icon-btn" },
+                title: "all together",
+                onclick: move |_| library.set_grouping(Grouping::Mixed),
+                {icons::mixed()}
+            }
+            button {
+                class: if current == Grouping::Split { "icon-btn active" } else { "icon-btn" },
+                title: "by type",
+                onclick: move |_| library.set_grouping(Grouping::Split),
+                {icons::split()}
+            }
+        }
+    }
+}
+
 /// The sort chip and the menu it opens: what to order by, a rule, then which
 /// way round. Stays open across picks, since a sort is usually both.
 #[component]
@@ -1307,7 +1383,7 @@ impl Item {
 
 /// A mixed view's list: tracks, albums and artists together, in one order.
 /// "Default" is artists, then albums, then tracks, each as they came; any
-/// other sort interleaves them.
+/// other sort interleaves them, unless split by kind, see `Grouping`.
 #[component]
 fn MixedRows() -> Element {
     let library = use_context::<Library>();
@@ -1315,7 +1391,7 @@ fn MixedRows() -> Element {
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
     let selection = use_context::<Selection>().0;
-    let mut menu = use_context::<ContextMenu>().0;
+    let menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let matches = use_context::<SpaceMatches>();
 
@@ -1371,6 +1447,155 @@ fn MixedRows() -> Element {
     }
 
     let tile = if grid { "tile" } else { "row" };
+    let split = library.grouping() == Grouping::Split;
+
+    let row = move |item: Item| -> Element {
+        let mut menu = menu;
+        match item {
+            Item::Track(index, track) => rsx! {
+                li {
+                    key: "track-{index}-{track.id}",
+                    class: if now_playing == Some(track.id) { "{tile} playing" } else { "{tile}" },
+                    onclick: {
+                        let track = track.clone();
+                        move |_| open_remote_track(library, selection, &local, track.clone())
+                    },
+                    "data-menu": MenuTarget::ShelfTrack(index).tag(),
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
+                    },
+                    Cover {
+                        url: track.image.clone(),
+                        class: if grid { String::new() } else { "thumb".to_string() },
+                    }
+                    if grid {
+                        {space_mark(local.0.read().contains(&track.id))}
+                        span { class: "title", "{track.title}" }
+                        {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
+                    } else {
+                        {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
+                        span { class: "title", "{track.title}" }
+                        if local.0.read().contains(&track.id) {
+                            span { class: "in-space-dot", title: "analysed, on the map", "•" }
+                        }
+                        span { class: "muted", "{track.duration_label()}" }
+                    }
+                    {menu_button(menu, MenuTarget::ShelfTrack(index))}
+                }
+            },
+            Item::Album(index, album) => rsx! {
+                li {
+                    key: "album-{index}-{album.id}",
+                    class: "{tile}",
+                    onclick: {
+                        let album = album.clone();
+                        move |_| library.go(View::Album(album.clone()))
+                    },
+                    "data-menu": MenuTarget::ShelfAlbum(index).tag(),
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
+                    },
+                    Cover {
+                        url: album.image.clone(),
+                        class: if grid { String::new() } else { "thumb".to_string() },
+                    }
+                    if grid {
+                        span { class: "kind", "album" }
+                        {space_mark(reach.read().0.contains(&album.id))}
+                        span { class: "title", "{album.title}" }
+                        {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
+                    } else {
+                        {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
+                        span { class: "title", "{album.title}" }
+                        span { class: "muted", "album" }
+                    }
+                    {menu_button(menu, MenuTarget::ShelfAlbum(index))}
+                }
+            },
+            Item::Artist(index, artist) => rsx! {
+                li {
+                    key: "artist-{index}-{artist.id}",
+                    class: "{tile}",
+                    onclick: {
+                        let artist = artist.clone();
+                        move |_| library.go(View::Artist(artist.clone()))
+                    },
+                    "data-menu": MenuTarget::ShelfArtist { index, similar: false }.tag(),
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar: false });
+                    },
+                    Cover {
+                        url: artist.image.clone(),
+                        class: if grid { "round".to_string() } else { "thumb round".to_string() },
+                    }
+                    if grid {
+                        {space_mark(reach.read().1.contains(&artist.id))}
+                        span { class: "title", "{artist.name}" }
+                        span { class: "artist", "artist" }
+                    } else {
+                        span { class: "artist", "{artist.name}" }
+                        span { class: "title" }
+                        span { class: "muted", "artist" }
+                    }
+                    {menu_button(menu, MenuTarget::ShelfArtist { index, similar: false })}
+                }
+            },
+            Item::Space(row) => rsx! {
+                li {
+                    key: "space-{row.track_id}",
+                    class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
+                    onclick: {
+                        let id = row.track_id;
+                        move |_| open_track(library, selection, id)
+                    },
+                    "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
+                    oncontextmenu: {
+                        let id = row.track_id;
+                        move |event: Event<MouseData>| {
+                            event.prevent_default();
+                            open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                        }
+                    },
+                    Cover {
+                        url: crate::qobuz::cover_url(&row.album_id),
+                        class: if grid { String::new() } else { "thumb".to_string() },
+                    }
+                    if grid {
+                        span { class: "title", "{row.title}" }
+                        {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
+                    } else {
+                        {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
+                        span { class: "title", "{row.title}" }
+                    }
+                    {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
+                }
+            },
+        }
+    };
+
+    // Split, the sort still orders each section; it just no longer
+    // interleaves them. Artists, albums, then tracks, as in a narrowed view.
+    let sections: Vec<(&str, Vec<Item>)> = if split {
+        let mut artists = Vec::new();
+        let mut albums = Vec::new();
+        let mut tracks = Vec::new();
+        for item in items {
+            match item {
+                Item::Artist(..) => artists.push(item),
+                Item::Album(..) => albums.push(item),
+                Item::Track(..) | Item::Space(_) => tracks.push(item),
+            }
+        }
+        [("Artists", artists), ("Albums", albums), ("Tracks", tracks)]
+            .into_iter()
+            .filter(|(_, items)| !items.is_empty())
+            .collect()
+    } else {
+        vec![("", items)]
+    };
 
     rsx! {
         // Under the space's own section in a search, so the two lists say
@@ -1379,130 +1604,13 @@ fn MixedRows() -> Element {
         if searching && !space_only {
             h3 { class: "shelf-head source-head", "Qobuz" }
         }
-        ul { class: if grid { "tiles" } else { "list" },
-            for item in items {
-                match item {
-                    Item::Track(index, track) => rsx! {
-                        li {
-                            key: "track-{index}-{track.id}",
-                            class: if now_playing == Some(track.id) { "{tile} playing" } else { "{tile}" },
-                            onclick: move |_| {
-                                let queue = library.shelf.peek().visible_tracks(&blocklist);
-                                play_list(player, queue, index);
-                            },
-                            "data-menu": MenuTarget::ShelfTrack(index).tag(),
-                            oncontextmenu: move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::ShelfTrack(index));
-                            },
-                            Cover {
-                                url: track.image.clone(),
-                                class: if grid { String::new() } else { "thumb".to_string() },
-                            }
-                            if grid {
-                                {space_mark(local.0.read().contains(&track.id))}
-                                span { class: "title", "{track.title}" }
-                                {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
-                            } else {
-                                {artist_link(library, track.artist_id, track.artist.clone(), "artist")}
-                                span { class: "title", "{track.title}" }
-                                if local.0.read().contains(&track.id) {
-                                    span { class: "in-space-dot", title: "analysed, on the map", "•" }
-                                }
-                                span { class: "muted", "{track.duration_label()}" }
-                            }
-                            {menu_button(menu, MenuTarget::ShelfTrack(index))}
-                        }
-                    },
-                    Item::Album(index, album) => rsx! {
-                        li {
-                            key: "album-{index}-{album.id}",
-                            class: "{tile}",
-                            onclick: {
-                                let album = album.clone();
-                                move |_| library.go(View::Album(album.clone()))
-                            },
-                            "data-menu": MenuTarget::ShelfAlbum(index).tag(),
-                            oncontextmenu: move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
-                            },
-                            Cover {
-                                url: album.image.clone(),
-                                class: if grid { String::new() } else { "thumb".to_string() },
-                            }
-                            if grid {
-                                span { class: "kind", "album" }
-                                {space_mark(reach.read().0.contains(&album.id))}
-                                span { class: "title", "{album.title}" }
-                                {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
-                            } else {
-                                {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
-                                span { class: "title", "{album.title}" }
-                                span { class: "muted", "album" }
-                            }
-                            {menu_button(menu, MenuTarget::ShelfAlbum(index))}
-                        }
-                    },
-                    Item::Artist(index, artist) => rsx! {
-                        li {
-                            key: "artist-{index}-{artist.id}",
-                            class: "{tile}",
-                            onclick: {
-                                let artist = artist.clone();
-                                move |_| library.go(View::Artist(artist.clone()))
-                            },
-                            "data-menu": MenuTarget::ShelfArtist { index, similar: false }.tag(),
-                            oncontextmenu: move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::ShelfArtist { index, similar: false });
-                            },
-                            Cover {
-                                url: artist.image.clone(),
-                                class: if grid { "round".to_string() } else { "thumb round".to_string() },
-                            }
-                            if grid {
-                                {space_mark(reach.read().1.contains(&artist.id))}
-                                span { class: "title", "{artist.name}" }
-                                span { class: "artist", "artist" }
-                            } else {
-                                span { class: "artist", "{artist.name}" }
-                                span { class: "title" }
-                                span { class: "muted", "artist" }
-                            }
-                            {menu_button(menu, MenuTarget::ShelfArtist { index, similar: false })}
-                        }
-                    },
-                    Item::Space(row) => rsx! {
-                        li {
-                            key: "space-{row.track_id}",
-                            class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
-                            onclick: {
-                                let id = row.track_id;
-                                move |_| open_track(library, selection, id)
-                            },
-                            "data-menu": MenuTarget::SpaceTrack(row.track_id).tag(),
-                            oncontextmenu: {
-                                let id = row.track_id;
-                                move |event: Event<MouseData>| {
-                                    event.prevent_default();
-                                    open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
-                                }
-                            },
-                            Cover {
-                                url: crate::qobuz::cover_url(&row.album_id),
-                                class: if grid { String::new() } else { "thumb".to_string() },
-                            }
-                            if grid {
-                                span { class: "title", "{row.title}" }
-                                {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
-                            } else {
-                                {artist_link(library, row.artist_id, row.artist.clone(), "artist")}
-                                span { class: "title", "{row.title}" }
-                            }
-                            {menu_button(menu, MenuTarget::SpaceTrack(row.track_id))}
-                        }
-                    },
+        for (heading, items) in sections {
+            if !heading.is_empty() {
+                h3 { class: "shelf-head", "{heading}" }
+            }
+            ul { class: if grid { "tiles" } else { "list" },
+                for item in items {
+                    {row(item)}
                 }
             }
         }
@@ -1726,6 +1834,7 @@ fn TrackRows() -> Element {
     let player = use_context::<Player>();
     let local = use_context::<LocalIds>();
     let blocklist = use_context::<Blocklist>();
+    let selection = use_context::<Selection>().0;
     let mut menu = use_context::<ContextMenu>().0;
 
     let matches = use_context::<SpaceMatches>();
@@ -1773,13 +1882,12 @@ fn TrackRows() -> Element {
                             base.to_string()
                         }
                     },
-                    // Single click plays: this is a player, and the queue is
-                    // the list you clicked in.
-                    onclick: move |_| {
-                        // Queue what is on screen, not what was fetched: a
-                        // hidden artist must not come back through the queue.
-                        let queue = library.shelf.peek().visible_tracks(&blocklist);
-                        play_list(player, queue, index);
+                    // Opens the track's page, as an album or artist tile opens
+                    // theirs. Playing is the page's button, the menu's, or
+                    // "play all" above.
+                    onclick: {
+                        let track = track.clone();
+                        move |_| open_remote_track(library, selection, &local, track.clone())
                     },
                     "data-menu": MenuTarget::ShelfTrack(index).tag(),
                     oncontextmenu: move |event: Event<MouseData>| {
