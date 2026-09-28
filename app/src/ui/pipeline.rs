@@ -8,7 +8,7 @@
 use super::crawler::Crawler;
 use super::POLL;
 use dioxus::prelude::*;
-use crate::api::{Corpus, Device, PipelineStatus, Scope, Stage};
+use crate::api::{Corpus, Device, PipelineStatus, Progress, Scope, Stage};
 use crate::backend::backend;
 
 /// How many status polls pass between corpus recounts. Six SQL aggregates
@@ -171,6 +171,8 @@ pub fn PipelineControls() -> Element {
     let busy = running.is_some() || crawling;
     let corpus = pipeline.corpus.read().clone();
     let queued = pipeline.status.read().queued.clone();
+    let adding = pipeline.status.read().adding.len();
+    let progress = pipeline.status.read().progress.clone();
 
     // Each hint names the stage that would fix it, and is derived from the
     // same question that stage asks.
@@ -215,6 +217,11 @@ pub fn PipelineControls() -> Element {
                              corpus.in_space - corpus.on_map)}
                 }
             }
+            if adding > 0 {
+                p { class: "muted notice",
+                    "{adding} asked for by name, going into the space ahead of the backlog."
+                }
+            }
             if !needs_build && !needs_layout && corpus.to_analyse == 0 {
                 p { class: "muted", "Up to date. Crawl for more, or analyse after a crawl." }
             }
@@ -234,6 +241,11 @@ pub fn PipelineControls() -> Element {
                         },
                         div { class: "stage-name", "{stage.label()}" }
                         div { class: "stage-blurb muted", "{stage.blurb()}" }
+                        if running == Some(stage) {
+                            if let Some(progress) = progress.clone() {
+                                {progress_row(&progress)}
+                            }
+                        }
                         div { class: "stage-run",
                             if queued.contains(&stage) {
                                 span { class: "muted", "queued" }
@@ -265,6 +277,38 @@ pub fn PipelineControls() -> Element {
                 "Stages run on the server, and keep going if you close the app. Stop is the only way to end one early."
             }
         }
+    }
+}
+
+/// A bar under the running stage, with the count and, once there is a rate to
+/// go on, how long the rest should take.
+fn progress_row(progress: &Progress) -> Element {
+    let percent = progress.fraction() * 100.0;
+    let mut detail = Vec::new();
+    if progress.step == "catalogue" {
+        detail.push("cataloguing".to_string());
+    }
+    if progress.total > 1 {
+        detail.push(format!("{}/{}", progress.done, progress.total));
+    }
+    if let Some(left) = progress.remaining() {
+        detail.push(format!("{} left", span_of(left)));
+    }
+    rsx! {
+        div { class: "stage-progress",
+            div { class: "bar", div { style: "width: {percent:.1}%" } }
+            span { class: "muted", {detail.join(" · ")} }
+        }
+    }
+}
+
+fn span_of(seconds: f64) -> String {
+    if seconds < 90.0 {
+        format!("{seconds:.0}s")
+    } else if seconds < 90.0 * 60.0 {
+        format!("{:.0} min", seconds / 60.0)
+    } else {
+        format!("{:.1} h", seconds / 3600.0)
     }
 }
 

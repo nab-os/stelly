@@ -3,7 +3,7 @@
 //!
 //!   two-khz-server login              sign in through the browser
 //!   two-khz-server crawl --max-tracks 5000
-//!   two-khz-server analyse
+//!   two-khz-server analyse --album ID
 //!   two-khz-server build-space
 //!   two-khz-server layout
 //!
@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
+use two_khz::api::Target;
 
 // ---------------------------------------------------------------- arguments
 
@@ -93,8 +94,7 @@ impl FromStr for Kind {
     }
 }
 
-/// Grow the catalogue from the favourites outwards, or pull in one artist or
-/// album.
+/// Grow the catalogue from the favourites outwards.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "crawl")]
 pub struct Crawl {
@@ -110,15 +110,10 @@ pub struct Crawl {
     /// skip seeding from the favourites
     #[argh(switch)]
     no_seed: bool,
-    /// queue one artist's discography instead of crawling
-    #[argh(option)]
-    artist: Option<i64>,
-    /// fetch one album's tracklist instead of crawling
-    #[argh(option)]
-    album: Option<String>,
 }
 
-/// Extract descriptors and CLAP embeddings for every pending track.
+/// Extract descriptors and CLAP embeddings for every pending track, or for one
+/// track, album or artist, catalogued first if need be.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "analyse")]
 pub struct Analyse {
@@ -137,6 +132,15 @@ pub struct Analyse {
     /// size of the excerpt cache in GB (default 20)
     #[argh(option, default = "20.0")]
     cache_gb: f64,
+    /// just this track
+    #[argh(option)]
+    track: Option<i64>,
+    /// just this album
+    #[argh(option)]
+    album: Option<String>,
+    /// just this artist's own releases
+    #[argh(option)]
+    artist: Option<i64>,
 }
 
 /// Build the space the map and the paths are drawn in.
@@ -367,17 +371,6 @@ async fn crawl_command(args: Crawl, paths: &Paths) -> Result<()> {
     let mut client = client(paths, args.rate)?;
     client.login().await.context("signing in to Qobuz")?;
 
-    if let Some(artist) = args.artist {
-        let queued = crawl::discover_artist(conn, &mut client, artist).await?;
-        println!("artist {artist}: {queued} albums queued");
-        return Ok(());
-    }
-    if let Some(album) = &args.album {
-        let written = crawl::crawl_one_album(conn, &mut client, album).await?;
-        println!("album {album}: {written} tracks");
-        return Ok(());
-    }
-
     if !args.no_seed {
         eprintln!("seeding from favourites…");
         let seeded = crawl::seed(conn, &mut client, 5000).await?;
@@ -414,9 +407,26 @@ async fn analyse_command(args: Analyse, paths: &Paths) -> Result<()> {
         cache_gb: args.cache_gb,
         workers: args.workers,
         fetchers: args.fetchers,
+        only: None,
     };
+    let targets: Vec<Target> = [
+        args.track.map(Target::Track),
+        args.album.map(Target::Album),
+        args.artist.map(Target::Artist),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let limiter = client(paths, DEFAULT_RATE_PER_SEC)?.rate_limit();
-    analyse::run(paths, limiter, &options, &Job::stderr()).await?;
+    match targets.as_slice() {
+        [] => {
+            analyse::run(paths, limiter, &options, &Job::stderr()).await?;
+        }
+        [target] => {
+            stages::analyse_target(target, paths, limiter, options, &Job::stderr()).await?;
+        }
+        _ => bail!("one of --track, --album and --artist at a time"),
+    }
     Ok(())
 }
 
