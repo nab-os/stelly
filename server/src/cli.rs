@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
-use stelly::api::Target;
+use stelly_core::api::Target;
 
 // ---------------------------------------------------------------- arguments
 
@@ -102,7 +102,7 @@ pub struct Crawl {
     #[argh(option, default = "5000")]
     max_tracks: i64,
     /// how many similar-artist hops from a favourite to follow (default 2)
-    #[argh(option, default = "stelly::api::DEFAULT_MAX_DISTANCE")]
+    #[argh(option, default = "stelly_core::api::DEFAULT_MAX_DISTANCE")]
     max_distance: i64,
     /// requests per second to Qobuz (default 2)
     #[argh(option, default = "DEFAULT_RATE_PER_SEC")]
@@ -455,7 +455,7 @@ fn status(paths: &Paths) -> Result<()> {
     ] {
         println!("{label:<18} {n:>8}");
     }
-    if let Ok(space) = stelly::space::Space::load(&paths.data_dir) {
+    if let Ok(space) = stelly_core::space::Space::load(&paths.data_dir) {
         let m = &space.manifest;
         println!("{:<18} {} x {} (built {})", "space", m.n_tracks, m.n_dims, m.built_at);
     }
@@ -466,7 +466,7 @@ fn status(paths: &Paths) -> Result<()> {
 /// space is noise and no path logic will rescue it. Worth watching whenever
 /// the weights or labels change.
 fn evaluate(paths: &Paths) -> Result<()> {
-    let space = stelly::space::Space::load(&paths.data_dir)?;
+    let space = stelly_core::space::Space::load(&paths.data_dir)?;
     let weighted = space.weighted(&space.default_weights());
     let conn = &mut db::open_for_write(&paths.db_path)?;
     let albums: HashMap<i64, String> = tracks::table
@@ -492,7 +492,7 @@ fn evaluate(paths: &Paths) -> Result<()> {
         for &row in rows {
             let mut scores = weighted.similarities(weighted.row(row));
             scores[row] = f32::NEG_INFINITY;
-            let order = stelly::space::argsort_desc(&scores);
+            let order = stelly_core::space::argsort_desc(&scores);
             let rank = order
                 .iter()
                 .position(|j| *j != row && rows.contains(j))

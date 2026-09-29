@@ -1,0 +1,53 @@
+[workspace]
+members = ["core", "app", "server"]
+resolver = "2"
+
+# One version for the three crates, bumped here.
+[workspace.package]
+version = "0.13.2"
+edition = "2021"
+
+# Versions only. Features that one crate needs stay in that crate's manifest,
+# next to the reason for them.
+[workspace.dependencies]
+stelly-core = { path = "core" }
+
+anyhow = "1"
+bytemuck = "1"
+diesel = { version = "2.3.13", features = ["sqlite"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Bundled, so there is no system SQLite to match and Android needs nothing but
+# the NDK's clang. Only one crate in a build may link SQLite.
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+md-5 = "0.11.0"
+memmap2 = "0.9"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "query", "stream"] }
+# Never named in the source: reqwest takes rustls with default features off,
+# which drops `prefer-post-quantum` and leaves X25519MLKEM768 advertised in
+# `supported_groups` with no matching key share. A server that prefers that
+# group then has to answer with a HelloRetryRequest, and an ingress that
+# mishandles one closes the connection mid-handshake. Naming rustls turns the
+# feature back on through unification, so the first flight already carries
+# the post-quantum key share and the handshake needs one round trip.
+rustls = { version = "0.23.45", default-features = false, features = ["prefer-post-quantum"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = "1.53.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+# The server optimised even under plain `cargo run`. The analyser's
+# resampling, mel spectrogram and descriptors are tight loops that run ~7x
+# slower unoptimised, 8.8s an excerpt against 1.3s, which turns `analyse` into
+# a crawl. Dependencies are optimised for everyone, so the app and the server
+# share one build of them; only the app's own code stays debug.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.stelly-core]
+opt-level = 3
+
+[profile.dev.package.stelly-server]
+opt-level = 3

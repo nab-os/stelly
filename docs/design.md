@@ -61,7 +61,7 @@ Every paired device follows one play session: the queue, the position, and
 which device the sound comes out of. The server holds it in memory; a restart
 empties the queue.
 
-The rules are `stelly::session`, which both sides run. A button applies its
+The rules are `stelly_core::session`, which both sides run. A button applies its
 `Op` to the app's own copy at once and posts it; the server applies the same
 op to the real copy and pushes the result over SSE to every device. An op that
 names a row by index carries the queue version it was made against, and is
