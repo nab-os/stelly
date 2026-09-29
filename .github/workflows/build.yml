@@ -51,9 +51,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            app
-            server
           key: ubuntu-${{ matrix.ubuntu }}
 
       # Prebuilt dx: `cargo install dioxus-cli` is a ~10 minute build.
@@ -69,7 +66,7 @@ jobs:
       - name: Work out the version and artifact suffix
         id: v
         run: |
-          CRATE=$(grep -m1 '^version' app/Cargo.toml | cut -d'"' -f2)
+          CRATE=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           if [ "${{ github.ref_type }}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
@@ -93,13 +90,13 @@ jobs:
 
       # the server: API, crawl and the whole pipeline, no GTK, no webkit
       #
-      # It takes the app crate with default features off, which is what keeps
+      # It depends on stelly-core, not the app crate, which is what keeps
       # dioxus, wry and GTK out of this build entirely.
       - name: Build the server
-        run: cargo build --release --locked --manifest-path server/Cargo.toml
+        run: cargo build --release --locked -p stelly-server
 
-      - name: Test the server
-        run: cargo test --release --locked --manifest-path server/Cargo.toml
+      - name: Test the server and the shared crate
+        run: cargo test --release --locked -p stelly-core -p stelly-server
 
       # dx leaves Depends and Maintainer blank; finish-deb.sh fills them in,
       # computing Depends with dpkg-shlibdeps against this runner's release.
@@ -109,33 +106,33 @@ jobs:
           chmod +x .github/scripts/finish-deb.sh
           dpkg-deb -R staging/*_amd64.deb debroot
           .github/scripts/finish-deb.sh debroot \
-            "dist/two-khz_${{ steps.v.outputs.version }}_amd64.${{ steps.v.outputs.suffix }}.deb" \
+            "dist/stelly_${{ steps.v.outputs.version }}_amd64.${{ steps.v.outputs.suffix }}.deb" \
             "$MAINTAINER" "${{ steps.v.outputs.version }}"
           rm -f staging/*_amd64.deb
 
       - name: Build the server .deb
         run: |
           R=serverroot
-          mkdir -p "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/two-khz" \
-                   "$R/usr/share/doc/two-khz-server"
-          install -m755 server/target/release/two-khz-server "$R/usr/bin/two-khz-server"
-          install -m644 schema.sql "$R/usr/share/two-khz/schema.sql"
-          install -m644 README.md  "$R/usr/share/doc/two-khz-server/README.md"
+          mkdir -p "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/stelly" \
+                   "$R/usr/share/doc/stelly-server"
+          install -m755 target/release/stelly-server "$R/usr/bin/stelly-server"
+          install -m644 schema.sql "$R/usr/share/stelly/schema.sql"
+          install -m644 README.md  "$R/usr/share/doc/stelly-server/README.md"
           sed -e "s/@VERSION@/${{ steps.v.outputs.version }}/" \
             > "$R/DEBIAN/control" <<'EOF'
-          Package: two-khz-server
+          Package: stelly-server
           Version: @VERSION@
           Architecture: amd64
           Section: sound
           Priority: optional
-          Homepage: https://github.com/nab-os/2kHz
-          Description: 2kHz server: API, crawler and analysis pipeline
+          Homepage: https://github.com/nab-os/Stelly
+          Description: Stelly server: API, crawler and analysis pipeline
            Owns the Qobuz credentials, the SQLite corpus, the CLAP models and every
-           pipeline stage, and serves them to 2kHz clients over HTTP. No GUI: this
+           pipeline stage, and serves them to Stelly clients over HTTP. No GUI: this
            package deliberately links neither GTK nor webkit.
           EOF
           .github/scripts/finish-deb.sh "$R" \
-            "dist/two-khz-server_${{ steps.v.outputs.version }}_amd64.${{ steps.v.outputs.suffix }}.deb" \
+            "dist/stelly-server_${{ steps.v.outputs.version }}_amd64.${{ steps.v.outputs.suffix }}.deb" \
             "$MAINTAINER" "${{ steps.v.outputs.version }}"
 
       - name: Build the tarballs
@@ -144,21 +141,21 @@ jobs:
           S=${{ steps.v.outputs.suffix }}
           T=$(mktemp -d)
 
-          mkdir -p "$T/two-khz-$V"
-          cp app/target/dx/two-khz-app/release/linux/app/two-khz-app "$T/two-khz-$V/"
-          cp README.md "$T/two-khz-$V/"
-          cp -r app/assets/icons "$T/two-khz-$V/icons"
-          tar -C "$T" -czf "dist/two-khz_${V}_${S}.tar.gz" "two-khz-$V"
+          mkdir -p "$T/stelly-$V"
+          cp target/dx/stelly-app/release/linux/app/stelly-app "$T/stelly-$V/"
+          cp README.md "$T/stelly-$V/"
+          cp -r app/assets/icons "$T/stelly-$V/icons"
+          tar -C "$T" -czf "dist/stelly_${V}_${S}.tar.gz" "stelly-$V"
 
-          mkdir -p "$T/two-khz-server-$V"
-          cp server/target/release/two-khz-server "$T/two-khz-server-$V/"
-          cp schema.sql README.md "$T/two-khz-server-$V/"
-          tar -C "$T" -czf "dist/two-khz-server_${V}_${S}.tar.gz" "two-khz-server-$V"
+          mkdir -p "$T/stelly-server-$V"
+          cp target/release/stelly-server "$T/stelly-server-$V/"
+          cp schema.sql README.md "$T/stelly-server-$V/"
+          tar -C "$T" -czf "dist/stelly-server_${V}_${S}.tar.gz" "stelly-server-$V"
 
       - name: Collect the AppImage
         run: |
           mv staging/*.AppImage \
-            "dist/two-khz_${{ steps.v.outputs.version }}_${{ steps.v.outputs.suffix }}.AppImage"
+            "dist/stelly_${{ steps.v.outputs.version }}_${{ steps.v.outputs.suffix }}.AppImage"
 
       - name: Verify the packages
         run: |
@@ -197,7 +194,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: app
           key: windows
 
       - uses: cargo-bins/cargo-binstall@main
@@ -208,7 +204,7 @@ jobs:
       - name: Work out the version
         id: v
         run: |
-          CRATE=$(grep -m1 '^version' app/Cargo.toml | cut -d'"' -f2)
+          CRATE=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           if [ "${{ github.ref_type }}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
@@ -234,8 +230,8 @@ jobs:
           MSI=$(find staging -name '*.msi' -print -quit)
           [ -n "$EXE" ] || { echo "::error::dx produced no setup .exe"; find staging -type f; exit 1; }
           [ -n "$MSI" ] || { echo "::error::dx produced no .msi"; find staging -type f; exit 1; }
-          mv "$EXE" "dist/two-khz_${V}_x64-setup.exe"
-          mv "$MSI" "dist/two-khz_${V}_x64.msi"
+          mv "$EXE" "dist/stelly_${V}_x64-setup.exe"
+          mv "$MSI" "dist/stelly_${V}_x64.msi"
           ls -lh dist
 
       - uses: actions/upload-artifact@v7
@@ -312,7 +308,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: app
           key: android
 
       - uses: cargo-bins/cargo-binstall@main
@@ -320,7 +315,7 @@ jobs:
 
       - name: Work out the version
         id: v
-        run: echo "version=$(grep -m1 '^version' app/Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
 
       # android-env.sh honours a pre-set ANDROID_NDK_HOME, so point it at the
       # NDK the runner image already ships rather than downloading another one.
@@ -353,7 +348,7 @@ jobs:
           STORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          OUT: dist/two-khz_${{ steps.v.outputs.version }}_arm64.apk
+          OUT: dist/stelly_${{ steps.v.outputs.version }}_arm64.apk
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -389,7 +384,7 @@ jobs:
       - name: Collect the unsigned APK
         if: steps.signing.outputs.signed != 'true'
         env:
-          OUT: dist/two-khz_${{ steps.v.outputs.version }}_arm64-unsigned.apk
+          OUT: dist/stelly_${{ steps.v.outputs.version }}_arm64-unsigned.apk
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -452,13 +447,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # `github.repository` is not usable as the GHCR name: the registry
-      # refuses uppercase, and this repo is `2kHz`.
+      # refuses uppercase, and this repo is `Stelly`.
       - uses: docker/metadata-action@v5
         id: meta
         with:
           images: |
-            docker.io/4gjr3z1t/2khz
-            ghcr.io/${{ github.repository_owner }}/two-khz-server
+            docker.io/stellymusic/stelly
+            ghcr.io/${{ github.repository_owner }}/stelly-server
           # `type=ref` first and unconditionally: it is what publishes the
           # `v`-prefixed name the README and compose.yaml pin to. The semver
           # patterns below add the unprefixed `0.6.1` and `0.6`, and only
@@ -495,7 +490,7 @@ jobs:
       # database, finds no devices and says so.
       #
       # The reference comes from the metadata step rather than being written
-      # out here. A literal `4gjr3z1t/2khz:latest` reads as the same thing and
+      # out here. A literal `stellymusic/stelly:latest` reads as the same thing and
       # is not: docker would pull the published tag and test that instead of
       # the image just built, passing even on a Dockerfile that cannot build.
       - name: Smoke test

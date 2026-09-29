@@ -1,6 +1,6 @@
 //! The shared play session: one queue and one output for every paired device.
 //!
-//! The rules live in `two_khz::session`, which the app runs too. This only
+//! The rules live in `stelly_core::session`, which the app runs too. This only
 //! holds the one real copy, knows which devices are listening, and pushes
 //! every change to them.
 
@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
-use two_khz::api::Device;
-use two_khz::session::{Clocked, Command, Output, Session, Stale};
+use stelly_core::api::Device;
+use stelly_core::session::{Clocked, Command, Output, Session, Stale};
 
 /// How long an output may be gone before the session stops waiting for it.
 /// Long enough to ride out a phone switching networks, short enough that
@@ -77,7 +77,7 @@ impl Playback {
         // by the time the choice lands. Refused rather than ignored, so the
         // device that asked catches up instead of showing an output that
         // nothing is playing on.
-        if let two_khz::session::Op::Output {
+        if let stelly_core::session::Op::Output {
             device_id: Some(target),
         } = command.op
         {
@@ -145,7 +145,7 @@ impl Playback {
         }
         let queue_version = inner.clocked.session.queue_version;
         let released = inner.clocked.apply(
-            two_khz::session::Op::Output { device_id: None },
+            stelly_core::session::Op::Output { device_id: None },
             queue_version,
             device_id,
         );

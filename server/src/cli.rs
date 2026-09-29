@@ -1,11 +1,11 @@
 //! The pipeline and the account, from the command line, as subcommands of
 //! the server binary:
 //!
-//!   two-khz-server login              sign in through the browser
-//!   two-khz-server crawl --max-tracks 5000
-//!   two-khz-server analyse --album ID
-//!   two-khz-server build-space
-//!   two-khz-server layout
+//!   stelly-server login              sign in through the browser
+//!   stelly-server crawl --max-tracks 5000
+//!   stelly-server analyse --album ID
+//!   stelly-server build-space
+//!   stelly-server layout
 //!
 //! The same code the pipeline view drives, so a stage started here and one
 //! started from a client do the same thing. The arguments are parsed by argh,
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
-use two_khz::api::Target;
+use stelly_core::api::Target;
 
 // ---------------------------------------------------------------- arguments
 
@@ -102,7 +102,7 @@ pub struct Crawl {
     #[argh(option, default = "5000")]
     max_tracks: i64,
     /// how many similar-artist hops from a favourite to follow (default 2)
-    #[argh(option, default = "two_khz::api::DEFAULT_MAX_DISTANCE")]
+    #[argh(option, default = "stelly_core::api::DEFAULT_MAX_DISTANCE")]
     max_distance: i64,
     /// requests per second to Qobuz (default 2)
     #[argh(option, default = "DEFAULT_RATE_PER_SEC")]
@@ -198,7 +198,7 @@ pub struct Evaluate {}
 #[derive(FromArgs)]
 #[argh(subcommand, name = "demo")]
 pub struct Demo {
-    /// where to build it, e.g. /tmp/two-khz-demo
+    /// where to build it, e.g. /tmp/stelly-demo
     #[argh(positional)]
     dir: PathBuf,
 }
@@ -455,7 +455,7 @@ fn status(paths: &Paths) -> Result<()> {
     ] {
         println!("{label:<18} {n:>8}");
     }
-    if let Ok(space) = two_khz::space::Space::load(&paths.data_dir) {
+    if let Ok(space) = stelly_core::space::Space::load(&paths.data_dir) {
         let m = &space.manifest;
         println!("{:<18} {} x {} (built {})", "space", m.n_tracks, m.n_dims, m.built_at);
     }
@@ -466,7 +466,7 @@ fn status(paths: &Paths) -> Result<()> {
 /// space is noise and no path logic will rescue it. Worth watching whenever
 /// the weights or labels change.
 fn evaluate(paths: &Paths) -> Result<()> {
-    let space = two_khz::space::Space::load(&paths.data_dir)?;
+    let space = stelly_core::space::Space::load(&paths.data_dir)?;
     let weighted = space.weighted(&space.default_weights());
     let conn = &mut db::open_for_write(&paths.db_path)?;
     let albums: HashMap<i64, String> = tracks::table
@@ -492,7 +492,7 @@ fn evaluate(paths: &Paths) -> Result<()> {
         for &row in rows {
             let mut scores = weighted.similarities(weighted.row(row));
             scores[row] = f32::NEG_INFINITY;
-            let order = two_khz::space::argsort_desc(&scores);
+            let order = stelly_core::space::argsort_desc(&scores);
             let rank = order
                 .iter()
                 .position(|j| *j != row && rows.contains(j))
@@ -520,7 +520,7 @@ async fn demo_command(args: Demo) -> Result<()> {
     let root = std::path::absolute(&args.dir)?;
     let paths = demo::build(&root, &Job::stderr()).await?;
     println!(
-        "\ndemo corpus ready in {}\nserve it with:\n  TWO_KHZ_DATA_DIR={} two-khz-server serve",
+        "\ndemo corpus ready in {}\nserve it with:\n  STELLY_DATA_DIR={} stelly-server serve",
         paths.data_dir.display(),
         paths.data_dir.display()
     );

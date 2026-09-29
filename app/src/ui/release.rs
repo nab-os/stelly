@@ -88,7 +88,7 @@ pub fn ReleaseNotice() -> Element {
     rsx! {
         div { class: "release-notice", role: "status",
             span {
-                "2kHz {release.version} is out, you have {update::CURRENT}. "
+                "Stelly {release.version} is out, you have {update::CURRENT}. "
                 a { href: "{release.url}", "Get it" }
             }
             button {
@@ -131,7 +131,7 @@ pub fn ReleaseRow() -> Element {
         section { class: "panel setting",
             h2 { "Version" }
             div { class: "setting-fields",
-                span { "2kHz {update::CURRENT}" }
+                span { "Stelly {update::CURRENT}" }
                 {status}
                 span { class: "spacer" }
                 button {

@@ -14,7 +14,7 @@ use crate::{crawl, db};
 use anyhow::{bail, Result};
 use diesel::prelude::*;
 use std::path::Path;
-use two_khz::api::{Corpus, Stage, Target};
+use stelly_core::api::{Corpus, Stage, Target};
 
 /// Run one terminating stage to completion. Analyse holds a blocking database
 /// connection across awaits, so drive it on a thread of its own.

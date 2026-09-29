@@ -12,12 +12,12 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use two_khz::api::{
+use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
     SyncFile, SyncManifest, Target,
 };
-use two_khz::session::{Command, Session, Update};
-use two_khz::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use stelly_core::session::{Command, Session, Update};
+use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -121,7 +121,7 @@ struct FormatQuery {
 }
 
 fn default_format() -> u32 {
-    two_khz::qobuz::FORMAT_MP3_320
+    stelly_core::qobuz::FORMAT_MP3_320
 }
 
 // ----------------------------------------------------------------- browsing
@@ -432,7 +432,7 @@ struct CrawlBody {
 }
 
 fn default_distance() -> i64 {
-    two_khz::api::DEFAULT_MAX_DISTANCE
+    stelly_core::api::DEFAULT_MAX_DISTANCE
 }
 
 /// Unbounded, so `pipeline`: this runs until the frontier empties.
@@ -526,8 +526,8 @@ async fn pipeline_log(State(state): State<AppState>, _: PlayAuth) -> impl IntoRe
 // --------------------------------------------------------------------- sync
 
 /// What a client needs to navigate: the vectors, the manifest describing them,
-/// and a catalogue. Not `two_khz.db` itself, clients get `catalog.db`, the
-/// slim projection built by `two-khz-server sync-catalog`.
+/// and a catalogue. Not `stelly.db` itself, clients get `catalog.db`, the
+/// slim projection built by `stelly-server sync-catalog`.
 const SYNCED: [&str; 4] = ["space.bin", "space.json", "semantic_pca.bin", "catalog.db"];
 
 async fn sync_manifest(State(state): State<AppState>, _: PlayAuth) -> Reply<SyncManifest> {
@@ -543,7 +543,7 @@ async fn sync_manifest(State(state): State<AppState>, _: PlayAuth) -> Reply<Sync
         files.push(SyncFile {
             name: name.to_string(),
             bytes: bytes.len() as u64,
-            digest: two_khz::api::digest(&bytes),
+            digest: stelly_core::api::digest(&bytes),
         });
     }
 
@@ -609,5 +609,5 @@ async fn revoke_device(
 /// The one unauthenticated route. Says nothing except that something is
 /// listening, which is what a health check is for.
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true, "service": "two-khz-server" }))
+    Json(serde_json::json!({ "ok": true, "service": "stelly-server" }))
 }

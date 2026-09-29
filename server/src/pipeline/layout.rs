@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use diesel::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use two_khz::space::Space;
+use stelly_core::space::Space;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -146,7 +146,7 @@ fn nearest(
                         *score = row.iter().zip(&data[j * d..(j + 1) * d]).map(|(a, b)| a * b).sum();
                     }
                     scores[i] = f32::NEG_INFINITY;
-                    let order = two_khz::space::top_k(&scores, k);
+                    let order = stelly_core::space::top_k(&scores, k);
                     *slot = order
                         .into_iter()
                         .map(|j| (j, (1.0 - scores[j] as f64).max(0.0)))

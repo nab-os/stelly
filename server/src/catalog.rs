@@ -1,6 +1,6 @@
 //! The slim catalogue clients sync.
 //!
-//! `two_khz.db` is 269MB, almost none of it read at query time. This projects
+//! `stelly.db` is 269MB, almost none of it read at query time. This projects
 //! out what navigation needs: the metadata minus every `qobuz_json` blob,
 //! `layout`, `blocked_artists`, and `features` reduced to the CLAP embedding
 //! plus a one-field `descriptors_json` carrying only the BPM.
@@ -42,7 +42,7 @@ pub fn build(source: &Path, target: &Path) -> Result<u64> {
     // 16KB seven fit, and 63MB becomes 35MB.
     conn.batch_execute("PRAGMA page_size = 16384")?;
 
-    // The shared schema, so the slim copy is still a two_khz database and
+    // The shared schema, so the slim copy is still a stelly database and
     // `Catalog::load` needs no special case for it.
     crate::db::ensure_schema(&mut conn)?;
 

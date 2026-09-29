@@ -21,7 +21,7 @@ import android.os.IBinder
 import android.os.Looper
 import java.net.URL
 
-typealias BuildConfig = fr.glargh.twokhz.BuildConfig
+typealias BuildConfig = fr.glargh.stelly.BuildConfig
 
 class MainActivity : WryActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -127,7 +127,7 @@ object Playback {
     }
 
     private fun open(): MediaSession {
-        val session = MediaSession(context, "2kHz")
+        val session = MediaSession(context, "Stelly")
         session.setCallback(object : MediaSession.Callback() {
             override fun onPlay() = transport("play", 0.0)
             override fun onPause() = transport("pause", 0.0)

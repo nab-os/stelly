@@ -141,10 +141,10 @@ fn base64_decode(text: &str) -> Option<Vec<u8>> {
 
 // -------------------------------------------------------------------- oauth
 
-const SUCCESS_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>2kHz</title>\
+const SUCCESS_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Stelly</title>\
 <body style=\"font:15px system-ui;background:#12131a;color:#e5e7ef;padding:3rem\">\
 <h2>Signed in.</h2><p>You can close this tab and return to the terminal.</p>";
-const FAILURE_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>2kHz</title>\
+const FAILURE_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Stelly</title>\
 <body style=\"font:15px system-ui;background:#12131a;color:#f7768e;padding:3rem\">\
 <h2>No authorisation code in the redirect.</h2><p>Check the terminal for details.</p>";
 
