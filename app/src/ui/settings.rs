@@ -61,7 +61,7 @@ fn ServerRow() -> Element {
         let config = ServerConfig { base, token: secret };
         match config.save() {
             Ok(()) => status.set(Some(
-                "Saved. Restart 2kHz to connect to it, the running process keeps the \
+                "Saved. Restart Stelly to connect to it, the running process keeps the \
                  server it started with."
                     .into(),
             )),
@@ -73,7 +73,7 @@ fn ServerRow() -> Element {
         Ok(()) => {
             address.set("http://".into());
             token.set(String::new());
-            status.set(Some("Pairing forgotten. Restart 2kHz to pair with a server again.".into()));
+            status.set(Some("Pairing forgotten. Restart Stelly to pair with a server again.".into()));
         }
         Err(err) => status.set(Some(format!("could not clear the pairing: {err:#}"))),
     };

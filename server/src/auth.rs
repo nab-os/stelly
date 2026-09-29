@@ -12,7 +12,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use two_khz::api::{Device, PairingGrant, Scope};
+use stelly::api::{Device, PairingGrant, Scope};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use std::time::Duration;
 /// 32 bytes, hex-encoded. Long enough that guessing is not a threat model.
 const TOKEN_BYTES: usize = 32;
 
-// Not in the shared `two_khz::schema`: clients have no business knowing the
+// Not in the shared `stelly::schema`: clients have no business knowing the
 // table exists, and it is created here rather than by `schema.sql`.
 diesel::table! {
     devices (id) {
@@ -197,7 +197,7 @@ fn bearer(parts: &Parts) -> Option<String> {
 fn authorise(parts: &Parts, state: &crate::AppState, needed: Scope) -> Result<Device, crate::Failure> {
     let Some(token) = bearer(parts) else {
         return Err(crate::Failure::unauthorised(
-            "no bearer token; pair this device with `two-khz-server pair`",
+            "no bearer token; pair this device with `stelly-server pair`",
         ));
     };
     let Some(device) = state.auth.verify(&token) else {

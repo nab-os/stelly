@@ -23,7 +23,7 @@ never a re-analysis.
 
 ## One binary, client and server
 
-Everything that is not the screen is `two-khz-server`: the Qobuz client and
+Everything that is not the screen is `stelly-server`: the Qobuz client and
 its credentials, the SQLite corpus, the crawl, `analyse`, `build-space`,
 `layout`, the CLAP models. The desktop and Android apps are both clients of it
 and hold nothing but a synced copy of the space and the slim catalogue. There
@@ -61,7 +61,7 @@ Every paired device follows one play session: the queue, the position, and
 which device the sound comes out of. The server holds it in memory; a restart
 empties the queue.
 
-The rules are `two_khz::session`, which both sides run. A button applies its
+The rules are `stelly::session`, which both sides run. A button applies its
 `Op` to the app's own copy at once and posts it; the server applies the same
 op to the real copy and pushes the result over SSE to every device. An op that
 names a row by index carries the queue version it was made against, and is
@@ -126,9 +126,9 @@ client. Only that thread writes to SQLite. A worker holds about 600MB, so four
 is ~2.5GB.
 
 ```sh
-two-khz-server analyse                 # one worker per 4 hardware threads, up to 4
-two-khz-server analyse --workers 12    # override, e.g. re-analysing from the cache
-two-khz-server analyse --fetchers 16   # if fetching is the laggard
+stelly-server analyse                 # one worker per 4 hardware threads, up to 4
+stelly-server analyse --workers 12    # override, e.g. re-analysing from the cache
+stelly-server analyse --fetchers 16   # if fetching is the laggard
 ```
 
 The ceiling is Qobuz's rate limit, not the CPU: one signed URL per track at the
@@ -192,7 +192,7 @@ tempo comes out where it was put. It fetches the CLAP weights on first run.
 Two more ignored tests need something from outside: `front_end_matches_transformers`
 compares the mel front end and the embedding against reference files written by
 transformers, and `excerpt_from_the_middle_of_a_served_file` runs the byte-range
-fetch against a real MP3 (`TWO_KHZ_MP3_SAMPLE`).
+fetch against a real MP3 (`STELLY_MP3_SAMPLE`).
 
 ## Not yet verified
 

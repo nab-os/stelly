@@ -1,5 +1,5 @@
 [app]
-name = "two_khz"
-stylized-name = "2kHz"
-identifier = "fr.glargh.twokhz"
+name = "stelly"
+stylized-name = "Stelly"
+identifier = "fr.glargh.stelly"
 template-pack = "dioxus"

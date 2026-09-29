@@ -3,7 +3,7 @@
 //! Xenova's ONNX export of `laion/clap-htsat-unfused`, pinned to one revision
 //! and checked by hash, so what runs here is what was validated against the
 //! torch model. The weights are shared across corpora, so they live in the
-//! model directory rather than following TWO_KHZ_DATA_DIR.
+//! model directory rather than following STELLY_DATA_DIR.
 
 use super::Job;
 use anyhow::{bail, Context, Result};
@@ -72,7 +72,7 @@ pub async fn ensure(model_dir: &Path, names: &[&str], job: &Job) -> Result<()> {
     Ok(())
 }
 
-/// Everything, for `two-khz models`.
+/// Everything, for `stelly models`.
 pub async fn ensure_all(model_dir: &Path, job: &Job) -> Result<()> {
     let names: Vec<&str> = WEIGHTS.iter().map(|w| w.name).collect();
     ensure(model_dir, &names, job).await

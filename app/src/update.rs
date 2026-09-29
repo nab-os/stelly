@@ -10,7 +10,7 @@
 
 use serde::Deserialize;
 
-const LATEST: &str = "https://api.github.com/repos/nab-os/2kHz/releases/latest";
+const LATEST: &str = "https://api.github.com/repos/nab-os/Stelly/releases/latest";
 
 /// How often a long-running window asks again. Unauthenticated, GitHub allows
 /// 60 requests an hour per address, which this is nowhere near.
@@ -74,7 +74,7 @@ pub async fn check() -> anyhow::Result<Option<Release>> {
         // GitHub refuses a request without one.
         .header(
             reqwest::header::USER_AGENT,
-            concat!("two-khz/", env!("CARGO_PKG_VERSION")),
+            concat!("stelly/", env!("CARGO_PKG_VERSION")),
         )
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
@@ -98,7 +98,7 @@ fn announce(current: &str, latest: &Latest, installer: Option<&str>) -> Option<R
     }
     if let Some(suffix) = installer {
         let ready = latest.assets.iter().any(|asset| {
-            asset.name.starts_with("two-khz_")
+            asset.name.starts_with("stelly_")
                 && asset.name.ends_with(suffix)
                 && (asset.state.is_empty() || asset.state == "uploaded")
         });
@@ -138,7 +138,7 @@ mod tests {
     fn release(tag: &str, assets: &[&str]) -> Latest {
         Latest {
             tag_name: tag.into(),
-            html_url: format!("https://github.com/nab-os/2kHz/releases/tag/{tag}"),
+            html_url: format!("https://github.com/nab-os/Stelly/releases/tag/{tag}"),
             draft: false,
             prerelease: false,
             assets: assets
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn a_newer_release_with_the_installer_is_announced() {
-        let latest = release("v0.12.0", &["two-khz_0.12.0_arm64.apk"]);
+        let latest = release("v0.12.0", &["stelly_0.12.0_arm64.apk"]);
         let found = announce("0.11.0", &latest, APK).unwrap();
         assert_eq!(found.version, "0.12.0");
         assert!(found.url.ends_with("/v0.12.0"));
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(
             announce(
                 "0.11.0",
-                &release("v0.11.0", &["two-khz_0.11.0_arm64.apk"]),
+                &release("v0.11.0", &["stelly_0.11.0_arm64.apk"]),
                 APK
             ),
             None
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(
             announce(
                 "0.11.0",
-                &release("v0.10.2", &["two-khz_0.10.2_arm64.apk"]),
+                &release("v0.10.2", &["stelly_0.10.2_arm64.apk"]),
                 APK
             ),
             None
@@ -194,11 +194,11 @@ mod tests {
     #[test]
     fn a_release_still_uploading_is_not() {
         // The server's tarball is there, this platform's installer is not.
-        let mut latest = release("v0.12.0", &["two-khz-server_0.12.0_ubuntu-24.04.tar.gz"]);
+        let mut latest = release("v0.12.0", &["stelly-server_0.12.0_ubuntu-24.04.tar.gz"]);
         assert_eq!(announce("0.11.0", &latest, APK), None);
 
         latest.assets.push(Asset {
-            name: "two-khz_0.12.0_arm64.apk".into(),
+            name: "stelly_0.12.0_arm64.apk".into(),
             state: "starter".into(),
         });
         assert_eq!(announce("0.11.0", &latest, APK), None);
@@ -206,13 +206,13 @@ mod tests {
 
     #[test]
     fn the_server_package_does_not_stand_in_for_the_app() {
-        let latest = release("v0.12.0", &["two-khz-server_0.12.0_amd64.ubuntu-24.04.deb"]);
+        let latest = release("v0.12.0", &["stelly-server_0.12.0_amd64.ubuntu-24.04.deb"]);
         assert_eq!(announce("0.11.0", &latest, Some(".deb")), None);
     }
 
     #[test]
     fn drafts_and_prereleases_are_not() {
-        let mut latest = release("v0.12.0", &["two-khz_0.12.0_arm64.apk"]);
+        let mut latest = release("v0.12.0", &["stelly_0.12.0_arm64.apk"]);
         latest.prerelease = true;
         assert_eq!(announce("0.11.0", &latest, APK), None);
     }
@@ -226,10 +226,10 @@ mod tests {
     fn reads_what_github_sends() {
         let body = r#"{
             "tag_name": "v0.12.0",
-            "html_url": "https://github.com/nab-os/2kHz/releases/tag/v0.12.0",
+            "html_url": "https://github.com/nab-os/Stelly/releases/tag/v0.12.0",
             "draft": false,
             "prerelease": false,
-            "assets": [{ "name": "two-khz_0.12.0_x64-setup.exe", "state": "uploaded", "size": 1 }],
+            "assets": [{ "name": "stelly_0.12.0_x64-setup.exe", "state": "uploaded", "size": 1 }],
             "body": "notes"
         }"#;
         let latest: Latest = serde_json::from_str(body).unwrap();

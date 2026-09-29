@@ -1,7 +1,7 @@
 //! CLAP text embeddings, via ONNX: text steering at query time, and the mood
 //! and style prompts `build-space` scores every track against.
 //!
-//! Needs the text tower and tokenizer in the model directory; `two-khz models`
+//! Needs the text tower and tokenizer in the model directory; `stelly models`
 //! fetches them, and so does `build-space` on first run.
 
 use crate::pipeline::models::{CLAP_TEXT, CLAP_TOKENIZER};

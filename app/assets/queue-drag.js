@@ -16,16 +16,16 @@
 // dragged one would land, then `{from, to}` goes to Rust, which owns the
 // queue and re-renders it in the new order.
 
-window.twoKhzQueueSend = (message) => dioxus.send(message);
+window.stellyQueueSend = (message) => dioxus.send(message);
 
-if (!window.twoKhzQueueGesturesInstalled) {
-  window.twoKhzQueueGesturesInstalled = true;
+if (!window.stellyQueueGesturesInstalled) {
+  window.stellyQueueGesturesInstalled = true;
 
   const HOLD_MS = 350;
   const SLOP_PX = 8;
   const MOUSE_SLOP_PX = 4;
 
-  const send = (message) => window.twoKhzQueueSend && window.twoKhzQueueSend(message);
+  const send = (message) => window.stellyQueueSend && window.stellyQueueSend(message);
 
   const rowsOf = (list) =>
     Array.from(list.children).filter((node) => node.tagName === "LI");
