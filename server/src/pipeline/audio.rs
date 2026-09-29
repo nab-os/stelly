@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 pub const EXCERPT_SECONDS: f64 = 90.0;
-pub use two_khz::api::MIN_TRACK_SECONDS;
+pub use stelly_core::api::MIN_TRACK_SECONDS;
 /// Below this an excerpt is noise; a seek past the end lands here too.
 pub const MIN_EXCERPT_SECONDS: f64 = 20.0;
 /// Extra audio fetched past the window, so a bitrate estimate that is slightly
@@ -504,13 +504,13 @@ mod tests {
 
     /// The whole fetch against a server that honours byte ranges, as the CDN
     /// does. Needs a real MP3 of a few minutes, 320kbps like Qobuz's:
-    /// `TWO_KHZ_MP3_SAMPLE=track.mp3 cargo test -- --ignored excerpt`.
+    /// `STELLY_MP3_SAMPLE=track.mp3 cargo test -- --ignored excerpt`.
     #[tokio::test(flavor = "current_thread")]
     #[ignore]
     async fn excerpt_from_the_middle_of_a_served_file() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let path = std::env::var("TWO_KHZ_MP3_SAMPLE").unwrap();
+        let path = std::env::var("STELLY_MP3_SAMPLE").unwrap();
         let file = std::sync::Arc::new(std::fs::read(&path).unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

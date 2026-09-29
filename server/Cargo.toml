@@ -1,42 +1,36 @@
 [package]
-name = "two-khz-server"
-version = "0.13.2"
-edition = "2021"
-
-# Deliberately not a workspace member with `app`: a shared target directory
-# would force a from-scratch rebuild of ort, the bundled SQLite and dioxus.
+name = "stelly-server"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
-name = "two-khz-server"
+name = "stelly-server"
 path = "src/main.rs"
 
 [dependencies]
-# Package is `two-khz-app`; its library target is named `two_khz`. Only the
-# shared half, wire types, catalogue shapes, so no dioxus, wry or GTK.
-two-khz-app = { path = "../app", default-features = false }
+stelly-core.workspace = true
 
-anyhow = "1"
+anyhow.workspace = true
 argh = "0.1.19"
 axum = "0.8"
-bytemuck = "1"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-md-5 = "0.11.0"
+bytemuck.workspace = true
+futures-util.workspace = true
+md-5.workspace = true
 # In-memory cache of Qobuz browse responses, so repeat visits skip the 2/s budget.
 moka = { version = "0.12", features = ["future"] }
 rand = "0.9"
 # `stream` for fetching model weights without holding 500MB in memory.
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "query", "stream"] }
-# Typed queries against `two_khz::schema`, shared with the app.
+reqwest.workspace = true
+# For its `prefer-post-quantum` feature; see the root Cargo.toml.
+rustls.workspace = true
+# Typed queries against `stelly_core::schema`, shared with the app.
 # `returning_clauses_for_sqlite_3_35` is for the device id on pairing; the
 # bundled SQLite is far newer than 3.35.
-diesel = { version = "2.3.13", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
-# Diesel links SQLite through this. Named here as well as in the app so the
-# server does not lean on the app's target gating for `bundled`.
-libsqlite3-sys = { version = "0.38", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+diesel = { workspace = true, features = ["returning_clauses_for_sqlite_3_35"] }
+serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs"] }
 tokio-stream = "0.1"
 
 # CLAP's two towers, for text steering and the whole of `analyse`.
@@ -52,11 +46,3 @@ ebur128 = "0.1.10"
 nalgebra = "0.35.0"
 regex = "1.13.1"
 
-[profile.release]
-opt-level = 3
-
-# Optimised even under plain `cargo run`. The analyser's resampling, mel
-# spectrogram and descriptors are tight loops that run ~7x slower unoptimised,
-# 8.8s an excerpt against 1.3s, which turns `analyse` into a crawl.
-[profile.dev]
-opt-level = 3

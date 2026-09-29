@@ -13,8 +13,8 @@
 // images at once does not stay interactive; asked for a screenful at a time it
 // does. Widen this only with a scroll test to back it up.
 (() => {
-  if (window.twoKhzCoversInstalled) return;
-  window.twoKhzCoversInstalled = true;
+  if (window.stellyCoversInstalled) return;
+  window.stellyCoversInstalled = true;
 
   const PENDING = "[data-cover]:not([data-cover=''])";
 

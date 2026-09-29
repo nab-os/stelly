@@ -3,7 +3,7 @@
 //! A pure function of the database, no network, no audio, so rebuilding
 //! after a weight or label change takes seconds.
 //!
-//! Output, read by `two_khz::space` on every client:
+//! Output, read by `stelly_core::space` on every client:
 //!   space.bin          [n_tracks x n_dims] f32, per-block normalised and
 //!                      UNWEIGHTED: weights are applied at query time, so the
 //!                      sliders reshape distances live.
@@ -20,7 +20,7 @@ use diesel::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
-use two_khz::space::SPACE_VERSION;
+use stelly_core::space::SPACE_VERSION;
 
 const BPM_FOLD_LOW: f64 = 70.0;
 const BPM_FOLD_HIGH: f64 = 140.0;

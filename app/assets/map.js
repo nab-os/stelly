@@ -851,7 +851,7 @@
 
   // Rust calls this when the selection changes elsewhere, the in-space list,
   // an "in space" button, a generated route.
-  window.twoKhzSetSelected = (trackId) => {
+  window.stellySetSelected = (trackId) => {
     if (trackId === null || trackId === undefined) {
       selected = -1;
       schedule();
@@ -880,14 +880,14 @@
   };
 
   // Rust calls this when a path is built. Ids only, tiny payload.
-  window.twoKhzSetRoute = (trackIds) => {
+  window.stellySetRoute = (trackIds) => {
     route = trackIds.map((id) => byId.get(id)).filter((i) => i !== undefined);
     schedule();
   };
 
   // Rust calls this after the block list changes. Selection and route are
   // dropped: their indices referred to the old point set.
-  window.twoKhzReloadPoints = async () => {
+  window.stellyReloadPoints = async () => {
     await loadPoints();
     selected = -1;
     hover = -1;
@@ -895,8 +895,8 @@
     schedule();
     // The indices changed, but the track id did not; re-resolve it rather
     // than leaving the map unmarked after every rebuild.
-    const wanted = window.twoKhzSelected;
-    if (wanted !== undefined && wanted !== null) window.twoKhzSetSelected(wanted);
+    const wanted = window.stellySelected;
+    if (wanted !== undefined && wanted !== null) window.stellySetSelected(wanted);
   };
 
   window.addEventListener("resize", resize);
@@ -924,9 +924,9 @@
   // Rust may have chosen a track before this file finished loading; it leaves
   // the id here for exactly that case.
   function applyPendingSelection() {
-    const wanted = window.twoKhzSelected;
+    const wanted = window.stellySelected;
     if (wanted !== undefined && wanted !== null) {
-      window.twoKhzSetSelected(wanted);
+      window.stellySetSelected(wanted);
     }
   }
   applyPendingSelection();

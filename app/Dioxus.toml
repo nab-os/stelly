@@ -3,7 +3,7 @@
 # Android is built with `dx`, not the cargo-mobile2 scaffolding in gen/,
 # dioxus-desktop exports its own JNI trampoline. See src/lib.rs.
 [application]
-name = "two_khz"
+name = "stelly"
 # A playback service and notification on top of dx's own, see
 # android/MainActivity.kt.
 android_main_activity = "android/MainActivity.kt"
@@ -15,11 +15,11 @@ min_sdk = 26
 proguard_rules = ["android/playback.pro"]
 
 [web.app]
-title = "2kHz"
+title = "Stelly"
 
 [bundle]
-identifier = "fr.glargh.twokhz"
-publisher = "two_khz"
+identifier = "fr.glargh.stelly"
+publisher = "stelly"
 
 # Without these the bundler falls back to the stock Dioxus logo, and drops a
 # stray `.dx-default-icon.png` at the root of the .deb's filesystem.
@@ -38,12 +38,12 @@ icon = [
 category = "Music"
 short_description = "Browse a Qobuz library as a space you can walk through"
 long_description = """
-2kHz analyses a music library with CLAP, lays the result out with
+Stelly analyses a music library with CLAP, lays the result out with
 UMAP, and lets you navigate the space directly: nearest neighbours, a radio
 walk, a path between two tracks, or a slow drift. Weights are applied at query
 time, so the sliders are live.
 """
-homepage = "https://github.com/nab-os/2kHz"
+homepage = "https://github.com/nab-os/Stelly"
 
 # `depends` is computed per-release by dpkg-shlibdeps in CI: the package names
 # differ between Ubuntu releases.
