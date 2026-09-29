@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 pub const EXCERPT_SECONDS: f64 = 90.0;
-pub use stelly::api::MIN_TRACK_SECONDS;
+pub use stelly_core::api::MIN_TRACK_SECONDS;
 /// Below this an excerpt is noise; a seek past the end lands here too.
 pub const MIN_EXCERPT_SECONDS: f64 = 20.0;
 /// Extra audio fetched past the window, so a bitrate estimate that is slightly

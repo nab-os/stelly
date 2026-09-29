@@ -12,7 +12,7 @@ use diesel::sql_types::{BigInt, Nullable, SingleValue};
 use diesel::upsert::excluded;
 use std::path::Path;
 use std::time::Duration;
-use stelly::api::BlockedArtist;
+use stelly_core::api::BlockedArtist;
 
 /// The schema, embedded at compile time.
 const SCHEMA: &str = include_str!("../../schema.sql");
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(qobuz, None, "the slim copy leaves the payloads behind");
 
         // And the client reads it back, in the space's row order.
-        let loaded = stelly::db::Catalog::load(&target, &[99, 2]).unwrap();
+        let loaded = stelly_core::db::Catalog::load(&target, &[99, 2]).unwrap();
         assert_eq!(loaded.get(0).title, "<missing 99>");
         let two = loaded.get(1);
         assert_eq!((two.title.as_str(), two.artist.as_str(), two.bpm), ("Two", "Eight", Some(120.0)));

@@ -77,8 +77,8 @@ sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
   librsvg2-dev libssl-dev
 ```
 
-The server needs none of it: it takes the app crate with default features off,
-which keeps dioxus, wry and GTK out.
+The server needs none of it: it depends on `stelly-core`, the half the two
+share, not on the app, which keeps dioxus, wry and GTK out.
 
 ### Credentials
 
@@ -291,7 +291,7 @@ cd app
 dx build --release --platform android --target aarch64-linux-android \
    --no-default-features --features mobile
 
-adb install -r target/dx/stelly-app/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+adb install -r ../target/dx/stelly-app/release/android/app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 `--target` matters: without it `dx` builds x86_64 for an emulator, which will

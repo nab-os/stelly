@@ -5,7 +5,8 @@
 # them into /data/models the first time analyse, build-space or text steering
 # needs them, or up front with `stelly-server models`.
 #
-# Build from the repo root; the context needs app/, server/ and schema.sql.
+# Build from the repo root; the context needs the workspace manifests, core/,
+# app/, server/ and schema.sql.
 #
 #   docker build -t stelly-server .
 
@@ -22,25 +23,28 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY core ./core
 COPY app ./app
 COPY server ./server
 # `db.rs` embeds it with include_str!, so it is a build input, not data.
 COPY schema.sql ./schema.sql
 
-# No GTK, no webkit: the server takes `stelly-app` with default features
-# off, so nothing here wants a window.
+# No GTK, no webkit: the server depends on `stelly-core`, not the app, so
+# nothing here wants a window. app/ is copied only because it is a workspace
+# member and cargo wants its manifest.
 #
 # `ort` fetches an onnxruntime build during this step, so the build needs the
 # network. Whatever it leaves behind gets carried into the runtime image; the
 # cache mount means the target directory is gone by the time the layer lands,
 # hence the copy into /out inside the same step.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/server/target \
+    --mount=type=cache,target=/app/target \
     set -eu; \
-    cargo build --release --locked --manifest-path server/Cargo.toml; \
+    cargo build --release --locked -p stelly-server; \
     mkdir -p /out; \
-    cp server/target/release/stelly-server /out/; \
-    find server/target/release -name 'libonnxruntime*.so*' -exec cp {} /out/ \;
+    cp target/release/stelly-server /out/; \
+    find target/release -name 'libonnxruntime*.so*' -exec cp {} /out/ \;
 
 # -------------------------------------------------------------------- server
 

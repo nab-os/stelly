@@ -188,14 +188,14 @@ mod tests {
         let bpm = assemble::fold_bpm(bpm_of(1017)).unwrap().exp2();
         assert!((bpm - 87.0).abs() < 3.0, "174 BPM folded to {bpm}");
 
-        let space = stelly::space::Space::load(&paths.data_dir).unwrap();
+        let space = stelly_core::space::Space::load(&paths.data_dir).unwrap();
         let weighted = space.weighted(&space.default_weights());
         let album_of = |row: usize| (space.manifest.track_ids[row] - 1001) as usize / TRACKS_PER_ALBUM;
         let mut top1 = 0;
         for row in 0..weighted.n_tracks {
             let mut scores = weighted.similarities(weighted.row(row));
             scores[row] = f32::NEG_INFINITY;
-            let nearest = stelly::space::top_k(&scores, 1)[0];
+            let nearest = stelly_core::space::top_k(&scores, 1)[0];
             if album_of(nearest) == album_of(row) {
                 top1 += 1;
             }

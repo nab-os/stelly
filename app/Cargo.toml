@@ -1,13 +1,13 @@
 [package]
 name = "stelly-app"
-version = "0.13.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 name = "stelly"
 path = "src/lib.rs"
-# `lib` for the server, which shares the wire types; `cdylib` so the APK can
-# load it and call `start_app` through JNI.
+# `lib` for the binary below; `cdylib` so the APK can load it and call
+# `start_app` through JNI.
 crate-type = ["lib", "cdylib"]
 
 # Also the Android entry point: dioxus' `start_app` trampoline dlsym's `main`,
@@ -20,7 +20,7 @@ required-features = ["gui"]
 # ---------------------------------------------------------------- features
 #
 # Every build is a client of `stelly-server`: Qobuz, the pipeline and the
-# models live there. Without `gui` this is just the shared library.
+# models live there. Without `gui` this is just the client library.
 #
 #   desktop: a dioxus window.
 #   mobile:  the same, as an Android app.
@@ -35,41 +35,24 @@ mobile = ["gui", "dioxus/mobile"]
 web = ["gui", "dioxus/web"]
 
 [dependencies]
-anyhow = "1"
-bytemuck = "1"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-md-5 = "0.11.0"
-memmap2 = "0.9"
+stelly-core.workspace = true
+
+anyhow.workspace = true
+futures-util.workspace = true
 # `stream` is what lets the remote backend hold the pipeline log open as SSE
 # rather than polling it.
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "query", "stream"] }
-# The catalogue, through the tables in `src/schema.rs`, which the server
-# shares. SQLite itself comes from `libsqlite3-sys` below, or on wasm from
-# Diesel's own `sqlite-wasm-rs`.
-diesel = { version = "2.3.13", features = ["sqlite"] }
-# Never named in the source: reqwest takes rustls with default features off,
-# which drops `prefer-post-quantum` and leaves X25519MLKEM768 advertised in
-# `supported_groups` with no matching key share. A server that prefers that
-# group then has to answer with a HelloRetryRequest, and an ingress that
-# mishandles one closes the connection mid-handshake. Naming rustls here turns
-# the feature back on through unification, so the first flight already carries
-# the post-quantum key share and the handshake needs one round trip.
-rustls = { version = "0.23.45", default-features = false, features = ["prefer-post-quantum"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.53.1", features = ["rt", "macros", "sync", "time"] }
+reqwest.workspace = true
+# For its `prefer-post-quantum` feature; see the root Cargo.toml.
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 
 [dependencies.dioxus]
 version = "0.7"
 optional = true
 # Defaults carry rsx!, signals, hooks and html, and no platform, that comes
 # from the desktop/mobile features above.
-
-# Bundled, so there is no system SQLite to match and Android needs nothing but
-# the NDK's clang. The server names it too: only one crate may link SQLite, so
-# the two have to agree on a version.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 
 # The JNI entry point and logging; see src/mobile.rs. `jni` and `ndk-context`
 # are the versions tao already uses, for the playback notification in
@@ -79,10 +62,6 @@ android_logger = "0.14"
 jni = "0.21"
 log = "0.4"
 ndk-context = "0.1"
-
-[profile.release]
-opt-level = 3
-lto = true
 
 # ------------------------------------------------------- mobile scaffolding
 #
