@@ -22,7 +22,7 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 
 async fn export(track_ids: Vec<i64>) -> anyhow::Result<i64> {
-    let name = format!("two_khz ({} tracks)", track_ids.len());
+    let name = format!("Stelly ({} tracks)", track_ids.len());
     backend().export_playlist(&name, &track_ids).await
 }
 
@@ -150,7 +150,7 @@ pub fn GeneratePanel() -> Element {
             if mode == Mode::Drift && !generator.can_steer() {
                 p { class: "muted error",
                     "Drift needs the CLAP text tower on the server. Fetch it there with: "
-                    code { "two-khz-server models" }
+                    code { "stelly-server models" }
                 }
             }
 

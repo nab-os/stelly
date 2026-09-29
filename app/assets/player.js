@@ -17,7 +17,7 @@
   // device taking over the sound picks up mid-track. Says "loaded" once the
   // element has started or given up, so Rust can tell the pause a src swap
   // causes from someone pausing.
-  window.twoKhzPlayUrl = (url, start, autoplay) => {
+  window.stellyPlayUrl = (url, start, autoplay) => {
     audio.src = url;
     // Set even when it is 0: a previous track's position survives a src swap
     // in some webviews.
@@ -29,17 +29,17 @@
       setTimeout(loaded, 0);
     }
   };
-  window.twoKhzResume = () => audio.play().catch(() => {});
-  window.twoKhzPause = () => audio.pause();
-  window.twoKhzStop = () => {
+  window.stellyResume = () => audio.play().catch(() => {});
+  window.stellyPause = () => audio.pause();
+  window.stellyStop = () => {
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
   };
-  window.twoKhzSeekTo = (seconds) => {
+  window.stellySeekTo = (seconds) => {
     audio.currentTime = Math.max(0, seconds);
   };
-  window.twoKhzVolume = (value) => {
+  window.stellyVolume = (value) => {
     audio.volume = Math.max(0, Math.min(1, value));
   };
 
@@ -48,7 +48,7 @@
   // from, without this, WebKitGTK has nothing to hand to MPRIS/PipeWire's
   // media-session bridge, so the app's name and art never reach it and its
   // buttons have nothing registered to call.
-  window.twoKhzSetMetadata = (title, artist, album, artwork) => {
+  window.stellySetMetadata = (title, artist, album, artwork) => {
     if (!("mediaSession" in navigator)) return;
     navigator.mediaSession.metadata = new MediaMetadata({
       title,

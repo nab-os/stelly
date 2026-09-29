@@ -205,7 +205,7 @@ impl Workers {
             let queue = queue.clone();
             let report = report.clone();
             let handle = std::thread::Builder::new()
-                .name(format!("two-khz-analyse-{n}"))
+                .name(format!("stelly-analyse-{n}"))
                 .spawn(move || loop {
                     let next = queue.lock().unwrap_or_else(|e| e.into_inner()).recv();
                     let Ok((track_id, bytes)) = next else { break };

@@ -13,7 +13,7 @@ use diesel::prelude::*;
 use diesel::upsert::excluded;
 use serde_json::Value;
 use std::collections::HashSet;
-use two_khz::api::Target;
+use stelly::api::Target;
 
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

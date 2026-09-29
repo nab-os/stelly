@@ -1,4 +1,4 @@
--- Schema for two_khz.db, the server's database, and for the slim catalog.db it
+-- Schema for stelly.db, the server's database, and for the slim catalog.db it
 -- builds for clients from it.
 --
 -- Executed by `server/src/db.rs::ensure_schema`, which embeds this file at

@@ -3,7 +3,7 @@
 //! needs adding here too, the compiler then finds every query it affects.
 //!
 //! Here rather than in the server so both sides of the catalogue read it
-//! through the same definitions: the server writes `two_khz.db`, the client
+//! through the same definitions: the server writes `stelly.db`, the client
 //! reads the slim `catalog.db` built from it.
 //!
 //! SQLite's INTEGER is 64-bit, so every integer column is `BigInt`.

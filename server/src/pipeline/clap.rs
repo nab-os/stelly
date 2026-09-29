@@ -265,11 +265,11 @@ mod tests {
 
     /// Compare against transformers' own extractor. Needs reference files
     /// written by the export check; run with
-    /// `TWO_KHZ_CLAP_REFERENCE=<dir> cargo test -- --ignored`.
+    /// `STELLY_CLAP_REFERENCE=<dir> cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn front_end_matches_transformers() {
-        let dir = std::path::PathBuf::from(std::env::var("TWO_KHZ_CLAP_REFERENCE").unwrap());
+        let dir = std::path::PathBuf::from(std::env::var("STELLY_CLAP_REFERENCE").unwrap());
         let audio: Vec<f32> = bytemuck::cast_slice(&std::fs::read(dir.join("audio_in.f32")).unwrap()).to_vec();
         let reference: Vec<f32> =
             bytemuck::cast_slice(&std::fs::read(dir.join("feat_ref.f32")).unwrap()).to_vec();
@@ -287,7 +287,7 @@ mod tests {
             .fold(0f32, f32::max);
         assert!(worst < 1e-2, "max dB difference {worst}");
 
-        let model_dir = std::env::var("TWO_KHZ_MODEL_DIR").map(std::path::PathBuf::from);
+        let model_dir = std::env::var("STELLY_MODEL_DIR").map(std::path::PathBuf::from);
         if let Ok(model_dir) = model_dir {
             let mut encoder = AudioEncoder::load(&model_dir, 4).unwrap();
             let expected: Vec<f32> =

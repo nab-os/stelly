@@ -31,7 +31,7 @@ impl Stage {
         }
     }
 
-    /// The `two-khz-server` subcommand that runs the same thing by hand.
+    /// The `stelly-server` subcommand that runs the same thing by hand.
     pub fn command(self) -> &'static str {
         match self {
             Stage::Crawl => "crawl",

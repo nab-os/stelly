@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1.7
 #
-# 2kHz's server: the API, the crawl and the whole analysis pipeline, in one
+# Stelly's server: the API, the crawl and the whole analysis pipeline, in one
 # binary. The CLAP weights (~620MB) are not in the image; the server fetches
 # them into /data/models the first time analyse, build-space or text steering
-# needs them, or up front with `two-khz-server models`.
+# needs them, or up front with `stelly-server models`.
 #
 # Build from the repo root; the context needs app/, server/ and schema.sql.
 #
-#   docker build -t two-khz-server .
+#   docker build -t stelly-server .
 
 ARG RUST_VERSION=1.96.0
 ARG DEBIAN_SUITE=trixie
@@ -27,7 +27,7 @@ COPY server ./server
 # `db.rs` embeds it with include_str!, so it is a build input, not data.
 COPY schema.sql ./schema.sql
 
-# No GTK, no webkit: the server takes `two-khz-app` with default features
+# No GTK, no webkit: the server takes `stelly-app` with default features
 # off, so nothing here wants a window.
 #
 # `ort` fetches an onnxruntime build during this step, so the build needs the
@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eu; \
     cargo build --release --locked --manifest-path server/Cargo.toml; \
     mkdir -p /out; \
-    cp server/target/release/two-khz-server /out/; \
+    cp server/target/release/stelly-server /out/; \
     find server/target/release -name 'libonnxruntime*.so*' -exec cp {} /out/ \;
 
 # -------------------------------------------------------------------- server
@@ -53,36 +53,36 @@ RUN apt-get update \
 
 # Not --system: that expects a uid below SYS_UID_MAX, and a high fixed uid is
 # what keeps a bind-mounted /data chownable to something predictable.
-RUN useradd --uid 10001 --user-group --create-home --home-dir /home/twokhz \
-        --shell /usr/sbin/nologin twokhz
+RUN useradd --uid 10001 --user-group --create-home --home-dir /home/stelly \
+        --shell /usr/sbin/nologin stelly
 
-COPY --from=builder /out/ /opt/two-khz/
+COPY --from=builder /out/ /opt/stelly/
 RUN set -eu; \
-    mv /opt/two-khz/two-khz-server /usr/local/bin/two-khz-server; \
-    find /opt/two-khz -name 'libonnxruntime*.so*' -exec mv {} /usr/local/lib/ \; ; \
+    mv /opt/stelly/stelly-server /usr/local/bin/stelly-server; \
+    find /opt/stelly -name 'libonnxruntime*.so*' -exec mv {} /usr/local/lib/ \; ; \
     ldconfig; \
-    rm -rf /opt/two-khz
+    rm -rf /opt/stelly
 
 # The corpus, the space, the device tokens, the model weights and any .env
 # `login` writes all live in /data, it is the only thing here worth a
 # backup. /cache holds fetched excerpts, evicted as analyse runs.
-ENV HOME=/home/twokhz \
-    TWO_KHZ_DATA_DIR=/data \
-    TWO_KHZ_ENV_DIR=/data \
-    TWO_KHZ_MODEL_DIR=/data/models \
-    TWO_KHZ_CACHE_DIR=/cache/audio
+ENV HOME=/home/stelly \
+    STELLY_DATA_DIR=/data \
+    STELLY_ENV_DIR=/data \
+    STELLY_MODEL_DIR=/data/models \
+    STELLY_CACHE_DIR=/cache/audio
 
 RUN set -eu; \
     mkdir -p /data/models /cache/audio; \
-    chown -R twokhz:twokhz /data /cache
+    chown -R stelly:stelly /data /cache
 
 WORKDIR /data
-USER twokhz
+USER stelly
 EXPOSE 7700
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:7700/api/health || exit 1
 
 # Subcommands pass straight through: `docker run … analyse`, `… pair --name phone`.
-ENTRYPOINT ["two-khz-server"]
+ENTRYPOINT ["stelly-server"]
 CMD ["serve", "--bind", "0.0.0.0:7700"]

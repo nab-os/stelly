@@ -224,7 +224,7 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
             p { class: "muted",
                 "This device navigates the space on its own, but the catalogue, playback and \
                  the pipeline live on a machine that can host them. Pair one with "
-                code { "two-khz-server pair --name phone --scope play" }
+                code { "stelly-server pair --name phone --scope play" }
                 "."
             }
 
@@ -380,7 +380,7 @@ fn Shell() -> Element {
                         selected.set(None);
                         generator.clear();
                         document::eval(
-                            "window.twoKhzReloadPoints && window.twoKhzReloadPoints();",
+                            "window.stellyReloadPoints && window.stellyReloadPoints();",
                         );
                     }
                     Err((err, what)) => eprintln!("could not {what} the rebuilt space: {err:#}"),
@@ -435,7 +435,7 @@ fn Shell() -> Element {
                     .set_blocked(found.iter().map(|a| a.artist_id).collect());
                 blocked.set(found);
             }
-            document::eval("window.twoKhzReloadPoints && window.twoKhzReloadPoints();");
+            document::eval("window.stellyReloadPoints && window.stellyReloadPoints();");
         });
     });
 
@@ -453,7 +453,7 @@ fn Shell() -> Element {
                     .set_blocked(found.iter().map(|a| a.artist_id).collect());
                 blocked.set(found);
             }
-            document::eval("window.twoKhzReloadPoints && window.twoKhzReloadPoints();");
+            document::eval("window.stellyReloadPoints && window.stellyReloadPoints();");
         });
     });
 
@@ -561,7 +561,7 @@ fn Shell() -> Element {
             || !library.history.read().is_empty()
     };
     let arm_back = |want: bool| {
-        document::eval(&format!("window.twoKhzBackArm && window.twoKhzBackArm({want});"));
+        document::eval(&format!("window.stellyBackArm && window.stellyBackArm({want});"));
     };
     use_effect(move || arm_back(can_back()));
     use_future(move || async move {
@@ -721,8 +721,8 @@ fn Shell() -> Element {
         // so for the first few hundred ms this does not exist yet and a bare
         // call would be swallowed by the `&&`.
         let script = format!(
-            "window.twoKhzSelected = {0};\n\
-             window.twoKhzSetSelected && window.twoKhzSetSelected({0});",
+            "window.stellySelected = {0};\n\
+             window.stellySetSelected && window.stellySetSelected({0});",
             selected()
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "null".into())
@@ -749,7 +749,7 @@ fn Shell() -> Element {
             Vec::new()
         };
         let script = format!(
-            "window.twoKhzSetRoute && window.twoKhzSetRoute({});",
+            "window.stellySetRoute && window.stellySetRoute({});",
             serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into())
         );
         document::eval(&script);
