@@ -4,20 +4,15 @@
 //! the slim `catalog.db`, and answers navigation queries in process. Every
 //! thing else, Qobuz included, goes through the server: see `backend`.
 //!
-//! Shared by the desktop and Android apps, and by the server for the wire
-//! types and the catalogue shapes.
+//! Shared by the desktop and Android apps. What the server needs too lives in
+//! `stelly_core`, re-exported here under the same names.
 
-pub mod api;
 pub mod backend;
-pub mod db;
-pub mod logbuffer;
 pub mod map;
 pub mod paths;
-pub mod qobuz;
-pub mod schema;
-pub mod session;
-pub mod space;
 pub mod update;
+
+pub use stelly_core::{api, db, logbuffer, qobuz, schema, session, space};
 
 /// The window, and everything in it. Shared by every platform that has one.
 #[cfg(feature = "gui")]

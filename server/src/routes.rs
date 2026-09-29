@@ -12,12 +12,12 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use stelly::api::{
+use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
     SyncFile, SyncManifest, Target,
 };
-use stelly::session::{Command, Session, Update};
-use stelly::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use stelly_core::session::{Command, Session, Update};
+use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -121,7 +121,7 @@ struct FormatQuery {
 }
 
 fn default_format() -> u32 {
-    stelly::qobuz::FORMAT_MP3_320
+    stelly_core::qobuz::FORMAT_MP3_320
 }
 
 // ----------------------------------------------------------------- browsing
@@ -432,7 +432,7 @@ struct CrawlBody {
 }
 
 fn default_distance() -> i64 {
-    stelly::api::DEFAULT_MAX_DISTANCE
+    stelly_core::api::DEFAULT_MAX_DISTANCE
 }
 
 /// Unbounded, so `pipeline`: this runs until the frontier empties.
@@ -543,7 +543,7 @@ async fn sync_manifest(State(state): State<AppState>, _: PlayAuth) -> Reply<Sync
         files.push(SyncFile {
             name: name.to_string(),
             bytes: bytes.len() as u64,
-            digest: stelly::api::digest(&bytes),
+            digest: stelly_core::api::digest(&bytes),
         });
     }
 

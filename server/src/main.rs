@@ -26,7 +26,7 @@ mod playback;
 mod qobuz;
 mod routes;
 // Shared with the client, which reads the slim copy through the same tables.
-use stelly::schema;
+use stelly_core::schema;
 mod stages;
 mod text;
 
@@ -40,7 +40,7 @@ use pipeline::Paths;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use stelly::api::Scope;
+use stelly_core::api::Scope;
 
 const DEFAULT_BIND: &str = "127.0.0.1:7700";
 
@@ -110,7 +110,7 @@ impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         (
             self.status,
-            axum::Json(stelly::api::ApiError {
+            axum::Json(stelly_core::api::ApiError {
                 message: self.message,
             }),
         )

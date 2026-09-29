@@ -1,0 +1,21 @@
+[package]
+name = "stelly-core"
+version.workspace = true
+edition.workspace = true
+
+# What the app and the server both speak: the wire types, the catalogue and
+# its schema, the space, and the session rules. No UI, no HTTP client.
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+# The catalogue, through the tables in `src/schema.rs`. SQLite itself comes
+# from `libsqlite3-sys` below, or on wasm from Diesel's own `sqlite-wasm-rs`.
+diesel.workspace = true
+md-5.workspace = true
+memmap2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libsqlite3-sys.workspace = true

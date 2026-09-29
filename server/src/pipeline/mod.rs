@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use stelly::api::Progress;
+use stelly_core::api::Progress;
 
 /// Where a `Job` leaves its progress: the step, and when that step began.
 pub type ProgressSlot = Arc<Mutex<Option<(Progress, Instant)>>>;
