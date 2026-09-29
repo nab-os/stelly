@@ -1,4 +1,4 @@
-# 2kHz
+# Stelly
 
 Music as a navigable space. Every track becomes a point in ~80 dimensions where
 distance approximates perceptual similarity, so recommendation becomes geometry:
@@ -8,7 +8,7 @@ a direction you describe in words.
 Qobuz's API returns metadata only (no BPM, no key, no energy), so the acoustic
 half of every vector is computed from the audio itself.
 
-![Favourites in the 2kHz desktop app](docs/favourites.png)
+![Favourites in the Stelly desktop app](docs/favourites.png)
 
 Your favourites in the main area, the generate panel always on the right, and
 the player along the bottom. The two round buttons open search and the map.
@@ -28,8 +28,8 @@ area, from its own floating button.
 Two programs, one of each side of a socket.
 
 ```
-  two-khz-server                               two-khz-app (desktop, Android)
-  ──────────────                               ──────────────────────────────
+  stelly-server                                stelly-app (desktop, Android)
+  ─────────────                                ─────────────────────────────
   Qobuz credentials, ONE 2/s rate limit        syncs space.bin + catalog.db
   crawl       favourites → similar artists     neighbours · radio · path · drift
   analyse     middle 90s of each track           → in process, live sliders
@@ -92,7 +92,7 @@ cargo run --release -- login
 
 That scrapes the current app id and signing secrets from the web player, opens
 your browser to Qobuz, and writes all three into `.env` at the repo root (or
-into `TWO_KHZ_ENV_DIR`).
+into `STELLY_ENV_DIR`).
 
 If the browser round-trip is awkward (a headless box, a container), log in at
 <https://play.qobuz.com/>, open devtools → Application → Local Storage →
@@ -141,10 +141,10 @@ Seeds from your favourites, then expands outward through
 `artist/getSimilarArtists`.
 
 ```sh
-two-khz-server crawl --max-tracks 5000   # favourites, then similar
-two-khz-server crawl --no-seed           # resume the frontier only
-two-khz-server crawl --artist 43840      # one discography, queued
-two-khz-server crawl --album 0634904077969
+stelly-server crawl --max-tracks 5000   # favourites, then similar
+stelly-server crawl --no-seed           # resume the frontier only
+stelly-server crawl --artist 43840      # one discography, queued
+stelly-server crawl --album 0634904077969
 ```
 
 Requests are limited to 2/s with retry-and-backoff on 429s, one account pays
@@ -161,7 +161,7 @@ cargo run --release -- pair --name desktop --scope pipeline   # prints a token, 
 cargo run --release -- serve                                  # 127.0.0.1:7700
 
 cd app
-TWO_KHZ_SERVER=http://127.0.0.1:7700 TWO_KHZ_TOKEN=<token> cargo run --release
+STELLY_SERVER=http://127.0.0.1:7700 STELLY_TOKEN=<token> cargo run --release
 ```
 
 Without those two variables the app opens on a setup screen that asks for the
@@ -200,9 +200,9 @@ through the real pipeline, and serve that:
 
 ```sh
 cd server
-cargo run --release -- demo /tmp/two-khz-demo
-TWO_KHZ_DATA_DIR=/tmp/two-khz-demo/data cargo run --release -- pair --name demo --scope pipeline
-TWO_KHZ_DATA_DIR=/tmp/two-khz-demo/data cargo run --release -- serve
+cargo run --release -- demo /tmp/stelly-demo
+STELLY_DATA_DIR=/tmp/stelly-demo/data cargo run --release -- pair --name demo --scope pipeline
+STELLY_DATA_DIR=/tmp/stelly-demo/data cargo run --release -- serve
 ```
 
 ## Hiding an artist
@@ -212,10 +212,10 @@ them, follow them to their similar artists, analyse their tracks or place them
 in the space, and the app hides what is already stored and refuses to play it.
 
 ```sh
-two-khz-server block "artist name"       # or an artist id
-two-khz-server block 224109 --reason "why"
-two-khz-server blocked                   # list
-two-khz-server unblock 224109
+stelly-server block "artist name"       # or an artist id
+stelly-server block 224109 --reason "why"
+stelly-server blocked                   # list
+stelly-server unblock 224109
 ```
 
 Or click **hide** on any artist or track in the app. The **Hidden** panel at the
@@ -241,9 +241,9 @@ ones connected, under the name they were paired with, and picks which one
 plays; the others become remotes for it.
 
 ```sh
-two-khz-server pair --name phone --scope play
-two-khz-server devices
-two-khz-server revoke 3
+stelly-server pair --name phone --scope play
+stelly-server devices
+stelly-server revoke 3
 ```
 
 This speaks plain HTTP and binds to loopback. Anything beyond loopback belongs
@@ -255,17 +255,17 @@ The server ships as one image, so the machine that hosts it needs no Rust
 toolchain.
 
 ```sh
-docker run -d --init --name two-khz -p 127.0.0.1:7700:7700 \
-  -v two-khz-data:/data --env-file .env 4gjr3z1t/2khz:<version>
+docker run -d --init --name stelly -p 127.0.0.1:7700:7700 \
+  -v stelly-data:/data --env-file .env 4gjr3z1t/stelly:<version>
 
-docker exec two-khz two-khz-server pair --name phone --scope play
+docker exec stelly stelly-server pair --name phone --scope play
 ```
 
 [`compose.yaml`](compose.yaml) is the worked version, pairing, the slim
 catalogue, the volumes and the loopback-only port mapping.
 
 The image carries the API and the whole pipeline; the CLAP weights are fetched
-into the `/data` volume on first use (`docker exec two-khz two-khz-server
+into the `/data` volume on first use (`docker exec stelly stelly-server
 models` to do it up front). It is published to Docker Hub and GHCR with a
 version tag and `:latest`, but everything here pins a version, so that pulling
 never silently changes the server underneath a corpus that took hours to build.
@@ -291,7 +291,7 @@ cd app
 dx build --release --platform android --target aarch64-linux-android \
    --no-default-features --features mobile
 
-adb install -r target/dx/two-khz-app/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+adb install -r target/dx/stelly-app/release/android/app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 `--target` matters: without it `dx` builds x86_64 for an emulator, which will
@@ -316,7 +316,7 @@ on demand. A tag additionally opens a GitHub release with everything attached.
 | Ubuntu 26.04 | the same, built on 26.04 |
 | Windows | x64 `-setup.exe` (per-user, no admin) and `.msi`, desktop only |
 | Android | one signed arm64 `.apk` |
-| Docker | `4gjr3z1t/2khz` and `ghcr.io/…/two-khz-server` |
+| Docker | `4gjr3z1t/stelly` and `ghcr.io/…/stelly-server` |
 
 Each Ubuntu release builds on its own runner, and the desktop and server
 packages are separate, see [docs/design.md](docs/design.md#packaging).

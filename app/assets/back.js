@@ -12,25 +12,25 @@
 // and their default is cancelled so a Chromium-based webview does not also
 // navigate on its own.
 
-window.twoKhzBackSend = (message) => dioxus.send(message);
+window.stellyBackSend = (message) => dioxus.send(message);
 
-if (!window.twoKhzBackInstalled) {
-  window.twoKhzBackInstalled = true;
+if (!window.stellyBackInstalled) {
+  window.stellyBackInstalled = true;
 
   // On a phone the generate panel covers the main area, and back should
   // close it; on a wide screen it is docked and there is nothing to close.
   const narrow = window.matchMedia("(max-width: 900px)");
   const send = (type) =>
-    window.twoKhzBackSend && window.twoKhzBackSend({ type, narrow: narrow.matches });
+    window.stellyBackSend && window.stellyBackSend({ type, narrow: narrow.matches });
 
   // Whether the extra entry is on the history and current.
   let armed = false;
   // Set while taking the entry off, so that `popstate` is not a key press.
   let dropping = false;
 
-  window.twoKhzBackArm = (want) => {
+  window.stellyBackArm = (want) => {
     if (want && !armed) {
-      history.pushState({ twoKhz: true }, "");
+      history.pushState({ stelly: true }, "");
       armed = true;
     } else if (!want && armed) {
       armed = false;

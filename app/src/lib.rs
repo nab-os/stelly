@@ -1,4 +1,4 @@
-//! Core of the 2kHz client.
+//! Core of the Stelly client.
 //!
 //! Holds a synced copy of what the server builds, `space.bin`, `space.json`,
 //! the slim `catalog.db`, and answers navigation queries in process. Every
@@ -147,13 +147,13 @@ pub fn set_data_dir(dir: PathBuf) {
 
 /// Where the client keeps its synced copy of the space.
 ///
-/// Never the server's `TWO_KHZ_DATA_DIR`: with both on one machine, a sync
+/// Never the server's `STELLY_DATA_DIR`: with both on one machine, a sync
 /// would otherwise write over the corpus it was syncing from.
 pub fn client_data_dir() -> PathBuf {
     if let Some(dir) = DATA_DIR_OVERRIDE.get() {
         return dir.clone();
     }
-    if let Ok(dir) = std::env::var("TWO_KHZ_CLIENT_DIR") {
+    if let Ok(dir) = std::env::var("STELLY_CLIENT_DIR") {
         return PathBuf::from(dir);
     }
 
@@ -167,7 +167,7 @@ pub fn client_data_dir() -> PathBuf {
     // roaming: the synced space is too big to follow a profile around.
     #[cfg(windows)]
     if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(dir).join("two_khz");
+        return PathBuf::from(dir).join("stelly");
     }
 
     let base = std::env::var("XDG_DATA_HOME")
@@ -177,7 +177,7 @@ pub fn client_data_dir() -> PathBuf {
                 .join(".local")
                 .join("share")
         });
-    base.join("two_khz")
+    base.join("stelly")
 }
 
 /// The app's private directory, worked out without JNI.
@@ -204,7 +204,7 @@ fn android_files_dir() -> Option<PathBuf> {
     for base in ["/data/user/0", "/data/data"] {
         let dir = PathBuf::from(base).join(&package).join("files");
         if std::fs::create_dir_all(&dir).is_ok() {
-            return Some(dir.join("two_khz"));
+            return Some(dir.join("stelly"));
         }
     }
     None
@@ -217,8 +217,8 @@ fn android_files_dir() -> Option<PathBuf> {
 /// Two environment variables on desktop:
 ///
 /// ```sh
-/// TWO_KHZ_SERVER=https://nas.tailnet.ts.net:7700
-/// TWO_KHZ_TOKEN=<what `two-khz-server pair` printed>
+/// STELLY_SERVER=https://nas.tailnet.ts.net:7700
+/// STELLY_TOKEN=<what `stelly-server pair` printed>
 /// ```
 ///
 /// Without them, whatever the setup screen stored in `server.json`.
@@ -267,12 +267,12 @@ impl Wiring {
     /// Environment first, stored config second. Neither is an error the
     /// caller answers with the setup screen.
     pub fn from_env() -> Result<Self> {
-        if let Ok(base) = std::env::var("TWO_KHZ_SERVER") {
-            let token = std::env::var("TWO_KHZ_TOKEN").map_err(|_| {
+        if let Ok(base) = std::env::var("STELLY_SERVER") {
+            let token = std::env::var("STELLY_TOKEN").map_err(|_| {
                 anyhow::anyhow!(
-                    "TWO_KHZ_SERVER is set but TWO_KHZ_TOKEN is not.\n\
+                    "STELLY_SERVER is set but STELLY_TOKEN is not.\n\
                      Pair this device on the server:\n  \
-                     two-khz-server pair --name \"{}\" --scope play",
+                     stelly-server pair --name \"{}\" --scope play",
                     hostname()
                 )
             })?;

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use two_khz::api::Progress;
+use stelly::api::Progress;
 
 /// Where a `Job` leaves its progress: the step, and when that step began.
 pub type ProgressSlot = Arc<Mutex<Option<(Progress, Instant)>>>;
@@ -109,19 +109,19 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// `TWO_KHZ_DATA_DIR`, `TWO_KHZ_MODEL_DIR`, `TWO_KHZ_CACHE_DIR` and
-    /// `TWO_KHZ_ENV_DIR`, each falling back to a place in the checkout.
+    /// `STELLY_DATA_DIR`, `STELLY_MODEL_DIR`, `STELLY_CACHE_DIR` and
+    /// `STELLY_ENV_DIR`, each falling back to a place in the checkout.
     pub fn from_env() -> Self {
         let repo_root = crate::qobuz::repo_root();
         let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
-        let data_dir = var("TWO_KHZ_DATA_DIR").unwrap_or_else(|| repo_root.join("data"));
+        let data_dir = var("STELLY_DATA_DIR").unwrap_or_else(|| repo_root.join("data"));
         Self {
-            db_path: data_dir.join("two_khz.db"),
-            model_dir: var("TWO_KHZ_MODEL_DIR")
+            db_path: data_dir.join("stelly.db"),
+            model_dir: var("STELLY_MODEL_DIR")
                 .unwrap_or_else(|| repo_root.join("data").join("models")),
-            cache_dir: var("TWO_KHZ_CACHE_DIR")
+            cache_dir: var("STELLY_CACHE_DIR")
                 .unwrap_or_else(|| repo_root.join("cache").join("audio")),
-            env_dir: var("TWO_KHZ_ENV_DIR").unwrap_or_else(|| repo_root.clone()),
+            env_dir: var("STELLY_ENV_DIR").unwrap_or_else(|| repo_root.clone()),
             data_dir,
         }
     }
@@ -132,7 +132,7 @@ impl Paths {
         let shared = Self::from_env();
         let data_dir = root.join("data");
         Self {
-            db_path: data_dir.join("two_khz.db"),
+            db_path: data_dir.join("stelly.db"),
             cache_dir: root.join("cache"),
             data_dir,
             model_dir: shared.model_dir,

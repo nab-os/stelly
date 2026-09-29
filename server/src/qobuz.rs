@@ -1,7 +1,7 @@
 //! The Qobuz client: browsing, stream URLs, playlists, and the bulk reads the
 //! crawl and the analyser make. The one place credentials are held.
 //!
-//! The shapes it hands out are `two_khz::qobuz`'s, shared with the app.
+//! The shapes it hands out are `stelly::qobuz`'s, shared with the app.
 
 use anyhow::{bail, Context, Result};
 use md5::{Digest, Md5};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const API_BASE: &str = "https://www.qobuz.com/api.json/0.2";
 
-pub use two_khz::qobuz::{
+pub use stelly::qobuz::{
     own_releases, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults, FORMAT_MP3_320,
 };
 
@@ -740,7 +740,7 @@ impl QobuzClient {
 
         bail!(
             "no configured app secret produced a valid signature (it may have rotated). \
-             Run `two-khz-server refresh-credentials --write`. Last error: {last_error}"
+             Run `stelly-server refresh-credentials --write`. Last error: {last_error}"
         )
     }
 

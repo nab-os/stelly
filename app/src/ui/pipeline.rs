@@ -421,7 +421,7 @@ pub fn Devices() -> Element {
             if let Some(token) = pipeline.granted.read().clone() {
                 div { class: "notice",
                     p { class: "muted", "Set this on the device, then close this. It is not shown again." }
-                    pre { class: "log", "TWO_KHZ_TOKEN={token}" }
+                    pre { class: "log", "STELLY_TOKEN={token}" }
                     button {
                         class: "chip",
                         onclick: move |_| { let mut pipeline = pipeline; pipeline.granted.set(None); },

@@ -8,15 +8,15 @@
 #
 # Pairing prints a token once. Point a client at it with:
 #
-#   TWO_KHZ_SERVER=http://<this-host>:7700 TWO_KHZ_TOKEN=<token>
+#   STELLY_SERVER=http://<this-host>:7700 STELLY_TOKEN=<token>
 
-name: two-khz
+name: stelly
 
 services:
   server:
     # Pinned rather than `latest`, so that `compose pull` on a bad day cannot
     # swap the running server for a release nobody here has tried.
-    image: 4gjr3z1t/2khz:v0.6.1
+    image: 4gjr3z1t/stelly:v0.6.1
 
     # The whole pipeline is in this one image. The CLAP weights (~620MB) are
     # fetched into the data volume on first use, or up front with:
@@ -48,7 +48,7 @@ services:
       - data:/data     # corpus, space, device tokens, models, back this up
       - cache:/cache   # audio excerpts, evicted as analyse runs
       # Weights already on the host? Mount them instead of re-downloading:
-      # - /srv/two-khz/models:/data/models
+      # - /srv/stelly/models:/data/models
 
     # PID 1 has no default signal dispositions, so without an init a `docker
     # stop` would wait out the grace period before the server went down.

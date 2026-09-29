@@ -1,10 +1,10 @@
 [package]
-name = "two-khz-app"
+name = "stelly-app"
 version = "0.13.2"
 edition = "2021"
 
 [lib]
-name = "two_khz"
+name = "stelly"
 path = "src/lib.rs"
 # `lib` for the server, which shares the wire types; `cdylib` so the APK can
 # load it and call `start_app` through JNI.
@@ -13,13 +13,13 @@ crate-type = ["lib", "cdylib"]
 # Also the Android entry point: dioxus' `start_app` trampoline dlsym's `main`,
 # so the APK's shared library is this target built with `--features mobile`.
 [[bin]]
-name = "two-khz-app"
+name = "stelly-app"
 path = "src/main.rs"
 required-features = ["gui"]
 
 # ---------------------------------------------------------------- features
 #
-# Every build is a client of `two-khz-server`: Qobuz, the pipeline and the
+# Every build is a client of `stelly-server`: Qobuz, the pipeline and the
 # models live there. Without `gui` this is just the shared library.
 #
 #   desktop: a dioxus window.
@@ -90,7 +90,7 @@ lto = true
 # WRY_ANDROID_LIBRARY must equal [lib] name, the .so the activity loads.
 
 [package.metadata.cargo-android]
-app-activity-name = "fr.glargh.twokhz.MainActivity"
+app-activity-name = "fr.glargh.stelly.MainActivity"
 app-dependencies = [
     "androidx.webkit:webkit:1.6.1",
     "androidx.appcompat:appcompat:1.7.1",
@@ -105,6 +105,6 @@ app-theme-parent = "Theme.MaterialComponents.DayNight.DarkActionBar"
 vulkan-validation = false
 
 [package.metadata.cargo-android.env-vars]
-WRY_ANDROID_PACKAGE = "fr.glargh.twokhz"
-WRY_ANDROID_LIBRARY = "two_khz"
-WRY_ANDROID_KOTLIN_FILES_OUT_DIR = "<android-project-dir>/app/src/main/kotlin/fr/glargh/twokhz"
+WRY_ANDROID_PACKAGE = "fr.glargh.stelly"
+WRY_ANDROID_LIBRARY = "stelly"
+WRY_ANDROID_KOTLIN_FILES_OUT_DIR = "<android-project-dir>/app/src/main/kotlin/fr/glargh/stelly"

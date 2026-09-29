@@ -252,7 +252,7 @@ fn follow(player: Player) {
             mirror.loading = None;
             mirror.sounding = false;
             drop(mirror);
-            transport("twoKhzStop");
+            transport("stellyStop");
             announce();
         }
         return;
@@ -268,7 +268,7 @@ fn follow(player: Player) {
                 if mirror.loading.is_none() {
                     let position = mirror.clocked.position();
                     document::eval(&format!(
-                        "window.twoKhzSeekTo && window.twoKhzSeekTo({position});"
+                        "window.stellySeekTo && window.stellySeekTo({position});"
                     ));
                 }
             }
@@ -287,9 +287,9 @@ fn follow(player: Player) {
     if mirror.loading.is_none() {
         let playing = mirror.session().playing;
         if playing && !mirror.sounding {
-            transport("twoKhzResume");
+            transport("stellyResume");
         } else if !playing && mirror.sounding {
-            transport("twoKhzPause");
+            transport("stellyPause");
         }
     }
 }
@@ -344,14 +344,14 @@ async fn load(mut player: Player, track: RemoteTrack, index: usize, ticket: u64)
     // The signed URL is short-lived and this is the app's own webview, so
     // there is nothing to proxy it away from.
     document::eval(&format!(
-        "window.twoKhzPlayUrl && window.twoKhzPlayUrl({}, {start}, {autoplay});",
+        "window.stellyPlayUrl && window.stellyPlayUrl({}, {start}, {autoplay});",
         serde_json::to_string(&url).unwrap_or_else(|_| "''".into()),
     ));
-    // What the OS shows as "now playing", see `twoKhzSetMetadata`'s doc
+    // What the OS shows as "now playing", see `stellySetMetadata`'s doc
     // comment in player.js for why this is the same fix as the
     // hardware/mouse previous-next buttons.
     document::eval(&format!(
-        "window.twoKhzSetMetadata && window.twoKhzSetMetadata({}, {}, {}, {});",
+        "window.stellySetMetadata && window.stellySetMetadata({}, {}, {}, {});",
         serde_json::to_string(&track.title).unwrap_or_else(|_| "''".into()),
         serde_json::to_string(&track.artist).unwrap_or_else(|_| "''".into()),
         serde_json::to_string(&track.album).unwrap_or_else(|_| "''".into()),
@@ -435,7 +435,7 @@ pub fn apply_volume(player: Player) {
         *player.volume.peek()
     };
     document::eval(&format!(
-        "window.twoKhzVolume && window.twoKhzVolume({level});"
+        "window.stellyVolume && window.stellyVolume({level});"
     ));
 }
 

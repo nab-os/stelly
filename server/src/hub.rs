@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use two_khz::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN};
-use two_khz::logbuffer::LogBuffer;
+use stelly::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN};
+use stelly::logbuffer::LogBuffer;
 
 pub struct Hub {
     paths: Paths,
@@ -268,7 +268,7 @@ impl Hub {
         let mut guard = self.encoder().await;
         let encoder = guard.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
-                "text steering needs {}/{}; fetch it with: two-khz-server models",
+                "text steering needs {}/{}; fetch it with: stelly-server models",
                 self.model_dir.display(),
                 crate::pipeline::models::CLAP_TEXT
             )
@@ -327,7 +327,7 @@ impl Hub {
         };
 
         std::thread::Builder::new()
-            .name("two-khz-crawl".into())
+            .name("stelly-crawl".into())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -369,7 +369,7 @@ impl Hub {
 
     pub async fn pipeline_start(&self, stage: Stage) -> Result<()> {
         if stage == Stage::Crawl {
-            return self.crawl_start(two_khz::api::DEFAULT_MAX_DISTANCE).await;
+            return self.crawl_start(stelly::api::DEFAULT_MAX_DISTANCE).await;
         }
         {
             let mut queue = self.pipeline.queue.lock().unwrap();
@@ -449,8 +449,8 @@ impl Hub {
 
             while let Some((stage, target)) = current {
                 match &target {
-                    Some(target) => log.push(format!("$ two-khz-server {} {}", stage.command(), target.flag())),
-                    None => log.push(format!("$ two-khz-server {}", stage.command())),
+                    Some(target) => log.push(format!("$ stelly-server {} {}", stage.command(), target.flag())),
+                    None => log.push(format!("$ stelly-server {}", stage.command())),
                 }
 
                 let sink = log.clone();
