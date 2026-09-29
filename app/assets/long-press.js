@@ -37,11 +37,11 @@
   // Rebound on every run, before the install guard: `dioxus` here is *this*
   // eval's channel, so a re-evaluation has to replace the send target. Doing
   // it after the guard would leave the listeners posting into a closed one.
-  window.twoKhzLongPressSend = (message) => dioxus.send(message);
-  window.twoKhzCloseMap = () => dioxus.send({ closeMap: true });
+  window.stellyLongPressSend = (message) => dioxus.send(message);
+  window.stellyCloseMap = () => dioxus.send({ closeMap: true });
 
-  if (window.twoKhzLongPressInstalled) return;
-  window.twoKhzLongPressInstalled = true;
+  if (window.stellyLongPressInstalled) return;
+  window.stellyLongPressInstalled = true;
 
   let timer = null;
   let origin = null;
@@ -71,8 +71,8 @@
     if (!row) return;
     swallowNextClick = true;
     openedByPress = true;
-    if (window.twoKhzLongPressSend) {
-      window.twoKhzLongPressSend({
+    if (window.stellyLongPressSend) {
+      window.stellyLongPressSend({
         target: row.dataset.menu,
         x: at ? at.x : 0,
         y: at ? at.y : 0,
@@ -165,6 +165,6 @@
   // Escape closes the map overlay. Here rather than in its own eval because
   // this is already the install-once keyboard channel.
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && window.twoKhzCloseMap) window.twoKhzCloseMap();
+    if (event.key === "Escape" && window.stellyCloseMap) window.stellyCloseMap();
   });
 })();

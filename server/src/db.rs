@@ -12,7 +12,7 @@ use diesel::sql_types::{BigInt, Nullable, SingleValue};
 use diesel::upsert::excluded;
 use std::path::Path;
 use std::time::Duration;
-use two_khz::api::BlockedArtist;
+use stelly::api::BlockedArtist;
 
 /// The schema, embedded at compile time.
 const SCHEMA: &str = include_str!("../../schema.sql");
@@ -269,7 +269,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("two-khz-db-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("stelly-db-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn catalogue_round_trip() {
         let dir = scratch("round-trip");
-        let db_path = dir.join("two_khz.db");
+        let db_path = dir.join("stelly.db");
         let conn = &mut open_for_write(&db_path).unwrap();
 
         let album = json!({
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(qobuz, None, "the slim copy leaves the payloads behind");
 
         // And the client reads it back, in the space's row order.
-        let loaded = two_khz::db::Catalog::load(&target, &[99, 2]).unwrap();
+        let loaded = stelly::db::Catalog::load(&target, &[99, 2]).unwrap();
         assert_eq!(loaded.get(0).title, "<missing 99>");
         let two = loaded.get(1);
         assert_eq!((two.title.as_str(), two.artist.as_str(), two.bpm), ("Two", "Eight", Some(120.0)));

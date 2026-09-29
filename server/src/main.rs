@@ -1,13 +1,13 @@
-//! `two-khz-server`: everything but the screen.
+//! `stelly-server`: everything but the screen.
 //!
 //! Holds the Qobuz token, the shared rate limit, the database, the CLAP
 //! models and the whole pipeline, crawl, analyse, build-space, layout. Clients
 //! get a slim catalogue and the vectors, and ask for the rest over HTTP.
 //!
 //! ```sh
-//! two-khz-server login                                  # Qobuz, once
-//! two-khz-server pair --name desktop --scope pipeline   # first device
-//! two-khz-server serve                                  # 127.0.0.1:7700
+//! stelly-server login                                  # Qobuz, once
+//! stelly-server pair --name desktop --scope pipeline   # first device
+//! stelly-server serve                                  # 127.0.0.1:7700
 //! ```
 //!
 //! Plain HTTP, loopback by default. The token and the signed stream URLs are
@@ -26,7 +26,7 @@ mod playback;
 mod qobuz;
 mod routes;
 // Shared with the client, which reads the slim copy through the same tables.
-use two_khz::schema;
+use stelly::schema;
 mod stages;
 mod text;
 
@@ -40,7 +40,7 @@ use pipeline::Paths;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use two_khz::api::Scope;
+use stelly::api::Scope;
 
 const DEFAULT_BIND: &str = "127.0.0.1:7700";
 
@@ -110,7 +110,7 @@ impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         (
             self.status,
-            axum::Json(two_khz::api::ApiError {
+            axum::Json(stelly::api::ApiError {
                 message: self.message,
             }),
         )
@@ -120,15 +120,15 @@ impl IntoResponse for Failure {
 
 // --------------------------------------------------------------------- cli
 
-/// two-khz-server: everything in 2kHz but the screen.
+/// stelly-server: everything in Stelly but the screen.
 #[derive(FromArgs)]
 #[argh(
     example = "{command_name} login\n{command_name} pair --name desktop --scope pipeline\n{command_name} serve",
     note = "Devices are stored in the same database as the catalogue. A token is shown
 once, at pairing, and only its hash is kept.
 
-TWO_KHZ_DATA_DIR, TWO_KHZ_MODEL_DIR and TWO_KHZ_CACHE_DIR move the corpus,
-the model weights and the excerpt cache; TWO_KHZ_ENV_DIR, the .env holding
+STELLY_DATA_DIR, STELLY_MODEL_DIR and STELLY_CACHE_DIR move the corpus,
+the model weights and the excerpt cache; STELLY_ENV_DIR, the .env holding
 the Qobuz credentials. The environment itself wins over any .env."
 )]
 struct Cli {
@@ -223,7 +223,7 @@ fn parse_args() -> Cli {
         }
     }
 
-    match Cli::from_args(&["two-khz-server"], &args) {
+    match Cli::from_args(&["stelly-server"], &args) {
         Ok(cli) => cli,
         Err(argh::EarlyExit { output, status }) => match status {
             Ok(()) => {
@@ -231,7 +231,7 @@ fn parse_args() -> Cli {
                 std::process::exit(0);
             }
             Err(()) => {
-                eprintln!("{output}\nRun two-khz-server --help for more information.");
+                eprintln!("{output}\nRun stelly-server --help for more information.");
                 std::process::exit(2);
             }
         },
@@ -256,8 +256,8 @@ fn main() -> Result<()> {
             let grant = store()?.issue(&args.name, args.scope)?;
             println!(
                 "Paired “{}” with scope {}.\n\nSet this on the device, it is not shown again:\n\n  \
-                 export TWO_KHZ_SERVER=http://<this-host>:7700\n  \
-                 export TWO_KHZ_TOKEN={}\n",
+                 export STELLY_SERVER=http://<this-host>:7700\n  \
+                 export STELLY_TOKEN={}\n",
                 grant.device.name,
                 args.scope.as_str(),
                 grant.token
@@ -267,7 +267,7 @@ fn main() -> Result<()> {
         Command::Devices(_) => {
             let devices = store()?.list()?;
             if devices.is_empty() {
-                println!("No devices paired. Start with:\n  two-khz-server pair --name desktop --scope pipeline");
+                println!("No devices paired. Start with:\n  stelly-server pair --name desktop --scope pipeline");
             }
             for device in devices {
                 println!(
@@ -319,7 +319,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     if store.count()? == 0 {
         eprintln!(
             "No devices are paired, so every request will be refused. Mint one with:\n  \
-             two-khz-server pair --name desktop --scope pipeline\n"
+             stelly-server pair --name desktop --scope pipeline\n"
         );
     }
 
@@ -341,7 +341,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
         tokio::spawn(rebuild_catalog(db_path, data_dir));
 
         let listener = tokio::net::TcpListener::bind(address).await?;
-        println!("two-khz-server listening on http://{address}");
+        println!("stelly-server listening on http://{address}");
 
         axum::serve(listener, routes::router(state))
             .with_graceful_shutdown(shutdown())

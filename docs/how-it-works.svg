@@ -14,7 +14,7 @@
   </marker>
 </defs>
 <rect width="1200" height="580" fill="#12131a"/>
-<text x="40" y="52" font-size="28" fill="#e5e7ef" font-weight="bold" text-anchor="start">How 2kHz works</text>
+<text x="40" y="52" font-size="28" fill="#e5e7ef" font-weight="bold" text-anchor="start">How Stelly works</text>
 <text x="40" y="80" font-size="15" fill="#8b90a3" font-weight="normal" text-anchor="start">The server builds a map of your music once. Every device gets a copy and plays from Qobuz directly.</text>
 <rect x="30" y="116" width="170" height="380" rx="12" fill="#23262f"/>
 <text x="115" y="150" font-size="20" fill="#e5e7ef" font-weight="bold" text-anchor="middle">Qobuz</text>
@@ -23,7 +23,7 @@
 <text x="115" y="221" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">favourites</text>
 <text x="115" y="290" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="middle">audio files</text>
 <rect x="250" y="116" width="480" height="380" rx="12" fill="#1b1d26"/>
-<text x="270" y="146" font-size="18" fill="#e5e7ef" font-weight="bold" text-anchor="start" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">two-khz-server</text>
+<text x="270" y="146" font-size="18" fill="#e5e7ef" font-weight="bold" text-anchor="start" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">stelly-server</text>
 <text x="710" y="146" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">on your computer or a home server</text>
 <rect x="266" y="166" width="448" height="70" rx="10" fill="#23262f"/>
 <circle cx="294" cy="201.0" r="14" fill="#7aa2f7"/><text x="294" y="206.0" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">1</text>
@@ -55,7 +55,7 @@
 <line x1="200" y1="201.0" x2="264" y2="201.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
 <line x1="200" y1="283.0" x2="264" y2="283.0" stroke="#8b90a3" stroke-width="1.5" marker-end="url(#arrow)"/>
 <rect x="870" y="116" width="300" height="380" rx="12" fill="#1b1d26"/>
-<text x="890" y="146" font-size="18" fill="#e5e7ef" font-weight="bold" text-anchor="start">2kHz app</text>
+<text x="890" y="146" font-size="18" fill="#e5e7ef" font-weight="bold" text-anchor="start">Stelly app</text>
 <text x="1150" y="146" font-size="12" fill="#8b90a3" font-weight="normal" text-anchor="end">desktop, Android</text>
 <rect x="886" y="166" width="268" height="130" rx="10" fill="#23262f"/>
 <circle cx="914" cy="191" r="14" fill="#ff9e64"/><text x="914" y="196" font-size="14" fill="#12131a" font-weight="bold" text-anchor="middle">5</text>

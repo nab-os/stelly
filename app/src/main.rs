@@ -8,10 +8,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() {
-    // Paired through TWO_KHZ_SERVER/TWO_KHZ_TOKEN or a stored pairing. Without
+    // Paired through STELLY_SERVER/STELLY_TOKEN or a stored pairing. Without
     // either, or with a server that does not answer, the window opens on the
     // setup screen rather than refusing to start.
-    if let Err(err) = two_khz::app::bootstrap() {
+    if let Err(err) = stelly::app::bootstrap() {
         #[cfg(not(feature = "mobile"))]
         eprintln!("not connected yet: {err:#}");
         #[cfg(feature = "mobile")]
@@ -26,10 +26,10 @@ fn main() {
     #[cfg(feature = "mobile")]
     dioxus::LaunchBuilder::mobile()
         .with_cfg(dioxus::mobile::Config::new().with_disable_context_menu(false))
-        .launch(two_khz::app::App);
+        .launch(stelly::app::App);
 
     // Three columns plus a map need room; the default window collapses them.
-    // TWO_KHZ_WINDOW=WxH overrides it, mostly to check the responsive layout
+    // STELLY_WINDOW=WxH overrides it, mostly to check the responsive layout
     // at phone width without a phone.
     #[cfg(not(feature = "mobile"))]
     {
@@ -38,17 +38,17 @@ fn main() {
             .with_cfg(
                 dioxus::desktop::Config::new().with_window(
                     dioxus::desktop::WindowBuilder::new()
-                        .with_title("2kHz")
+                        .with_title("Stelly")
                         .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),
                 ),
             )
-            .launch(two_khz::app::App);
+            .launch(stelly::app::App);
     }
 }
 
 #[cfg(not(feature = "mobile"))]
 fn window_size() -> (f64, f64) {
-    std::env::var("TWO_KHZ_WINDOW")
+    std::env::var("STELLY_WINDOW")
         .ok()
         .and_then(|spec| {
             let (w, h) = spec.split_once(['x', 'X'])?;

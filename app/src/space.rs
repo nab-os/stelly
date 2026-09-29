@@ -67,7 +67,7 @@ impl Space {
         anyhow::ensure!(
             manifest.version == SPACE_VERSION,
             "space.json is format {}, this build reads {}, rebuild it on the server:\n  \
-             two-khz-server build-space && two-khz-server layout",
+             stelly-server build-space && stelly-server layout",
             manifest.version,
             SPACE_VERSION
         );
