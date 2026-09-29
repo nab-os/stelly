@@ -12,7 +12,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
-use stelly::api::{Device, PairingGrant, Scope};
+use stelly_core::api::{Device, PairingGrant, Scope};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ use std::time::Duration;
 /// 32 bytes, hex-encoded. Long enough that guessing is not a threat model.
 const TOKEN_BYTES: usize = 32;
 
-// Not in the shared `stelly::schema`: clients have no business knowing the
+// Not in the shared `stelly_core::schema`: clients have no business knowing the
 // table exists, and it is created here rather than by `schema.sql`.
 diesel::table! {
     devices (id) {

@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use stelly::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN};
-use stelly::logbuffer::LogBuffer;
+use stelly_core::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN};
+use stelly_core::logbuffer::LogBuffer;
 
 pub struct Hub {
     paths: Paths,
@@ -369,7 +369,7 @@ impl Hub {
 
     pub async fn pipeline_start(&self, stage: Stage) -> Result<()> {
         if stage == Stage::Crawl {
-            return self.crawl_start(stelly::api::DEFAULT_MAX_DISTANCE).await;
+            return self.crawl_start(stelly_core::api::DEFAULT_MAX_DISTANCE).await;
         }
         {
             let mut queue = self.pipeline.queue.lock().unwrap();
