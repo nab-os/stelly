@@ -49,9 +49,13 @@
     return rect.width > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
   };
 
-  const fly = (from, target, done) => {
-    const to = target.getBoundingClientRect();
-    const toRadius = getComputedStyle(target).borderRadius;
+  // The clone goes up and the real cover is hidden in the same task as the
+  // mutation that brought the page in, so the frame that paints the new page
+  // already has it. Waiting for the next frame to do either left one frame
+  // with neither the old page nor any cover. Only measuring where it lands
+  // waits: the scroll back to the top goes over the same channel as the new
+  // page, and may land just after it.
+  const fly = (from, target, { wanted = () => true, done } = {}) => {
     const clone = document.createElement("div");
     clone.className = "cover cover-flight";
     Object.assign(clone.style, {
@@ -64,7 +68,17 @@
     });
     document.body.appendChild(clone);
     target.style.visibility = "hidden";
+    requestAnimationFrame(() => launch(clone, from, target, wanted, done));
+  };
 
+  const launch = (clone, from, target, wanted, done) => {
+    if (!target.isConnected || !wanted(target.getBoundingClientRect())) {
+      target.style.visibility = "";
+      clone.remove();
+      return;
+    }
+    const to = target.getBoundingClientRect();
+    const toRadius = getComputedStyle(target).borderRadius;
     const flight = clone.animate(
       [
         {
@@ -135,13 +149,7 @@
       requestAnimationFrame(track);
       return;
     }
-    el.style.visibility = "hidden";
-    // A frame's grace: the scroll back to the top goes over the same channel
-    // as the new page, and may land just after it.
-    requestAnimationFrame(() => {
-      if (!el.isConnected) return;
-      fly(from, el, track);
-    });
+    fly(from, el, { done: track });
   };
 
   const leave = () => {
@@ -164,15 +172,7 @@
       if (urlOf(cover) !== returning.url) continue;
       const from = returning;
       returning = null;
-      cover.style.visibility = "hidden";
-      requestAnimationFrame(() => {
-        if (!cover.isConnected) return;
-        if (!visible(cover.getBoundingClientRect())) {
-          cover.style.visibility = "";
-          return;
-        }
-        fly(from, cover);
-      });
+      fly(from, cover, { wanted: visible });
       return;
     }
   };
