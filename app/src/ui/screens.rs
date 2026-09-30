@@ -203,6 +203,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     let blocklist = use_context::<Blocklist>();
     let map = use_context::<MapView>();
     let mut selection = use_context::<Selection>().0;
+    let mut panel_open = use_context::<Generator>().panel_open;
     let status = use_signal(|| None::<String>);
 
     library.ensure_liked_loaded();
@@ -292,6 +293,15 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                                 onclick: move |_| map.browse(),
                                 {icons::constellation()}
                                 "Map"
+                            }
+                            // Phone only: beside the main area the panel is
+                            // already in view.
+                            button {
+                                class: "hero-generate",
+                                title: "make a playlist from this track",
+                                onclick: move |_| panel_open.set(true),
+                                {icons::spark()}
+                                "Generate"
                             }
                         }
                     }
