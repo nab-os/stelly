@@ -49,9 +49,14 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
+      # Saved from main only. A cache written on a pull request is scoped to
+      # its merge ref and dead once it merges, and at ~1 GB per target a few
+      # open PRs are enough to push the repo past its 10 GB limit. PRs still
+      # restore from main's.
       - uses: Swatinem/rust-cache@v2
         with:
           key: ubuntu-${{ matrix.ubuntu }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Prebuilt dx: `cargo install dioxus-cli` is a ~10 minute build.
       - uses: cargo-bins/cargo-binstall@main
@@ -195,6 +200,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall -y --locked dioxus-cli@${{ env.DX_VERSION }}
@@ -309,6 +315,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall -y --locked dioxus-cli@${{ env.DX_VERSION }}
