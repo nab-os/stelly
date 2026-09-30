@@ -1,6 +1,6 @@
 //! Line icons, drawn inline rather than as emoji: the desktop webview and an
 //! Android phone render the same codepoint as two different pictures, and a
-//! globe or a magnifier on a round button has to look like one on both.
+//! map or a magnifier on a round button has to look like one on both.
 //!
 //! 24px grid, stroked with `currentColor`, so a button's colour is the icon's.
 //! Sizing is the caller's, through CSS on `.icon`.
@@ -33,11 +33,23 @@ fn filled(body: Element) -> Element {
     }
 }
 
-pub fn globe() -> Element {
+/// The map: the space drawn as a constellation, the Big Dipper, since the
+/// map is stars joined by their nearest neighbours.
+pub fn constellation() -> Element {
     stroked(rsx! {
-        circle { cx: "12", cy: "12", r: "10" }
-        path { d: "M2 12h20" }
-        path { d: "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" }
+        path {
+            stroke_width: "1.25",
+            d: "M3 20.5L7 16.5l4-1.5 2-5 6.5 1.5 1.5-6.5-6-1.5-2 6.5",
+        }
+        g { fill: "currentColor", stroke: "none",
+            path { d: "M21 1.8l1 2.9 2.9 1-2.9 1-1 2.9-1-2.9-2.9-1 2.9-1z" }
+            path { d: "M3 18l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z" }
+            circle { cx: "7", cy: "16.5", r: "1.4" }
+            circle { cx: "11", cy: "15", r: "1.4" }
+            circle { cx: "13", cy: "10", r: "1.8" }
+            circle { cx: "19.5", cy: "11.5", r: "1.8" }
+            circle { cx: "15", cy: "3.5", r: "1.5" }
+        }
     })
 }
 
@@ -191,5 +203,68 @@ pub fn split() -> Element {
             rect { x: "3", y: "18.5", width: "4", height: "4", rx: "0.5" }
         }
         path { d: "M10 3.5h10M10 8.5h10M10 15.5h10M10 20.5h10" }
+    })
+}
+
+// The generate modes. Each draws its walk: the big dot is the seed track,
+// the small ones what the walk picks.
+
+/// Spokes from the seed to the closest few; the far one is left out.
+pub fn neighbours() -> Element {
+    stroked(rsx! {
+        path { stroke_width: "1.5", d: "M12 12L6 7M12 12l6.5-3M12 12l-5 6M12 12l5 5" }
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "12", cy: "12", r: "2.6" }
+            circle { cx: "6", cy: "7", r: "1.6" }
+            circle { cx: "18.5", cy: "9", r: "1.6" }
+            circle { cx: "7", cy: "18", r: "1.6" }
+            circle { cx: "17", cy: "17", r: "1.6" }
+        }
+        circle { cx: "20.5", cy: "3", r: "1.1", stroke_width: "1.2" }
+    })
+}
+
+/// Hop to the nearest, then the nearest from there, with nowhere in
+/// particular to end.
+pub fn radio() -> Element {
+    stroked(rsx! {
+        path { stroke_width: "1.5", d: "M4 18l4-6 5.5 3 1.5-7 5 3" }
+        path { stroke_width: "1.5", d: "M18.6 7.6L20 11l-3.7.4" }
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "4", cy: "18", r: "2.6" }
+            circle { cx: "8", cy: "12", r: "1.6" }
+            circle { cx: "13.5", cy: "15", r: "1.6" }
+            circle { cx: "15", cy: "8", r: "1.6" }
+        }
+    })
+}
+
+/// From A to a hollow B, in even steps.
+pub fn path() -> Element {
+    stroked(rsx! {
+        path { stroke_width: "1.5", d: "M5 19C5 13.4 14 12.3 17.5 8.5" }
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "5", cy: "19", r: "2.6" }
+            circle { cx: "7.2", cy: "14.8", r: "1.4" }
+            circle { cx: "12", cy: "12", r: "1.4" }
+            circle { cx: "16.8", cy: "9.2", r: "1.4" }
+        }
+        circle { cx: "19", cy: "5", r: "2.4", stroke_width: "1.75" }
+    })
+}
+
+/// A trail leaving the seed and bending towards a phrase.
+pub fn drift() -> Element {
+    stroked(rsx! {
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "5", cy: "19", r: "2.6" }
+            circle { cx: "6", cy: "14", r: "1.1" }
+            circle { cx: "8.1", cy: "11.4", r: "1.1" }
+            circle { cx: "11.2", cy: "10", r: "1.1" }
+        }
+        path {
+            stroke_width: "1.75",
+            d: "M14 3h6a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-4l-3 2.5V10a2 2 0 0 1-1-1.7V5a2 2 0 0 1 2-2z",
+        }
     })
 }

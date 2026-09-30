@@ -123,6 +123,7 @@ pub fn GeneratePanel() -> Element {
                             let mut mode = generator.mode;
                             mode.set(option);
                         },
+                        {option.icon()}
                         "{option.label()}"
                     }
                 }

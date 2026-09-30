@@ -905,7 +905,7 @@ fn Shell() -> Element {
                                     map.toggle();
                                 }
                             },
-                            {icons::globe()}
+                            {icons::constellation()}
                         }
                     }
                 }
