@@ -57,6 +57,25 @@
   };
 
   const fresh = (note) => note && performance.now() - note.at < WINDOW;
+
+  // The main area's own covers, not the ghost's, in document order.
+  const screenCovers = () =>
+    [...document.querySelectorAll(".screen-body .cover")].filter((cover) => !inGhost(cover));
+
+  // Where a card sits in its list: its place among the covers, and its
+  // position in the list's own coordinates, scroll taken out. Enough to find
+  // that same card again when the list comes back, rather than any card with
+  // the same art: an album's tracks all share its cover.
+  const place = (cover, index) => {
+    const body = screen();
+    const rect = cover.getBoundingClientRect();
+    const box = body.getBoundingClientRect();
+    return {
+      index,
+      x: rect.left - box.left,
+      y: rect.top - box.top + body.scrollTop,
+    };
+  };
   const center = (rect) => ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
   const inGhost = (el) => !!el.closest(".page-ghost");
   const screen = () => document.querySelector(".screen-body");
@@ -253,7 +272,7 @@
       if (target.closest(".clickable, button, a, input")) return;
       const row = target.closest("li");
       const cover = row && row.querySelector(".cover");
-      clicked = cover ? snapshot(cover) : null;
+      clicked = cover ? { ...snapshot(cover), place: place(cover, screenCovers().indexOf(cover)) } : null;
     },
     true
   );
@@ -262,18 +281,17 @@
     leaving = null;
     if (reduced.matches) return;
     const covers = new Map();
-    for (const cover of document.querySelectorAll(".screen-body .cover")) {
-      if (inGhost(cover)) continue;
+    screenCovers().forEach((cover, index) => {
       const url = urlOf(cover);
-      if (!url || covers.has(url)) continue;
+      if (!url || covers.has(url)) return;
       const shot = snapshot(cover);
-      if (visible(shot.rect)) covers.set(url, shot);
-    }
+      if (visible(shot.rect)) covers.set(url, { ...shot, place: place(cover, index) });
+    });
     leaving = {
       kind,
       covers,
       ghost: copyScreen(),
-      hero: hero && hero.el.isConnected ? { ...snapshot(hero.el), url: hero.url } : null,
+      hero: hero && hero.el.isConnected ? { ...snapshot(hero.el), url: hero.url, place: hero.place } : null,
       at: performance.now(),
     };
   };
@@ -286,7 +304,7 @@
     leaving = null;
     clicked = null;
     const from = tap || (note && note.covers.get(urlOf(el))) || null;
-    hero = { el, url: from ? from.url : urlOf(el) };
+    hero = { el, url: from ? from.url : urlOf(el), place: from ? from.place : null };
     if (!from || !note || !note.ghost) return;
 
     const frame = raise(note.ghost, (cover) => urlOf(cover) === from.url);
@@ -321,26 +339,59 @@
     const start = { ...c, r: reach(c, frame.getBoundingClientRect()) };
     mask(frame, start, false);
 
-    settled().then(() => {
-      let tile = null;
-      for (const cover of document.querySelectorAll(".screen-body .cover")) {
-        if (inGhost(cover) || urlOf(cover) !== from.url) continue;
-        if (visible(cover.getBoundingClientRect())) tile = cover;
-        break;
-      }
-      if (tile) {
-        tile.style.visibility = "hidden";
-        const to = fly(clone, from, tile);
-        circle(frame, start, { ...center(to), r: Math.hypot(to.width, to.height) / 2 }, false);
-      } else {
-        // Nowhere on screen to go back into: the page closes down into
-        // where its own cover was, and the cover fades with it.
-        clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: DURATION, fill: "forwards" }).onfinish =
-          () => clone.remove();
-        circle(frame, start, { ...c, r: 0 }, false);
-      }
-    });
+    settled()
+      .then(() => home(from))
+      .then((tile) => {
+        if (tile) {
+          tile.style.visibility = "hidden";
+          const to = fly(clone, from, tile);
+          circle(frame, start, { ...center(to), r: Math.hypot(to.width, to.height) / 2 }, false);
+        } else {
+          // Nowhere on screen to go back into: the page closes down into
+          // where its own cover was, and the cover fades with it.
+          clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: DURATION, fill: "forwards" }).onfinish =
+            () => clone.remove();
+          circle(frame, start, { ...c, r: 0 }, false);
+        }
+      });
   };
+
+  // The card a page goes back into: the one it came out of, found by its
+  // place in the list if the art there still matches, or else the card with
+  // that art nearest to where it was. Looked for over a few frames, since a
+  // list that was not kept, or a scroll still being put back, can take a
+  // moment to show it. Null if it never shows on screen.
+  const home = (from) =>
+    new Promise((resolve) => {
+      const until = performance.now() + 400;
+      const look = () => {
+        const covers = screenCovers();
+        const body = screen();
+        let tile = null;
+        const spot = from.place;
+        if (spot && covers[spot.index] && urlOf(covers[spot.index]) === from.url) {
+          tile = covers[spot.index];
+        } else if (body) {
+          let best = Infinity;
+          const box = body.getBoundingClientRect();
+          for (const cover of covers) {
+            if (urlOf(cover) !== from.url) continue;
+            const rect = cover.getBoundingClientRect();
+            const y = rect.top - box.top + body.scrollTop;
+            const x = rect.left - box.left;
+            const d = spot ? Math.hypot(x - spot.x, y - spot.y) : visible(rect) ? 0 : 1;
+            if (d < best) {
+              best = d;
+              tile = cover;
+            }
+          }
+        }
+        if (tile && visible(tile.getBoundingClientRect())) resolve(tile);
+        else if (performance.now() < until) requestAnimationFrame(look);
+        else resolve(null);
+      };
+      look();
+    });
 
   const find = (node, selector) => {
     if (node.nodeType !== 1 || inGhost(node)) return null;
