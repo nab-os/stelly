@@ -517,6 +517,7 @@ impl Library {
 
     /// Navigate, remembering where we came from.
     pub(crate) fn go(mut self, target: View) {
+        leaving("go");
         let previous = self.view.peek().clone();
         if previous != target {
             self.history.write().push((previous, self.scroll.cloned()));
@@ -530,6 +531,7 @@ impl Library {
     pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
         if let Some((view, scroll)) = previous {
+            leaving("back");
             self.forward.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
             self.restore.set(Some(scroll));
@@ -544,6 +546,7 @@ impl Library {
     pub(crate) fn forward(mut self) {
         let next = self.forward.write().pop();
         if let Some((view, scroll)) = next {
+            leaving("forward");
             self.history.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
             self.restore.set(Some(scroll));
@@ -728,6 +731,13 @@ impl Default for Library {
     }
 }
 
+/// Tells transitions.js a page is about to be replaced, and how. Sent before
+/// the view changes, so it reaches the webview ahead of the render and the
+/// old page is still there to copy and measure.
+fn leaving(kind: &str) {
+    document::eval(&format!("window.stellyLeaving && window.stellyLeaving('{kind}');"));
+}
+
 /// A new page starts at its top, and one gone back to where it was left. The
 /// main area is one scroller that outlives every page in it, so without this
 /// an album opened from far down the favourites opened just as far down
@@ -760,6 +770,8 @@ fn scroll_to(top: f64) {
                 }}
             }};
             step();
+            // transitions.js measures the new page once this has landed.
+            window.dispatchEvent(new Event('stelly-scrolled'));
         }})();"#
     ));
 }
