@@ -892,6 +892,13 @@ fn Shell() -> Element {
                     // and answers to what is under it only once it can be
                     // seen.
                     div { class: "fabs",
+                        // Phone only: the panel is always showing otherwise.
+                        button {
+                            class: if covered { "fab fab-generate active" } else { "fab fab-generate" },
+                            title: if covered { "close generate" } else { "generate" },
+                            onclick: move |_| panel_open.set(!covered),
+                            {icons::spark()}
+                        }
                         button {
                             class: if map_open() && !covered { "fab fab-map active" } else { "fab fab-map" },
                             title: if map_open() && !covered { "close the map" } else { "the map" },
