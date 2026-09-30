@@ -701,9 +701,14 @@ span.path-end {
   border-bottom: 2px solid transparent;
   border-radius: 4px 4px 0 0;
   padding: 5px 4px;
+  flex-direction: column;
+  gap: 2px;
 }
+.tab .icon { width: 18px; height: 18px; }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .side-panel .tabs + p { margin: 0; }
+
+.moods { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .field {
   display: flex;

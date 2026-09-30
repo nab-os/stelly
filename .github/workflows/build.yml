@@ -452,7 +452,7 @@ jobs:
         id: meta
         with:
           images: |
-            docker.io/4gjr3z1t/stelly
+            docker.io/stellymusic/stelly
             ghcr.io/${{ github.repository_owner }}/stelly-server
           # `type=ref` first and unconditionally: it is what publishes the
           # `v`-prefixed name the README and compose.yaml pin to. The semver
@@ -490,7 +490,7 @@ jobs:
       # database, finds no devices and says so.
       #
       # The reference comes from the metadata step rather than being written
-      # out here. A literal `4gjr3z1t/stelly:latest` reads as the same thing and
+      # out here. A literal `stellymusic/stelly:latest` reads as the same thing and
       # is not: docker would pull the published tag and test that instead of
       # the image just built, passing even on a Dockerfile that cannot build.
       - name: Smoke test

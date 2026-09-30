@@ -16,7 +16,7 @@ services:
   server:
     # Pinned rather than `latest`, so that `compose pull` on a bad day cannot
     # swap the running server for a release nobody here has tried.
-    image: 4gjr3z1t/stelly:v0.6.1
+    image: stellymusic/stelly:v0.6.1
 
     # The whole pipeline is in this one image. The CLAP weights (~620MB) are
     # fetched into the data volume on first use, or up front with:

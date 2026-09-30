@@ -475,14 +475,14 @@ impl Navigator {
         path.into_iter().map(|i| self.step(i, None)).collect()
     }
 
-    /// Indices of the tracks whose audio best matches a text embedding.
-    pub fn text_anchors(&self, clap: &[f32], k: usize) -> Vec<usize> {
-        let Some(matrix) = self.catalog.clap.as_ref() else {
-            return Vec::new();
-        };
+    /// How well each track's audio matches a text embedding, blocked rows at
+    /// minus infinity. `None` when the catalog carries no CLAP vectors, or
+    /// ones of a different width than the text tower's.
+    fn text_similarities(&self, clap: &[f32]) -> Option<Vec<f32>> {
+        let matrix = self.catalog.clap.as_ref()?;
         let dims = self.catalog.clap_dims;
         if dims == 0 || clap.len() != dims {
-            return Vec::new();
+            return None;
         }
 
         let mut sims: Vec<f32> = (0..self.catalog.len())
@@ -495,8 +495,15 @@ impl Navigator {
             })
             .collect();
         self.mask_blocked(&mut sims);
+        Some(sims)
+    }
 
-        crate::space::top_k(&sims, k)
+    /// Indices of the tracks whose audio best matches a text embedding.
+    pub fn text_anchors(&self, clap: &[f32], k: usize) -> Vec<usize> {
+        match self.text_similarities(clap) {
+            Some(sims) => crate::space::top_k(&sims, k),
+            None => Vec::new(),
+        }
     }
 
     /// A destination in the space for a described sound.
@@ -564,6 +571,64 @@ impl Navigator {
             }
         }
         chosen.into_iter().map(|i| self.step(i, None)).collect()
+    }
+
+    /// Tracks that sound like a description, with no track to start from.
+    ///
+    /// Picked on CLAP's own text-to-audio score rather than a point in the
+    /// space: there is no walk to keep inside the audio distribution, only a
+    /// ranking, and that is what CLAP measures directly. Straight top-k is
+    /// one artist's back catalogue more often than not, so the same pull
+    /// radio uses applies here, and the constraints stop an album running
+    /// twice in a row. Then ordered through the space, so the set plays as a
+    /// sequence rather than a ranking.
+    pub fn mood(
+        &self,
+        clap: &[f32],
+        count: usize,
+        artist_penalty: f32,
+        c: &Constraints,
+    ) -> Vec<Step> {
+        let Some(sims) = self.text_similarities(clap) else {
+            return Vec::new();
+        };
+        // The greedy pick only ever reaches this far down the ranking, and
+        // scanning the pool is cheaper than re-sorting the corpus per step.
+        let pool: Vec<usize> = crate::space::top_k(&sims, (count * 10).max(200))
+            .into_iter()
+            .filter(|&j| sims[j].is_finite())
+            .collect();
+
+        let mut chosen: Vec<usize> = Vec::with_capacity(count);
+        let mut uses: HashMap<i64, usize> = HashMap::new();
+        while chosen.len() < count {
+            let pick = pool
+                .iter()
+                .copied()
+                .filter(|j| !chosen.contains(j) && self.allowed(*j, &chosen, c))
+                .map(|j| {
+                    let artist = self.catalog.get(j).artist_id;
+                    let times = uses.get(&artist).copied().unwrap_or(0);
+                    (j, sims[j] - artist_penalty * times as f32)
+                })
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+            let Some((pick, _)) = pick else { break };
+            let artist = self.catalog.get(pick).artist_id;
+            if artist != -1 {
+                *uses.entry(artist).or_insert(0) += 1;
+            }
+            chosen.push(pick);
+        }
+
+        let ids: Vec<i64> = chosen
+            .iter()
+            .map(|&i| self.catalog.get(i).track_id)
+            .collect();
+        self.shortest_path_order(&ids, None)
+            .into_iter()
+            .filter_map(|id| self.index_of.get(&id).copied())
+            .map(|i| self.step(i, Some(sims[i])))
+            .collect()
     }
 }
 
@@ -639,6 +704,25 @@ mod tests {
         }
     }
 
+    /// The fixture with a one-dimensional CLAP score and an artist per
+    /// track, so a mood's picks are something the test can state.
+    fn scored(rows: &[(i64, f32, f32, i64)]) -> Navigator {
+        let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _, _)| (id, angle)).collect();
+        let mut nav = navigator(&angles);
+        nav.catalog.clap = Some(rows.iter().map(|&(_, _, score, _)| score).collect());
+        nav.catalog.clap_dims = 1;
+        for (track, &(_, _, _, artist)) in nav.catalog.tracks.iter_mut().zip(rows) {
+            track.artist_id = artist;
+        }
+        nav
+    }
+
+    fn ids(steps: &[Step]) -> Vec<i64> {
+        let mut ids: Vec<i64> = steps.iter().map(|s| s.track.track_id).collect();
+        ids.sort();
+        ids
+    }
+
     fn fixture() -> Navigator {
         navigator(&[
             (10, 0.0),
@@ -704,5 +788,41 @@ mod tests {
         let nav = fixture();
         assert_eq!(nav.shortest_path_order(&[14, 11], Some(10)), vec![14, 11]);
         assert!(nav.shortest_path_order(&[], Some(10)).is_empty());
+    }
+
+    #[test]
+    fn mood_takes_the_tracks_that_match_best() {
+        let nav = scored(&[
+            (10, 0.0, 0.1, 1),
+            (11, 10.0, 0.9, 2),
+            (12, 20.0, 0.3, 3),
+            (13, 30.0, 0.8, 4),
+            (14, 40.0, 0.7, 5),
+        ]);
+        let picked = nav.mood(&[1.0], 3, 0.0, &Constraints::default());
+        assert_eq!(ids(&picked), vec![11, 13, 14]);
+    }
+
+    /// The top three are one artist's; with the pull on, the second pick
+    /// goes to the other artist even though it scores lower.
+    #[test]
+    fn mood_spreads_across_artists() {
+        let nav = scored(&[
+            (10, 0.0, 0.90, 1),
+            (11, 10.0, 0.89, 1),
+            (12, 20.0, 0.88, 1),
+            (13, 30.0, 0.80, 2),
+        ]);
+        let unconstrained = Constraints {
+            artist_cooldown: 0,
+            ..Constraints::default()
+        };
+        let picked = nav.mood(&[1.0], 2, 0.2, &unconstrained);
+        assert_eq!(ids(&picked), vec![10, 13]);
+    }
+
+    #[test]
+    fn mood_without_clap_vectors_finds_nothing() {
+        assert!(fixture().mood(&[1.0], 3, 0.1, &Constraints::default()).is_empty());
     }
 }
