@@ -10,7 +10,7 @@ use super::prefs::{self, Prefs};
 use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
 use super::settings::SettingsScreen;
 use super::{
-    artist_link, open_remote_track, open_track, Blocklist, Cover, Generator, LocalIds, MapView,
+    artist_link, open_remote_track, open_track, Blocklist, Cover, LocalIds, MapView,
     Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
@@ -885,7 +885,6 @@ pub fn MainScreen() -> Element {
     let library = use_context::<Library>();
     let map = use_context::<MapView>();
     let search = use_context::<Search>();
-    let mut panel_open = use_context::<Generator>().panel_open;
     let view = library.view.read().clone();
     let has_history = !library.history.read().is_empty();
 
@@ -913,15 +912,6 @@ pub fn MainScreen() -> Element {
                 }
                 h2 { class: "ellipsis", "{view.label()}" }
                 span { class: "spacer" }
-                // Phone only: beside the main area the panel is always there.
-                // On a phone it slides over this bar, and closes by its own
-                // arrow.
-                button {
-                    class: "icon-btn topbar-generate",
-                    title: "make a playlist",
-                    onclick: move |_| panel_open.set(true),
-                    {icons::spark()}
-                }
                 button {
                     class: if home { "icon-btn active" } else { "icon-btn" },
                     title: "home",
