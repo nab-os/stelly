@@ -300,11 +300,16 @@ pub struct Library {
     pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
     pub error: Signal<Option<String>>,
-    /// Views visited on the way here, for the back button.
-    pub history: Signal<Vec<View>>,
+    /// Views visited on the way here, for the back button, each with how
+    /// far down it was scrolled when it was left.
+    pub history: Signal<Vec<(View, f64)>>,
     /// Views stepped back out of, for the mouse's forward button. Emptied by
     /// going anywhere new, as a browser does.
-    forward: Signal<Vec<View>>,
+    forward: Signal<Vec<(View, f64)>>,
+    /// How far down the main area is scrolled, kept by its `onscroll`. Not a
+    /// signal: it changes every frame of a scroll and nothing renders from
+    /// it, it is only read on the way out of a page.
+    pub scroll: CopyValue<f64>,
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
@@ -366,6 +371,7 @@ impl Library {
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
             forward: Signal::new(Vec::new()),
+            scroll: CopyValue::new(0.0),
             pending: Signal::new(None),
             notice: Signal::new(None),
             layouts: Signal::new(prefs.layouts),
@@ -506,19 +512,20 @@ impl Library {
     pub(crate) fn go(mut self, target: View) {
         let previous = self.view.peek().clone();
         if previous != target {
-            self.history.write().push(previous);
+            self.history.write().push((previous, self.scroll.cloned()));
             self.forward.write().clear();
         }
         self.show(target);
-        to_top();
+        scroll_to(0.0);
     }
 
+    /// Back where it was left, scroll and all.
     pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
-        if let Some(view) = previous {
-            self.forward.write().push(self.view.peek().clone());
+        if let Some((view, scroll)) = previous {
+            self.forward.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
-            to_top();
+            scroll_to(scroll);
         }
     }
 
@@ -529,10 +536,10 @@ impl Library {
 
     pub(crate) fn forward(mut self) {
         let next = self.forward.write().pop();
-        if let Some(view) = next {
-            self.history.write().push(self.view.peek().clone());
+        if let Some((view, scroll)) = next {
+            self.history.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
-            to_top();
+            scroll_to(scroll);
         }
     }
 
@@ -714,12 +721,36 @@ impl Default for Library {
     }
 }
 
-/// A new page starts at its top. The main area is one scroller that outlives
-/// every page in it, so without this an album opened from far down the
-/// favourites opened just as far down itself. Not on `show`: refining a search
-/// as you type is the same page.
-fn to_top() {
-    document::eval("const el = document.querySelector('.screen-body'); if (el) el.scrollTop = 0;");
+/// A new page starts at its top, and one gone back to where it was left. The
+/// main area is one scroller that outlives every page in it, so without this
+/// an album opened from far down the favourites opened just as far down
+/// itself. Not on `show`: refining a search as you type is the same page.
+///
+/// Tried again each frame for a while: a page not in `kept` is still empty
+/// when this lands, too short to scroll that far until its fetch fills it.
+/// Given up as soon as the wheel, a finger or a key moves it instead.
+fn scroll_to(top: f64) {
+    document::eval(&format!(
+        r#"(() => {{
+            const el = document.querySelector('.screen-body');
+            if (!el) return;
+            const top = {top};
+            const until = performance.now() + 2000;
+            let stop = false;
+            const quit = () => {{ stop = true; }};
+            const events = ['wheel', 'touchstart', 'keydown'];
+            for (const e of events) el.addEventListener(e, quit, {{ once: true, passive: true }});
+            const step = () => {{
+                if (!stop) el.scrollTop = top;
+                if (!stop && Math.abs(el.scrollTop - top) > 1 && performance.now() < until) {{
+                    requestAnimationFrame(step);
+                }} else {{
+                    for (const e of events) el.removeEventListener(e, quit);
+                }}
+            }};
+            step();
+        }})();"#
+    ));
 }
 
 /// First load, so the app shell does not have to reach into navigation.
@@ -985,7 +1016,12 @@ pub fn MainScreen() -> Element {
                 }
             }
 
-            div { class: "screen-body",
+            div {
+                class: "screen-body",
+                onscroll: move |event: Event<ScrollData>| {
+                    let mut scroll = library.scroll;
+                    scroll.set(event.scroll_top());
+                },
                 match view {
                     // Keyed on what they show: going from one album straight
                     // to another is otherwise a prop change on the same
