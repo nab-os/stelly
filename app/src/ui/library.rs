@@ -332,7 +332,16 @@ pub struct Library {
     /// and win. Latent while navigation was a click at a time; a search that
     /// fires as you type makes it routine.
     epoch: Signal<u64>,
+    /// What the last few views loaded, so going back to one shows it at once
+    /// instead of an empty page until the fetch lands, which is a flash on
+    /// every back. Keyed on the source as well: the same search asked of the
+    /// space and of Qobuz finds different things.
+    kept: Signal<Vec<(View, Source, Shelf)>>,
 }
+
+/// How many views `Library::kept` remembers. Enough to step back through a
+/// few pages; a shelf can hold hundreds of rows, so not the whole history.
+const KEPT: usize = 8;
 
 /// The signed-in account's favourites, by id, fetched once and cached
 /// rather than asked per row: Qobuz has no "is this one favourited" lookup,
@@ -365,6 +374,7 @@ impl Library {
             source: Signal::new(Source::Qobuz),
             liked: Signal::new(None),
             epoch: Signal::new(0),
+            kept: Signal::new(Vec::new()),
         }
     }
 
@@ -620,13 +630,43 @@ impl Library {
     /// Called from the row handlers, and clearing the shelf unmounts those
     /// rows, a task spawned in a dying scope is dropped with it, which left
     /// the panel showing "loading..." for good.
+    ///
+    /// A view seen recently comes back with what it had, and is fetched again
+    /// underneath, so a like or an unlike made since still shows up.
     pub fn show(mut self, target: View) {
+        let source = *self.source.peek();
+        if !*self.loading.peek() && self.error.peek().is_none() {
+            let leaving = (self.view.peek().clone(), source, self.loaded.peek().clone());
+            let mut kept = self.kept.write();
+            kept.retain(|(view, from, _)| (view, from) != (&leaving.0, &leaving.1));
+            kept.push(leaving);
+            if kept.len() > KEPT {
+                kept.remove(0);
+            }
+        }
+        let known = self
+            .kept
+            .peek()
+            .iter()
+            .find(|(view, from, _)| *view == target && *from == source)
+            .map(|(_, _, shelf)| shelf.clone());
+
         self.view.set(target.clone());
-        self.shelf.set(Shelf::default());
-        self.loaded.set(Shelf::default());
         self.error.set(None);
         self.notice.set(None);
-        self.loading.set(true);
+        match known {
+            Some(shelf) => {
+                let sort = *self.sort.peek();
+                self.loaded.set(shelf.clone());
+                self.shelf.set(shelf.sorted(sort));
+                self.loading.set(false);
+            }
+            None => {
+                self.shelf.set(Shelf::default());
+                self.loaded.set(Shelf::default());
+                self.loading.set(true);
+            }
+        }
         self.pending.set(Some(target));
         *self.epoch.write() += 1;
     }
@@ -639,6 +679,9 @@ impl Library {
         self.pending.set(None);
         let epoch = *self.epoch.peek();
         let space_only = *self.source.peek() == Source::Space;
+        // Already showing what `kept` had for this view: a failed refresh
+        // leaves that up rather than swapping it for an error.
+        let refreshing = !*self.loading.peek();
 
         spawn(async move {
             let mut library = self;
@@ -657,6 +700,7 @@ impl Library {
                     library.loaded.set(shelf.clone());
                     library.shelf.set(shelf.sorted(sort));
                 }
+                Err(_) if refreshing => {}
                 Err(err) => library.error.set(Some(format!("{err:#}"))),
             }
             library.loading.set(false);
