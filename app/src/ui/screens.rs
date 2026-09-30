@@ -291,7 +291,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                             button {
                                 title: "show where it sits",
                                 onclick: move |_| map.browse(),
-                                {icons::globe()}
+                                {icons::constellation()}
                                 "Map"
                             }
                             // Phone only: beside the main area the panel is

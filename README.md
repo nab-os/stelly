@@ -256,7 +256,7 @@ toolchain.
 
 ```sh
 docker run -d --init --name stelly -p 127.0.0.1:7700:7700 \
-  -v stelly-data:/data --env-file .env 4gjr3z1t/stelly:<version>
+  -v stelly-data:/data --env-file .env stellymusic/stelly:<version>
 
 docker exec stelly stelly-server pair --name phone --scope play
 ```
@@ -316,7 +316,7 @@ on demand. A tag additionally opens a GitHub release with everything attached.
 | Ubuntu 26.04 | the same, built on 26.04 |
 | Windows | x64 `-setup.exe` (per-user, no admin) and `.msi`, desktop only |
 | Android | one signed arm64 `.apk` |
-| Docker | `4gjr3z1t/stelly` and `ghcr.io/…/stelly-server` |
+| Docker | `stellymusic/stelly` and `ghcr.io/…/stelly-server` |
 
 Each Ubuntu release builds on its own runner, and the desktop and server
 packages are separate, see [docs/design.md](docs/design.md#packaging).
