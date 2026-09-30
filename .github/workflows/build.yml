@@ -170,7 +170,12 @@ jobs:
           done
           ls -lh dist
 
+      # Allowed to fail outside a tag: once the account's artifact storage
+      # quota is hit every upload errors until usage is recalculated, and a
+      # build that compiled fine should not go red for it. A tag still needs
+      # them, the release job downloads these.
       - uses: actions/upload-artifact@v7
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         with:
           name: ubuntu-${{ matrix.ubuntu }}
           path: dist/*
@@ -241,6 +246,7 @@ jobs:
           ls -lh dist
 
       - uses: actions/upload-artifact@v7
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         with:
           name: windows
           path: dist/*
@@ -406,6 +412,7 @@ jobs:
           ls -lh dist
 
       - uses: actions/upload-artifact@v7
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         with:
           name: android
           path: dist/*.apk
@@ -491,7 +498,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=max,ignore-error=true
 
       # Cheap proof the binary in the image actually runs: it opens the
       # database, finds no devices and says so.
