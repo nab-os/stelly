@@ -248,7 +248,7 @@ button.danger:hover:not(:disabled),
 .fab-map.active { box-shadow: 0 0 0 3px var(--panel), 0 0 0 5px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
 
 /* Phone only, see the `@media` block. */
-.topbar-generate, .hero-generate, .fab-generate { display: none; }
+.hero-generate, .fab-generate { display: none; }
 
 /* --------------------------------------------------------------------- map
    Over the main area. The background must stay opaque and must stay
@@ -1162,7 +1162,7 @@ span.path-end {
 /* ============================================================== phone
    The generate panel leaves the row and slides in from the right, over the
    main area but not the player, with a floating arrow to send it back. A
-   button in the top bar, the panel's own, brings it in. */
+   floating button beside the map one, the panel's own, brings it in. */
 
 @media (max-width: 900px) {
   .workspace { padding: 0; gap: 0; }
@@ -1212,7 +1212,6 @@ span.path-end {
   }
   .side-back .icon { width: 20px; height: 20px; }
 
-  .topbar-generate { display: inline-grid; }
   .hero-generate { display: inline-flex; }
   .fab-generate {
     display: grid;
