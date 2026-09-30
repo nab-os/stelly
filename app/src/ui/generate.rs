@@ -10,6 +10,7 @@
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
+use super::icons;
 use crate::paths::{Constraints, Step};
 use crate::qobuz::RemoteTrack;
 use std::collections::HashSet;
@@ -31,6 +32,15 @@ impl Mode {
             Mode::Radio => "radio",
             Mode::Path => "path",
             Mode::Drift => "drift",
+        }
+    }
+
+    pub(crate) fn icon(self) -> Element {
+        match self {
+            Mode::Neighbours => icons::neighbours(),
+            Mode::Radio => icons::radio(),
+            Mode::Path => icons::path(),
+            Mode::Drift => icons::drift(),
         }
     }
 
