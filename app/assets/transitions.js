@@ -55,7 +55,7 @@
   // with neither the old page nor any cover. Only measuring where it lands
   // waits: the scroll back to the top goes over the same channel as the new
   // page, and may land just after it.
-  const fly = (from, target, { wanted = () => true, done } = {}) => {
+  const fly = (from, target, { now = false, done } = {}) => {
     const clone = document.createElement("div");
     clone.className = "cover cover-flight";
     Object.assign(clone.style, {
@@ -68,11 +68,18 @@
     });
     document.body.appendChild(clone);
     target.style.visibility = "hidden";
-    requestAnimationFrame(() => launch(clone, from, target, wanted, done));
+    // A tile still waiting on covers.js would land as the placeholder tint
+    // and only then get its art. The clone carries the same url, already in
+    // the cache, so the tile can have it now.
+    if (!target.style.backgroundImage && from.image !== "none") {
+      target.style.backgroundImage = from.image;
+    }
+    if (now) launch(clone, from, target, done);
+    else requestAnimationFrame(() => launch(clone, from, target, done));
   };
 
-  const launch = (clone, from, target, wanted, done) => {
-    if (!target.isConnected || !wanted(target.getBoundingClientRect())) {
+  const launch = (clone, from, target, done) => {
+    if (!target.isConnected) {
       target.style.visibility = "";
       clone.remove();
       return;
@@ -172,7 +179,15 @@
       if (urlOf(cover) !== returning.url) continue;
       const from = returning;
       returning = null;
-      fly(from, cover, { wanted: visible });
+      // Unlike the way in, nothing is hidden until the tile is known to be on
+      // screen, once the scroll back to the top has landed: a clone put up
+      // for a tile that then turns out to be out of sight is a flash. The
+      // frame in between still shows the list, cover and all.
+      requestAnimationFrame(() => {
+        if (cover.isConnected && visible(cover.getBoundingClientRect())) {
+          fly(from, cover, { now: true });
+        }
+      });
       return;
     }
   };
