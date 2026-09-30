@@ -5,8 +5,11 @@
 //
 // Rust calls `stellyLeaving` on every navigation, before the new page is
 // rendered: an eval reaches the webview ahead of the render's DOM edits, so
-// the old page is still there to be copied and measured. Everything after
-// that is driven from here, off the mutations that bring the new page in.
+// the old page is still there to be copied and measured. It also says where
+// the new page will be scrolled to, so where everything lands is known the
+// moment the new page is in, and nothing waits for the scroll to be put
+// back before it starts moving. Everything after that is driven from here,
+// off the mutations that bring the new page in.
 //
 // Neither end of the animation is anything Dioxus owns. The old page is a
 // copy (the ghost) laid over the new one, the circle is a mask on it, and
@@ -74,6 +77,9 @@
       index,
       x: rect.left - box.left,
       y: rect.top - box.top + body.scrollTop,
+      width: rect.width,
+      height: rect.height,
+      radius: getComputedStyle(cover).borderRadius,
     };
   };
   const center = (rect) => ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
@@ -83,7 +89,7 @@
   const visible = (rect) => {
     const body = screen();
     const bounds = body ? body.getBoundingClientRect() : { top: 0, bottom: innerHeight };
-    return rect.width > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    return rect.width > 0 && rect.top + rect.height > bounds.top && rect.top < bounds.bottom;
   };
 
   // Far enough from `c` to cover every corner of `rect`.
@@ -94,23 +100,6 @@
       Math.hypot(c.x - rect.left, c.y - rect.bottom),
       Math.hypot(c.x - rect.right, c.y - rect.bottom)
     );
-
-  // Resolves once the scroll the new page asked for has been applied, see
-  // `scroll_to` in library.rs, or after a moment if none comes. Anything on
-  // the new page is measured after this, or it is measured where the old
-  // page's scroll left it.
-  const settled = () =>
-    new Promise((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        window.removeEventListener("stelly-scrolled", finish);
-        requestAnimationFrame(() => resolve());
-      };
-      window.addEventListener("stelly-scrolled", finish);
-      setTimeout(finish, 250);
-    });
 
   // ------------------------------------------------------------ the ghost
 
@@ -205,14 +194,28 @@
     return clone;
   };
 
-  const fly = (clone, from, target) => {
-    // A tile still waiting on covers.js would land as the placeholder tint
-    // and only then get its art. The clone carries the same url, already in
-    // the cache, so the tile can have it now.
-    if (!target.style.backgroundImage && from.image !== "none") {
-      target.style.backgroundImage = from.image;
-    }
-    const to = target.getBoundingClientRect();
+  // To `to`, worked out ahead rather than measured, and into whatever
+  // `find` turns up there: hidden until the clone lands on it, and given its
+  // art now if covers.js has not got to it yet. A list still being filled in
+  // may only bring the card in mid-flight, so it is asked again each frame.
+  const fly = (clone, from, to, find) => {
+    let target = null;
+    let landed = false;
+    const claim = () => {
+      target = find();
+      if (!target) return;
+      if (!target.style.backgroundImage && from.image !== "none") {
+        target.style.backgroundImage = from.image;
+      }
+      target.style.visibility = "hidden";
+    };
+    const watch = () => {
+      if (landed || target) return;
+      claim();
+      requestAnimationFrame(watch);
+    };
+    watch();
+
     const flight = clone.animate(
       [
         {
@@ -227,16 +230,15 @@
           top: `${to.top}px`,
           width: `${to.width}px`,
           height: `${to.height}px`,
-          borderRadius: getComputedStyle(target).borderRadius,
+          borderRadius: to.radius,
         },
       ],
       { duration: DURATION, easing: EASING, fill: "forwards" }
     );
-    let landed = false;
     const land = () => {
       if (landed) return;
       landed = true;
-      target.style.visibility = "";
+      if (target) target.style.visibility = "";
       // Faded rather than dropped: the page may show a larger copy of the
       // art than the tile did, and swapping one for the other is a blink.
       clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120 }).onfinish = () =>
@@ -244,7 +246,6 @@
     };
     flight.onfinish = land;
     flight.oncancel = land;
-    return to;
   };
 
   // ------------------------------------------------------------- state
@@ -277,7 +278,7 @@
     true
   );
 
-  window.stellyLeaving = (kind) => {
+  window.stellyLeaving = (kind, scroll) => {
     leaving = null;
     if (reduced.matches) return;
     const covers = new Map();
@@ -289,6 +290,7 @@
     });
     leaving = {
       kind,
+      scroll,
       covers,
       ghost: copyScreen(),
       hero: hero && hero.el.isConnected ? { ...snapshot(hero.el), url: hero.url, place: hero.place } : null,
@@ -309,21 +311,24 @@
 
     const frame = raise(note.ghost, (cover) => urlOf(cover) === from.url);
     const clone = lift(from);
-    el.style.visibility = "hidden";
     // The circle starts round the picture, so the page opens out of it.
     const start = { ...center(from.rect), r: Math.hypot(from.rect.width, from.rect.height) / 2 };
     mask(frame, start, true);
 
-    settled().then(() => {
-      if (!el.isConnected) {
-        el.style.visibility = "";
-        clone.remove();
-        frame.remove();
-        return;
-      }
-      fly(clone, from, el);
-      circle(frame, start, { ...start, r: reach(start, frame.getBoundingClientRect()) }, true);
-    });
+    // Where the cover sits once the page has its own scroll: for now the
+    // main area still has the old page's, cut short to fit the new one.
+    const body = screen();
+    const shift = body && note.scroll != null ? body.scrollTop - note.scroll : 0;
+    const at = el.getBoundingClientRect();
+    const to = {
+      left: at.left,
+      top: at.top + shift,
+      width: at.width,
+      height: at.height,
+      radius: getComputedStyle(el).borderRadius,
+    };
+    fly(clone, from, to, () => (el.isConnected ? el : null));
+    circle(frame, start, { ...start, r: reach(start, frame.getBoundingClientRect()) }, true);
   };
 
   const close = () => {
@@ -339,59 +344,34 @@
     const start = { ...c, r: reach(c, frame.getBoundingClientRect()) };
     mask(frame, start, false);
 
-    settled()
-      .then(() => home(from))
-      .then((tile) => {
-        if (tile) {
-          tile.style.visibility = "hidden";
-          const to = fly(clone, from, tile);
-          circle(frame, start, { ...center(to), r: Math.hypot(to.width, to.height) / 2 }, false);
-        } else {
-          // Nowhere on screen to go back into: the page closes down into
-          // where its own cover was, and the cover fades with it.
-          clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: DURATION, fill: "forwards" }).onfinish =
-            () => clone.remove();
-          circle(frame, start, { ...c, r: 0 }, false);
-        }
-      });
-  };
-
-  // The card a page goes back into: the one it came out of, found by its
-  // place in the list if the art there still matches, or else the card with
-  // that art nearest to where it was. Looked for over a few frames, since a
-  // list that was not kept, or a scroll still being put back, can take a
-  // moment to show it. Null if it never shows on screen.
-  const home = (from) =>
-    new Promise((resolve) => {
-      const until = performance.now() + 400;
-      const look = () => {
-        const covers = screenCovers();
-        const body = screen();
-        let tile = null;
-        const spot = from.place;
-        if (spot && covers[spot.index] && urlOf(covers[spot.index]) === from.url) {
-          tile = covers[spot.index];
-        } else if (body) {
-          let best = Infinity;
-          const box = body.getBoundingClientRect();
-          for (const cover of covers) {
-            if (urlOf(cover) !== from.url) continue;
-            const rect = cover.getBoundingClientRect();
-            const y = rect.top - box.top + body.scrollTop;
-            const x = rect.left - box.left;
-            const d = spot ? Math.hypot(x - spot.x, y - spot.y) : visible(rect) ? 0 : 1;
-            if (d < best) {
-              best = d;
-              tile = cover;
-            }
-          }
-        }
-        if (tile && visible(tile.getBoundingClientRect())) resolve(tile);
-        else if (performance.now() < until) requestAnimationFrame(look);
-        else resolve(null);
+    // The card it came out of, where it will be once the list has its
+    // scroll back: its place in the list, less that scroll.
+    const spot = from.place;
+    const box = screen().getBoundingClientRect();
+    const to = spot && {
+      left: box.left + spot.x,
+      top: box.top + spot.y - (note.scroll != null ? note.scroll : 0),
+      width: spot.width,
+      height: spot.height,
+      radius: spot.radius,
+    };
+    if (to && visible(to)) {
+      // The same card if the list still has it at that place; if the list
+      // has changed since, the cover lands where it was and fades.
+      const card = () => {
+        const cover = screenCovers()[spot.index];
+        return cover && urlOf(cover) === from.url ? cover : null;
       };
-      look();
-    });
+      fly(clone, from, to, card);
+      circle(frame, start, { ...center(to), r: Math.hypot(to.width, to.height) / 2 }, false);
+    } else {
+      // Nowhere on screen to go back into: the page closes down into where
+      // its own cover was, and the cover fades with it.
+      clone.animate([{ opacity: 1 }, { opacity: 0 }], { duration: DURATION, fill: "forwards" }).onfinish = () =>
+        clone.remove();
+      circle(frame, start, { ...c, r: 0 }, false);
+    }
+  };
 
   const find = (node, selector) => {
     if (node.nodeType !== 1 || inGhost(node)) return null;
