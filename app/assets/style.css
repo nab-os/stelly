@@ -708,6 +708,8 @@ span.path-end {
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .side-panel .tabs + p { margin: 0; }
 
+.moods { display: flex; flex-wrap: wrap; gap: 6px; }
+
 .field {
   display: flex;
   align-items: center;

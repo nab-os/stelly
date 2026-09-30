@@ -10,7 +10,7 @@
 //! green A and red B, a track's page, a row's menu) and shown here until both
 //! are known and the path is walked.
 
-use super::generate::{as_remote, describe, Generator, Mode};
+use super::generate::{as_remote, describe, Generator, Mode, MOODS};
 use super::icons;
 use super::library::Library;
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
@@ -86,8 +86,8 @@ pub fn GeneratePanel() -> Element {
             h2 { "Generate" }
 
             // What the walk starts from. Path mode names its own two ends
-            // below instead.
-            if mode != Mode::Path {
+            // below instead, and mood starts from words alone.
+            if mode.seeded() {
                 match seed.clone() {
                     Some(track) => rsx! {
                         div {
@@ -148,9 +148,9 @@ pub fn GeneratePanel() -> Element {
                 }
             }
 
-            if mode == Mode::Drift && !generator.can_steer() {
+            if mode.steered() && !generator.can_steer() {
                 p { class: "muted error",
-                    "Drift needs the CLAP text tower on the server. Fetch it there with: "
+                    {format!("{} needs the CLAP text tower on the server. Fetch it there with: ", capitalised(mode.label()))}
                     code { "stelly-server models" }
                 }
             }
@@ -161,6 +161,35 @@ pub fn GeneratePanel() -> Element {
                     placeholder: "darker and slower",
                     value: "{generator.phrase}",
                     oninput: move |event| { let mut phrase = generator.phrase; phrase.set(event.value()); },
+                }
+            }
+
+            if mode == Mode::Mood {
+                input {
+                    class: "search",
+                    placeholder: "how should it feel?",
+                    value: "{generator.phrase}",
+                    oninput: move |event| { let mut phrase = generator.phrase; phrase.set(event.value()); },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Enter
+                            && generator.ready(None)
+                            && generator.can_steer()
+                            && !*generator.busy.peek()
+                        {
+                            generator.run(None);
+                        }
+                    },
+                }
+                div { class: "moods",
+                    for preset in MOODS {
+                        button {
+                            key: "{preset}",
+                            class: if generator.phrase.read().trim() == preset { "chip active" } else { "chip" },
+                            disabled: !generator.can_steer() || *generator.busy.read(),
+                            onclick: move |_| generator.feel(preset),
+                            "{preset}"
+                        }
+                    }
                 }
             }
 
@@ -207,7 +236,8 @@ pub fn GeneratePanel() -> Element {
             div { class: "actions",
                 button {
                     class: "primary",
-                    disabled: !has_selection && mode != Mode::Path
+                    disabled: !has_selection && mode.seeded()
+                        || mode.steered() && !generator.can_steer()
                         || !generator.ready(selected())
                         || *generator.busy.read(),
                     onclick: move |_| generator.run(selected()),
@@ -450,6 +480,14 @@ fn WeightsDisclosure() -> Element {
                 }
             }
         }
+    }
+}
+
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
