@@ -519,6 +519,13 @@ fn Shell() -> Element {
         let _ = handle.recv::<serde_json::Value>().await;
     });
 
+    // The cover flying between a tile and the page it opens. Watches the
+    // document on its own; nothing here tells it when a page changes.
+    use_future(move || async move {
+        let mut handle = document::eval(include_str!("../assets/transitions.js"));
+        let _ = handle.recv::<serde_json::Value>().await;
+    });
+
     // Long press opens the row menu on a touch screen, where there is no
     // right-click to open it with.
     let mut menu = use_context::<ContextMenu>().0;
