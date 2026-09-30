@@ -145,12 +145,37 @@
     true
   );
 
+  // The mouse's forward button, which back.js sends to Rust: nothing is
+  // clicked, so nothing says which tile the page is coming out of. Every
+  // cover on screen is noted instead, and the page's own cover picks its
+  // tile out of them by url, the way the way back does.
+  let leaving = null;
+  window.addEventListener(
+    "mouseup",
+    (event) => {
+      if (reduced.matches || event.button !== 4) return;
+      const covers = new Map();
+      for (const cover of document.querySelectorAll(".screen-body .cover")) {
+        const url = urlOf(cover);
+        if (!url || covers.has(url)) continue;
+        const shot = snapshot(cover);
+        if (visible(shot.rect)) covers.set(url, shot);
+      }
+      leaving = { covers, at: performance.now() };
+    },
+    true
+  );
+
   document.addEventListener("scroll", track, true);
   window.addEventListener("resize", track);
 
   const arrive = (el) => {
-    const from = fresh(opening) ? opening : null;
+    const from =
+      (fresh(opening) && opening) ||
+      (fresh(leaving) && leaving.covers.get(urlOf(el))) ||
+      null;
     opening = null;
+    leaving = null;
     hero = { el, url: from ? from.url : urlOf(el), last: null };
     if (!from) {
       requestAnimationFrame(track);
