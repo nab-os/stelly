@@ -248,7 +248,7 @@ button.danger:hover:not(:disabled),
 .fab-map.active { box-shadow: 0 0 0 3px var(--panel), 0 0 0 5px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
 
 /* Phone only, see the `@media` block. */
-.topbar-generate { display: none; }
+.topbar-generate, .hero-generate { display: none; }
 
 /* --------------------------------------------------------------------- map
    Over the main area. The background must stay opaque and must stay
@@ -1213,6 +1213,7 @@ span.path-end {
   .side-back .icon { width: 20px; height: 20px; }
 
   .topbar-generate { display: inline-grid; }
+  .hero-generate { display: inline-flex; }
   /* Over the generate panel, under the queue drawer. */
   .fabs { right: 14px; bottom: 14px; gap: 10px; z-index: 26; }
 
