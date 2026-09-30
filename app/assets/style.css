@@ -567,10 +567,10 @@ ol.list .row::before {
 
 /* A page coming in rises into place, all but its cover, which transitions.js
    flies in from the tile that opened it and so has to sit still to be
-   measured. */
-.page > :not(.hero),
+   measured. Only pages with a cover: one without, settings, would start its
+   first frame with nothing on it at all. */
+.hero ~ *,
 .hero-meta { animation: page-in 0.28s cubic-bezier(0.2, 0, 0, 1) both; }
-.page > :not(.hero) { animation-delay: 0.06s; }
 @keyframes page-in {
   from { opacity: 0; transform: translateY(10px); }
 }
@@ -584,7 +584,7 @@ ol.list .row::before {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .page > :not(.hero),
+  .hero ~ *,
   .hero-meta { animation: none; }
 }
 .hero-title {
