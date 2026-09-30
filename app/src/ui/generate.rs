@@ -1,11 +1,12 @@
 //! Making a sequence of tracks out of the space.
 //!
-//! One panel with four modes, because they differ only in how the sequence is
+//! One panel with five modes, because they differ only in how the sequence is
 //! chosen:
 //!   - **neighbours**: the k most similar tracks.
 //!   - **radio**: a greedy walk, pushed away from artists already used.
 //!   - **path**: A to B, shortest route or evenly paced.
 //!   - **drift**: away from a track, towards a phrase.
+//!   - **mood**: whatever sounds like a phrase, no track needed.
 
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -21,10 +22,11 @@ pub enum Mode {
     Radio,
     Path,
     Drift,
+    Mood,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 4] = [Mode::Neighbours, Mode::Radio, Mode::Path, Mode::Drift];
+    pub const ALL: [Mode; 5] = [Mode::Mood, Mode::Neighbours, Mode::Radio, Mode::Path, Mode::Drift];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -32,6 +34,7 @@ impl Mode {
             Mode::Radio => "radio",
             Mode::Path => "path",
             Mode::Drift => "drift",
+            Mode::Mood => "mood",
         }
     }
 
@@ -50,9 +53,33 @@ impl Mode {
             Mode::Radio => "Keep jumping to the nearest track not yet played.",
             Mode::Path => "Travel from A to B through the space.",
             Mode::Drift => "Walk away from the selection, towards a phrase.",
+            Mode::Mood => "Describe a mood, get the tracks that sound like it.",
         }
     }
+
+    /// Whether the mode starts from the track in hand.
+    pub(crate) fn seeded(self) -> bool {
+        !matches!(self, Mode::Path | Mode::Mood)
+    }
+
+    /// Whether the mode needs the server to embed a phrase.
+    pub(crate) fn steered(self) -> bool {
+        matches!(self, Mode::Drift | Mode::Mood)
+    }
 }
+
+/// Starting points for mood, one tap each. Phrased the way CLAP was trained,
+/// as a description of a sound, since that is what the text tower matches.
+pub const MOODS: [&str; 8] = [
+    "calm rainy morning",
+    "late night drive",
+    "sunny and carefree",
+    "melancholic and slow",
+    "high energy workout",
+    "deep focus, no vocals",
+    "dreamy and floating",
+    "warm dinner with friends",
+];
 
 /// What produced the result currently on screen.
 ///
@@ -66,6 +93,7 @@ pub enum Recipe {
     Radio { seed: i64 },
     Path { a: i64, b: i64, even: bool },
     Drift { seed: i64, phrase: String },
+    Mood { phrase: String },
 }
 
 #[derive(Clone, Copy)]
@@ -104,7 +132,8 @@ pub struct Generator {
 impl Generator {
     pub fn new() -> Self {
         Self {
-            mode: Signal::new(Mode::Neighbours),
+            // The one mode that works before anything is selected.
+            mode: Signal::new(Mode::Mood),
             result: Signal::new(Vec::new()),
             produced_by: Signal::new(None),
             busy: Signal::new(false),
@@ -123,7 +152,7 @@ impl Generator {
         }
     }
 
-    /// Whether drift is offerable at all.
+    /// Whether drift and mood are offerable at all.
     pub(crate) fn can_steer(&self) -> bool {
         *self.tower.read() && crate::engine().lock().unwrap().has_audio_embeddings()
     }
@@ -134,6 +163,7 @@ impl Generator {
             Mode::Neighbours | Mode::Radio => selected.is_some(),
             Mode::Path => self.from.peek().is_some() && self.to.peek().is_some(),
             Mode::Drift => selected.is_some() && !self.phrase.peek().trim().is_empty(),
+            Mode::Mood => !self.phrase.peek().trim().is_empty(),
         }
     }
 
@@ -166,6 +196,9 @@ impl Generator {
             },
             Mode::Drift => selected.map(|seed| Recipe::Drift {
                 seed,
+                phrase: phrase.clone(),
+            }),
+            Mode::Mood => Some(Recipe::Mood {
                 phrase: phrase.clone(),
             }),
         };
@@ -225,6 +258,18 @@ impl Generator {
                     }
                     None => None,
                 },
+                Mode::Mood => match backend().embed(&phrase).await {
+                    Ok(embedding) => Some(crate::engine().lock().unwrap().navigator.mood(
+                        &embedding,
+                        count,
+                        penalty,
+                        &Constraints::default(),
+                    )),
+                    Err(err) => {
+                        generator.status.set(Some(format!("{err:#}")));
+                        None
+                    }
+                },
             };
 
             let Some(produced) = produced else {
@@ -233,9 +278,14 @@ impl Generator {
             };
             let produced = dedup_by_recording(produced);
             if produced.is_empty() {
-                generator
-                    .status
-                    .set(Some("nothing found, try a different start".into()));
+                generator.status.set(Some(
+                    if mode == Mode::Mood {
+                        "nothing found, try other words"
+                    } else {
+                        "nothing found, try a different start"
+                    }
+                    .into(),
+                ));
             }
             generator.result.set(produced);
             generator.produced_by.set(recipe);
@@ -303,7 +353,20 @@ impl Generator {
                 generator.phrase.set(phrase.clone());
                 generator.run(Some(*seed));
             }
+            Recipe::Mood { phrase } => {
+                generator.mode.set(Mode::Mood);
+                generator.phrase.set(phrase.clone());
+                generator.run(None);
+            }
         }
+    }
+
+    /// Run mood on a phrase, from a preset or the box.
+    pub fn feel(self, phrase: &str) {
+        let mut generator = self;
+        generator.mode.set(Mode::Mood);
+        generator.phrase.set(phrase.to_string());
+        generator.run(None);
     }
 
     /// The weights moved, so the distances that produced this result no longer
@@ -353,6 +416,7 @@ pub(crate) fn describe(recipe: &Recipe, label: impl Fn(Option<i64>) -> String) -
         Recipe::Drift { seed, phrase } => {
             format!("Drift from {} towards “{phrase}”", label(Some(*seed)))
         }
+        Recipe::Mood { phrase } => format!("Sounds like “{phrase}”"),
     }
 }
 
