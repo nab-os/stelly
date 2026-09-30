@@ -44,6 +44,7 @@ impl Mode {
             Mode::Radio => icons::radio(),
             Mode::Path => icons::path(),
             Mode::Drift => icons::drift(),
+            Mode::Mood => icons::mood(),
         }
     }
 

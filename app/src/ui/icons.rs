@@ -268,3 +268,19 @@ pub fn drift() -> Element {
         }
     })
 }
+
+/// A phrase and the tracks that gather under it, with no seed to start from.
+pub fn mood() -> Element {
+    stroked(rsx! {
+        path {
+            stroke_width: "1.75",
+            d: "M10 3H4a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h4l3 2.5V10a2 2 0 0 0 1-1.7V5a2 2 0 0 0-2-2z",
+        }
+        g { fill: "currentColor", stroke: "none",
+            circle { cx: "14.5", cy: "15.5", r: "1.6" }
+            circle { cx: "19", cy: "13.5", r: "1.6" }
+            circle { cx: "20", cy: "19", r: "1.6" }
+            circle { cx: "15", cy: "20.5", r: "1.6" }
+        }
+    })
+}
