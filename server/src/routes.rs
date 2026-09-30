@@ -22,6 +22,7 @@ use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::compression::CompressionLayer;
 
 /// How often the SSE task looks for new output. Matches the client's old poll
 /// interval, except now it costs one in-memory read rather than a request.
@@ -72,7 +73,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pipeline/log", get(pipeline_log))
         // ------------------------------------------------------------- sync
         .route("/api/sync/manifest", get(sync_manifest))
-        .route("/api/sync/{name}", get(sync_file))
+        // zstd, for whoever asks: the synced files are the only big bodies
+        // here. The CLAP embeddings barely compress, so the catalogue only
+        // loses a third, but that is still ~30MB a sync, and level 3 costs
+        // well under a second.
+        .route("/api/sync/{name}", get(sync_file).layer(CompressionLayer::new()))
         // ---------------------------------------------------------- devices
         .route("/api/devices", get(devices).post(pair_device))
         .route("/api/devices/{id}", delete(revoke_device))

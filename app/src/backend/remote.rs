@@ -51,6 +51,9 @@ pub struct Remote {
     log: Arc<LogBuffer>,
     /// How far the running `sync_space` has got, for the loading screen.
     sync: Arc<Mutex<SyncProgress>>,
+    /// Held for a whole sync. It runs behind the app now, so a second rebuild
+    /// can land mid-download, and two syncs would write the same `.partial`.
+    syncing: tokio::sync::Mutex<()>,
     /// Whether the SSE task is already running. The log is pushed, not polled,
     /// so a stage that prints nothing for minutes costs nothing to watch.
     streaming: Arc<AtomicBool>,
@@ -66,6 +69,7 @@ impl Remote {
             data_dir,
             log: Arc::new(LogBuffer::default()),
             sync: Arc::new(Mutex::new(SyncProgress::default())),
+            syncing: tokio::sync::Mutex::new(()),
             streaming: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -473,6 +477,7 @@ impl Remote {
     /// Bring the local copy of the space up to date. Digest-compared per file,
     /// not by generation alone: a restart resets the counter.
     pub async fn sync_space(&self) -> Result<bool> {
+        let _syncing = self.syncing.lock().await;
         self.set_sync(SyncProgress::default());
         let manifest: SyncManifest = self.get("/api/sync/manifest").await?;
         std::fs::create_dir_all(&self.data_dir)
@@ -504,6 +509,8 @@ impl Remote {
                 .send()
                 .await
                 .with_context(|| format!("downloading {}", file.name))?;
+            // Comes down zstd-compressed and is inflated as it arrives, so
+            // the counts below are still in the manifest's uncompressed bytes.
             let mut body = Self::check(response).await?.bytes_stream();
 
             // Write beside the target and rename: an interrupted sync must

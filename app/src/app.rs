@@ -171,6 +171,36 @@ pub fn Loading(title: &'static str) -> Element {
     }
 }
 
+/// A rebuilt space coming down behind the app, bottom left of the main area,
+/// opposite the buttons. Says how far it is and nothing else: there is nothing
+/// to do about it but wait, and nothing that has to wait for it.
+#[component]
+fn SyncNotice() -> Element {
+    let mut progress = use_signal(|| backend().sync_progress());
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let now = backend().sync_progress();
+            if *progress.peek() != now {
+                progress.set(now);
+            }
+        }
+    });
+
+    let progress = progress.read();
+    let label = match progress.step {
+        SyncStep::Downloading if progress.bytes_total > 0 => format!(
+            "updating the map, {:.0}%",
+            progress.bytes_done as f64 / progress.bytes_total as f64 * 100.0
+        ),
+        _ => "updating the map…".to_string(),
+    };
+
+    rsx! {
+        div { class: "sync-notice muted", "{label}" }
+    }
+}
+
 fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
@@ -355,10 +385,10 @@ fn Shell() -> Element {
     let mut map_route = use_signal(|| false);
     use_context_provider(|| MapView { map_open, map_route });
 
-    // A rebuilt space means the loaded one is stale. Remotely the bytes have
-    // to come down first; `sync_space` is a no-op locally, so this stays one
-    // path. The loading screen covers the app meanwhile, rather than leaving
-    // it answering from a space that is about to be swapped out.
+    // A rebuilt space means the loaded one is stale. The bytes come down and
+    // the new engine is built behind the app, which keeps answering from the
+    // old one until the swap. A loading screen here would lock the app out
+    // for the whole download, once per rebuild.
     let mut resyncing = use_signal(|| false);
     use_effect(move || {
         let generation = *pipeline.generation.read();
@@ -377,8 +407,14 @@ fn Shell() -> Element {
                 resyncing.set(false);
                 match reloaded {
                     Ok(()) => {
-                        selected.set(None);
-                        generator.clear();
+                        // Both are track ids, so they outlive the swap. Only a
+                        // track the rebuild dropped has to go; the result is
+                        // kept and marked out of date, the distances behind it
+                        // having moved.
+                        if selected.peek().is_some_and(|id| space_track(id).is_none()) {
+                            selected.set(None);
+                        }
+                        generator.invalidate();
                         document::eval(
                             "window.stellyReloadPoints && window.stellyReloadPoints();",
                         );
@@ -892,6 +928,10 @@ fn Shell() -> Element {
                         }
                     }
 
+                    if resyncing() {
+                        SyncNotice {}
+                    }
+
                     // Bottom right of the main area, over the map as well,
                     // since its own button is how you close it again. On a
                     // phone, over the generate panel too: the map is the main
@@ -936,12 +976,6 @@ fn Shell() -> Element {
 
             // Last, so it paints over everything it can be opened from.
             ContextMenuView {}
-
-            if resyncing() {
-                div { class: "loading-overlay",
-                    Loading { title: "Updating the space" }
-                }
-            }
         }
     }
 }
