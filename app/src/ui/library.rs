@@ -310,6 +310,12 @@ pub struct Library {
     /// signal: it changes every frame of a scroll and nothing renders from
     /// it, it is only read on the way out of a page.
     pub scroll: CopyValue<f64>,
+    /// Where the page just asked for should be scrolled to, applied by
+    /// `MainScreen` once it has rendered. Sent from `go` or `back` directly,
+    /// the scroll reached the webview before the new page did and was set on
+    /// the old one: a target the old page was long enough for counted as
+    /// reached, and the new page coming in then cut it short.
+    restore: Signal<Option<f64>>,
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
@@ -372,6 +378,7 @@ impl Library {
             history: Signal::new(Vec::new()),
             forward: Signal::new(Vec::new()),
             scroll: CopyValue::new(0.0),
+            restore: Signal::new(None),
             pending: Signal::new(None),
             notice: Signal::new(None),
             layouts: Signal::new(prefs.layouts),
@@ -510,22 +517,24 @@ impl Library {
 
     /// Navigate, remembering where we came from.
     pub(crate) fn go(mut self, target: View) {
+        leaving("go", 0.0);
         let previous = self.view.peek().clone();
         if previous != target {
             self.history.write().push((previous, self.scroll.cloned()));
             self.forward.write().clear();
         }
         self.show(target);
-        scroll_to(0.0);
+        self.restore.set(Some(0.0));
     }
 
     /// Back where it was left, scroll and all.
     pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
         if let Some((view, scroll)) = previous {
+            leaving("back", scroll);
             self.forward.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
-            scroll_to(scroll);
+            self.restore.set(Some(scroll));
         }
     }
 
@@ -537,9 +546,10 @@ impl Library {
     pub(crate) fn forward(mut self) {
         let next = self.forward.write().pop();
         if let Some((view, scroll)) = next {
+            leaving("forward", scroll);
             self.history.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
-            scroll_to(scroll);
+            self.restore.set(Some(scroll));
         }
     }
 
@@ -721,6 +731,14 @@ impl Default for Library {
     }
 }
 
+/// Tells transitions.js a page is about to be replaced, how, and where the
+/// new one will be scrolled to. Sent before the view changes, so it reaches
+/// the webview ahead of the render and the old page is still there to copy
+/// and measure.
+fn leaving(kind: &str, scroll: f64) {
+    document::eval(&format!("window.stellyLeaving && window.stellyLeaving('{kind}', {scroll});"));
+}
+
 /// A new page starts at its top, and one gone back to where it was left. The
 /// main area is one scroller that outlives every page in it, so without this
 /// an album opened from far down the favourites opened just as far down
@@ -728,7 +746,8 @@ impl Default for Library {
 ///
 /// Tried again each frame for a while: a page not in `kept` is still empty
 /// when this lands, too short to scroll that far until its fetch fills it.
-/// Given up as soon as the wheel, a finger or a key moves it instead.
+/// Given up as soon as the wheel, a finger or a key moves it instead, or a
+/// later page asks for a scroll of its own.
 fn scroll_to(top: f64) {
     document::eval(&format!(
         r#"(() => {{
@@ -736,11 +755,14 @@ fn scroll_to(top: f64) {
             if (!el) return;
             const top = {top};
             const until = performance.now() + 2000;
+            const turn = (window.stellyScrollTurn || 0) + 1;
+            window.stellyScrollTurn = turn;
             let stop = false;
             const quit = () => {{ stop = true; }};
             const events = ['wheel', 'touchstart', 'keydown'];
             for (const e of events) el.addEventListener(e, quit, {{ once: true, passive: true }});
             const step = () => {{
+                if (window.stellyScrollTurn !== turn) stop = true;
                 if (!stop) el.scrollTop = top;
                 if (!stop && Math.abs(el.scrollTop - top) > 1 && performance.now() < until) {{
                     requestAnimationFrame(step);
@@ -966,6 +988,17 @@ pub fn MainScreen() -> Element {
     // Drives every navigation. Deliberately here, mounted for the life of the
     // window, rather than in `show`: see the comment there.
     use_effect(move || library.drive());
+
+    // After the render the new page came in with, so the scroll lands on it
+    // and not on the page it replaced. See `Library::restore`.
+    use_effect(move || {
+        let mut restore = library.restore;
+        let wanted = *restore.read();
+        if let Some(top) = wanted {
+            restore.set(None);
+            scroll_to(top);
+        }
+    });
 
     let home = matches!(view, View::Favourites { .. });
     let searching = matches!(view, View::Search { .. });

@@ -583,6 +583,15 @@ ol.list .row::before {
   pointer-events: none;
 }
 
+/* The page being left, copied over the one replacing it while the circle
+   opens or closes on it. Just under the flying cover. */
+.page-ghost {
+  position: fixed;
+  z-index: 59;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero ~ *,
   .hero-meta { animation: none; }
