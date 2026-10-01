@@ -463,11 +463,20 @@ impl Hub {
                 })
                 .await;
 
+                // Build-space is nearly always followed by layout, and telling
+                // clients after both would have them fetch the space twice for
+                // one rebuild, the first time without its new positions. So
+                // only the last of a run of rebuilds moves the generation.
+                let layout_next = stage == Stage::BuildSpace
+                    && (job.preempted.load(Ordering::SeqCst) || !job.cancel.load(Ordering::SeqCst))
+                    && job.queue.lock().unwrap().stages.contains(&Stage::Layout);
+                let settled = stage.rebuilds_space() && !layout_next;
+
                 // Before the generation moves, not after: a client syncs as
                 // soon as it sees the new one, and the layout only reaches it
                 // through catalog.db. Rebuilt later, the client keeps the old
                 // map until the next stage.
-                if stage.rebuilds_space() {
+                if settled {
                     let (source, target) = (paths.db_path.clone(), paths.data_dir.join("catalog.db"));
                     let built = tokio::task::spawn_blocking(move || catalog::build(&source, &target))
                         .await
@@ -489,7 +498,7 @@ impl Hub {
                     Err(err) => log.push(format!("{} failed: {err:#}", stage.label())),
                 }
 
-                if stage.rebuilds_space() {
+                if settled {
                     job.generation.fetch_add(1, Ordering::SeqCst);
                 }
 

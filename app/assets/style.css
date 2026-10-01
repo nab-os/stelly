@@ -234,6 +234,27 @@ button.danger:hover:not(:disabled),
   gap: 12px;
 }
 
+/* A space syncing behind the app. Opposite the fabs, and never in the way:
+   clicks go through it. */
+.sync-notice {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 12;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 12px;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  /* Faded in late, so a rebuild with nothing new to fetch does not flash. */
+  animation: sync-notice-in 0.2s 0.3s both;
+}
+@keyframes sync-notice-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .fab {
   display: grid;
   place-items: center;
@@ -1176,19 +1197,6 @@ span.path-end {
 @keyframes loading-sweep {
   from { left: -30%; }
   to { left: 100%; }
-}
-
-/* Faded in late, so a rebuild with nothing new to fetch does not flash. */
-.loading-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: var(--bg);
-  animation: loading-in 0.2s 0.3s both;
-}
-@keyframes loading-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 
 /* ============================================================== phone
