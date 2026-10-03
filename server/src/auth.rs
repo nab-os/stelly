@@ -402,7 +402,7 @@ fn hex(bytes: &[u8]) -> String {
 pub struct PlayAuth(pub Device);
 
 /// A request from a device trusted with the expensive, destructive half.
-pub struct AdminAuth(pub Device);
+pub struct AdminAuth;
 
 fn bearer(parts: &Parts) -> Option<String> {
     parts
@@ -454,6 +454,6 @@ impl FromRequestParts<crate::AppState> for AdminAuth {
         parts: &mut Parts,
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorise(parts, state, Scope::Admin).map(AdminAuth)
+        authorise(parts, state, Scope::Admin).map(|_| AdminAuth)
     }
 }
