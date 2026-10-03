@@ -43,7 +43,7 @@ UMAP, and lets you navigate the space directly: nearest neighbours, a radio
 walk, a path between two tracks, or a slow drift. Weights are applied at query
 time, so the sliders are live.
 """
-homepage = "https://github.com/nab-os/Stelly"
+homepage = "https://github.com/nab-os/stelly-releases"
 
 # `depends` is computed per-release by dpkg-shlibdeps in CI: the package names
 # differ between Ubuntu releases.

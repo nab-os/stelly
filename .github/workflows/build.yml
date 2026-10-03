@@ -130,7 +130,7 @@ jobs:
           Architecture: amd64
           Section: sound
           Priority: optional
-          Homepage: https://github.com/nab-os/Stelly
+          Homepage: https://github.com/nab-os/stelly-releases
           Description: Stelly server: API, crawler and analysis pipeline
            Owns the Qobuz credentials, the SQLite corpus, the CLAP models and every
            pipeline stage, and serves them to Stelly clients over HTTP. No GUI: this
@@ -180,6 +180,9 @@ jobs:
           name: ubuntu-${{ matrix.ubuntu }}
           path: dist/*
           if-no-files-found: error
+          # The release job reads these minutes later. Kept any longer they fill
+          # the private repo's artifact storage within two builds.
+          retention-days: 1
 
   # -------------------------------------------------------------- windows
   #
@@ -251,6 +254,9 @@ jobs:
           name: windows
           path: dist/*
           if-no-files-found: error
+          # The release job reads these minutes later. Kept any longer they fill
+          # the private repo's artifact storage within two builds.
+          retention-days: 1
 
   # -------------------------------------------------------------- android
   #
@@ -417,6 +423,9 @@ jobs:
           name: android
           path: dist/*.apk
           if-no-files-found: error
+          # The release job reads these minutes later. Kept any longer they fill
+          # the private repo's artifact storage within two builds.
+          retention-days: 1
 
   # --------------------------------------------------------------- docker
   #
@@ -550,3 +559,19 @@ jobs:
         with:
           files: artifacts/**/*
           generate_release_notes: true
+
+      # The same files again, on the public repo the app's updater reads. This
+      # repo is private, so its releases are invisible to anyone without access.
+      #
+      # GITHUB_TOKEN cannot write to another repository; STELLY_RELEASES_TOKEN
+      # is a fine-grained token with Contents: read and write on
+      # nab-os/stelly-releases and nothing else. The notes stay short on
+      # purpose: generated ones would list this repo's PR titles there.
+      - uses: softprops/action-gh-release@v3
+        with:
+          repository: nab-os/stelly-releases
+          token: ${{ secrets.STELLY_RELEASES_TOKEN }}
+          target_commitish: main
+          name: Stelly ${{ github.ref_name }}
+          body: Stelly ${{ github.ref_name }}.
+          files: artifacts/**/*
