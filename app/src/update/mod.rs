@@ -17,7 +17,7 @@ pub use install::{install, Done, Install};
 
 use serde::Deserialize;
 
-const LATEST: &str = "https://api.github.com/repos/nab-os/Stelly/releases/latest";
+const LATEST: &str = "https://api.github.com/repos/nab-os/stelly-releases/releases/latest";
 
 /// How often a long-running window asks again. Unauthenticated, GitHub allows
 /// 60 requests an hour per address, which this is nowhere near.
@@ -160,7 +160,7 @@ mod tests {
     fn release(tag: &str, assets: &[&str]) -> Latest {
         Latest {
             tag_name: tag.into(),
-            html_url: format!("https://github.com/nab-os/Stelly/releases/tag/{tag}"),
+            html_url: format!("https://github.com/nab-os/stelly-releases/releases/tag/{tag}"),
             draft: false,
             prerelease: false,
             assets: assets
@@ -291,7 +291,7 @@ mod tests {
     fn reads_what_github_sends() {
         let body = r#"{
             "tag_name": "v0.12.0",
-            "html_url": "https://github.com/nab-os/Stelly/releases/tag/v0.12.0",
+            "html_url": "https://github.com/nab-os/stelly-releases/releases/tag/v0.12.0",
             "draft": false,
             "prerelease": false,
             "assets": [{
@@ -299,7 +299,7 @@ mod tests {
                 "state": "uploaded",
                 "size": 4096,
                 "digest": "sha256:ABCDEF",
-                "browser_download_url": "https://github.com/nab-os/Stelly/releases/download/v0.12.0/stelly_0.12.0_x64-setup.exe"
+                "browser_download_url": "https://github.com/nab-os/stelly-releases/releases/download/v0.12.0/stelly_0.12.0_x64-setup.exe"
             }],
             "body": "notes"
         }"#;
