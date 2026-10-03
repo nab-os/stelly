@@ -1,9 +1,9 @@
 //! The play queue and the transport.
 //!
-//! The queue lives in the session every paired device shares, see
+//! The queue lives in the session this user's devices share, see
 //! `crate::session`. Every button here turns into an `Op`, applied to this
 //! device's copy at once and sent on to the server, which pushes the result
-//! to every device. Only the device picked as the output makes a sound: its
+//! to each of them. Only the device picked as the output makes a sound: its
 //! `<audio>` element (see `assets/player.js`) follows the session, and reports
 //! back what it is actually doing.
 

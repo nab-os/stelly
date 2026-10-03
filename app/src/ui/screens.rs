@@ -20,9 +20,9 @@ use crate::backend::backend;
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::prelude::*;
 
-/// Add to or remove from the account's Qobuz favourites. `kind` is "track",
-/// "album" or "artist". The heart flipping is the confirmation; only a
-/// failure is worth a line of text.
+/// Add to or remove from this user's likes, which the server keeps and Qobuz
+/// never hears of. `kind` is "track", "album" or "artist". The heart flipping
+/// is the confirmation; only a failure is worth a line of text.
 fn toggle_like(
     kind: &'static str,
     id: String,
@@ -318,7 +318,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("Quality", Some(quality.to_string()))}
                 {fact("Streamable", Some(if track.streamable { "yes" } else { "not here" }.to_string()))}
                 {fact("In your space", Some(if in_space { "yes" } else { "no" }.to_string()))}
-                {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from your likes", m.seed_distance)))}
+                {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from a like", m.seed_distance)))}
                 {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
                 {fact("Qobuz track", Some(track.id.to_string()))}
                 {fact("Qobuz album", track.album_id.clone())}
@@ -333,7 +333,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 }
             }
 
-            if let Some(artist_id) = track.artist_id {
+            if let Some(artist_id) = track.artist_id.filter(|_| *blocklist.editable.read()) {
                 div { class: "page-foot",
                     button {
                         class: "danger",
@@ -592,16 +592,18 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                             "analyse every album of theirs and put them on the map",
                             status,
                         )}
-                        button {
-                            class: "danger",
-                            onclick: {
-                                let (id, name) = (artist.id, artist.name.clone());
-                                move |_| {
-                                    blocklist.block.call((id, name.clone()));
-                                    library.back();
-                                }
-                            },
-                            "Hide"
+                        if *blocklist.editable.read() {
+                            button {
+                                class: "danger",
+                                onclick: {
+                                    let (id, name) = (artist.id, artist.name.clone());
+                                    move |_| {
+                                        blocklist.block.call((id, name.clone()));
+                                        library.back();
+                                    }
+                                },
+                                "Hide"
+                            }
                         }
                     }
                     if let Some(message) = status() {
