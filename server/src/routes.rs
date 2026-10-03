@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest, PairingGrant,
     PipelineStatus, Recipe, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
-    Target, TrackMeta, TracksRequest, User,
+    Target, TrackMeta, TracksRequest, User, Imported,
 };
 use stelly_core::session::{Command, Session, Update};
 use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> Router {
             "/api/favourites/{kind}/{id}",
             post(favorite_add).delete(favorite_remove),
         )
+        .route("/api/favourites/import", post(import_favourites))
         // ----------------------------------------------------------- counts
         .route("/api/corpus", get(corpus))
         // --------------------------------------------------------- crawling
@@ -87,7 +88,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/devices", get(devices).post(pair_device))
         .route("/api/devices/{id}", delete(revoke_device))
         .route("/api/me", get(me))
-        .route("/api/users", get(users))
+        .route("/api/users", get(users).post(add_user))
         // ----------------------------------------------------------- health
         .route("/api/health", get(health))
         .with_state(state)
@@ -146,28 +147,29 @@ async fn search(
     Ok(Json(state.hub.search(&query.q, query.limit).await?))
 }
 
+/// The asking device's user's likes, nobody else's.
 async fn favourite_tracks(
     State(state): State<AppState>,
-    _: PlayAuth,
+    PlayAuth(device): PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteTrack>> {
-    Ok(Json(state.hub.favourite_tracks(query.cap).await?))
+    Ok(Json(state.hub.favourite_tracks(device.user_id, query.cap).await?))
 }
 
 async fn favourite_albums(
     State(state): State<AppState>,
-    _: PlayAuth,
+    PlayAuth(device): PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteAlbum>> {
-    Ok(Json(state.hub.favourite_albums(query.cap).await?))
+    Ok(Json(state.hub.favourite_albums(device.user_id, query.cap).await?))
 }
 
 async fn favourite_artists(
     State(state): State<AppState>,
-    _: PlayAuth,
+    PlayAuth(device): PlayAuth,
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteArtist>> {
-    Ok(Json(state.hub.favourite_artists(query.cap).await?))
+    Ok(Json(state.hub.favourite_artists(device.user_id, query.cap).await?))
 }
 
 async fn playlists(
@@ -406,9 +408,8 @@ async fn unblock(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Following an artist or liking a track/album is `play`, not `pipeline`: it
-/// changes the Qobuz account's own favourites, not this app's catalogue. The
-/// favourites are the family's; who liked what is written down beside them.
+/// Liking is `play`: it is the asking user's own list, kept here, and never
+/// reaches the Qobuz account.
 async fn favorite_add(
     State(state): State<AppState>,
     PlayAuth(device): PlayAuth,
@@ -420,11 +421,19 @@ async fn favorite_add(
 
 async fn favorite_remove(
     State(state): State<AppState>,
-    _: PlayAuth,
+    PlayAuth(device): PlayAuth,
     Path((kind, id)): Path<(String, String)>,
 ) -> Reply<serde_json::Value> {
-    state.hub.favorite_remove(&kind, &id).await?;
+    state.hub.favorite_remove(&kind, &id, device.user_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Copy the Qobuz account's favourites into the asking user's likes.
+async fn import_favourites(
+    State(state): State<AppState>,
+    PlayAuth(device): PlayAuth,
+) -> Reply<Imported> {
+    Ok(Json(state.hub.import_favourites(device.user_id).await?))
 }
 
 // ------------------------------------------------------------------- counts
@@ -664,8 +673,8 @@ async fn devices(State(state): State<AppState>, PlayAuth(device): PlayAuth) -> R
 struct PairBody {
     name: String,
     scope: Scope,
-    /// Whose device it is; someone new joins by being named here. The
-    /// pairing device's own user when absent.
+    /// Whose device it is, by name. The pairing device's own user when
+    /// absent.
     #[serde(default)]
     user: Option<String>,
 }
@@ -694,6 +703,21 @@ async fn revoke_device(
 
 async fn users(State(state): State<AppState>, _: PipelineAuth) -> Reply<Vec<User>> {
     Ok(Json(state.auth.users()?))
+}
+
+#[derive(Deserialize)]
+struct UserBody {
+    name: String,
+}
+
+/// Someone new in the family, for `pipeline`: the same trust as pairing them
+/// a device, which is the next thing to do.
+async fn add_user(
+    State(state): State<AppState>,
+    _: PipelineAuth,
+    Json(body): Json<UserBody>,
+) -> Reply<User> {
+    Ok(Json(state.auth.add_user(&body.name)?))
 }
 
 // ------------------------------------------------------------------- health

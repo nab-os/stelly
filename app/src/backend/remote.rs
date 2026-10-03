@@ -7,7 +7,7 @@
 use crate::api::{
     ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest,
     PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage,
-    Step, Target, TrackMeta, TracksRequest, User,
+    Step, Target, TrackMeta, TracksRequest, User, Imported,
 };
 use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -278,6 +278,11 @@ impl Remote {
         Ok(())
     }
 
+    /// Copy the Qobuz account's favourites into this user's likes.
+    pub async fn import_favourites(&self) -> Result<Imported> {
+        self.post("/api/favourites/import", &serde_json::json!({})).await
+    }
+
     pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
@@ -508,7 +513,7 @@ impl Remote {
         self.get("/api/devices").await
     }
 
-    /// For `user`, who is added if new, or for this device's own user.
+    /// For `user`, by name, or for this device's own user.
     pub async fn pair_device(&self, name: &str, scope: Scope, user: Option<&str>) -> Result<PairingGrant> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
@@ -527,6 +532,10 @@ impl Remote {
 
     pub async fn users(&self) -> Result<Vec<User>> {
         self.get("/api/users").await
+    }
+
+    pub async fn add_user(&self, name: &str) -> Result<User> {
+        self.post("/api/users", &serde_json::json!({ "name": name })).await
     }
 
     pub async fn revoke_device(&self, device_id: i64) -> Result<()> {

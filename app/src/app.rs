@@ -6,7 +6,7 @@
 use crate::api::{Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
 use crate::backend::{self, backend};
 use crate::ui::{
-    icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel, Generator,
+    icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
     Library, LocalIds, MainScreen, MapView, Me, PathPill, Pipeline, Player, PlayerBar, QueueView,
     ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, View,
     Weights,
@@ -243,6 +243,7 @@ fn Shell() -> Element {
     use_context_provider(|| Weights(generator.weights));
     let crawler = use_context_provider(Crawler::new);
     let pipeline = use_context_provider(Pipeline::new);
+    use_context_provider(|| Family(Signal::new(Vec::new())));
 
     // What is known of the space: what the disk had at once, then whatever
     // the server says behind the window. Nothing waits on the network to open.

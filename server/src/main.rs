@@ -5,13 +5,14 @@
 //! loaded space every client navigates. Clients ask for all of it over HTTP.
 //!
 //! Sized for a family: a few people on the one Qobuz account, each with their
-//! own devices and play session, sharing the favourites and the space.
+//! own devices, play session and likes, sharing the space.
 //!
 //! ```sh
-//! stelly-server login                                              # Qobuz, once
-//! stelly-server pair --name desktop --scope pipeline --user sasha  # first device
-//! stelly-server pair --name phone --user sam                       # and Sam's
-//! stelly-server serve                                              # 127.0.0.1:7700
+//! stelly-server login                                    # Qobuz, once
+//! stelly-server pair --name desktop --scope pipeline     # first device
+//! stelly-server user add sam                             # someone else
+//! stelly-server pair --name phone --user sam             # and their phone
+//! stelly-server serve                                    # 127.0.0.1:7700
 //! ```
 //!
 //! Plain HTTP, loopback by default. The token and the signed stream URLs are
@@ -131,10 +132,9 @@ impl IntoResponse for Failure {
 /// stelly-server: everything in Stelly but the screen.
 #[derive(FromArgs)]
 #[argh(
-    example = "{command_name} login\n{command_name} pair --name desktop --scope pipeline --user sasha\n{command_name} serve",
+    example = "{command_name} login\n{command_name} pair --name desktop --scope pipeline\n{command_name} serve",
     note = "Users and devices are stored in the same database as the catalogue. A token
-is shown once, at pairing, and only its hash is kept. Pairing for a name
-nobody has yet adds that person.
+is shown once, at pairing, and only its hash is kept.
 
 STELLY_DATA_DIR, STELLY_MODEL_DIR and STELLY_CACHE_DIR move the corpus,
 the model weights and the excerpt cache; STELLY_ENV_DIR, the .env holding
@@ -201,7 +201,7 @@ enum UserAction {
     Remove(UserRemove),
 }
 
-/// Add someone. Pairing a device for a new name does this too.
+/// Add someone, before pairing their first device.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "add")]
 struct UserAdd {
@@ -242,7 +242,7 @@ pub struct Pair {
     /// play or pipeline (default play)
     #[argh(option, from_str_fn(scope), default = "Scope::Play")]
     scope: Scope,
-    /// whose device it is, added if new (default: the only user there is)
+    /// whose device it is, see `user list` (default: the only user there is)
     #[argh(option)]
     user: Option<String>,
 }
