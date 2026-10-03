@@ -82,25 +82,30 @@ fn OfflineNotice() -> Element {
 /// and token are typed once and kept in the client's data directory.
 #[component]
 fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
-    let mut address = use_signal(|| {
-        crate::ServerConfig::load()
-            .map(|c| c.base)
-            .unwrap_or_else(|| "http://".into())
-    });
+    let mut address = use_signal(|| crate::ServerConfig::load().map(|c| c.base).unwrap_or_default());
     let mut token = use_signal(String::new);
-    let mut status = use_signal(|| error);
+    let mut reveal = use_signal(|| false);
+    let mut failure = use_signal(|| error);
     let mut busy = use_signal(|| false);
 
-    let connect = move |_| {
-        let base = address.peek().trim().trim_end_matches('/').to_string();
+    let mut connect = move || {
+        if *busy.peek() {
+            return;
+        }
+        let mut base = address.peek().trim().trim_end_matches('/').to_string();
         let secret = token.peek().trim().to_string();
         if base.is_empty() || secret.is_empty() {
-            status.set(Some("Both the address and the token are needed.".into()));
+            failure.set(Some("Both the address and the token are needed.".into()));
             return;
+        }
+        // Typed as `nas:7700` more often than not.
+        if !base.contains("://") {
+            base = format!("http://{base}");
+            address.set(base.clone());
         }
 
         busy.set(true);
-        status.set(Some("connecting…".into()));
+        failure.set(None);
 
         spawn(async move {
             let config = crate::ServerConfig {
@@ -111,7 +116,7 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
             // Save first, so the next launch starts from what was typed here
             // rather than the pairing it just failed to reach.
             if let Err(err) = config.save() {
-                status.set(Some(format!("could not save the pairing: {err:#}")));
+                failure.set(Some(format!("could not save the pairing: {err:#}")));
                 busy.set(false);
                 return;
             }
@@ -122,50 +127,80 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
             match backend().space_info().await {
                 Ok(_) => phase.set(Phase::Ready),
                 Err(err) => {
-                    status.set(Some(format!("{err:#}")));
+                    failure.set(Some(format!("{err:#}")));
                     busy.set(false);
                 }
             }
         });
     };
+    let on_enter = move |event: KeyboardEvent| {
+        if event.key() == Key::Enter {
+            connect();
+        }
+    };
 
     rsx! {
         div { class: "setup",
-            h1 { "Connect to your server" }
-            p { class: "muted",
-                "The space, the catalogue, playback and the pipeline live on a machine that \
-                 can host them, and this device asks it for everything. Pair one with "
-                code { "stelly-server pair --name phone --scope play" }
-                "."
-            }
-
-            label { "Server address" }
-            input {
-                class: "search",
-                placeholder: "http://nas.tailnet.ts.net:7700",
-                value: "{address}",
-                oninput: move |event| address.set(event.value()),
-            }
-
-            label { "Device token" }
-            input {
-                class: "search",
-                placeholder: "what `pair` printed",
-                value: "{token}",
-                oninput: move |event| token.set(event.value()),
-            }
-
-            div { class: "actions",
-                button {
-                    class: "primary",
-                    disabled: busy(),
-                    onclick: connect,
-                    if busy() { "connecting…" } else { "connect" }
+            div { class: "setup-card",
+                div { class: "setup-brand",
+                    div { class: "setup-mark", {icons::constellation()} }
+                    h1 { "Stelly" }
+                    p { class: "muted", "Connect this device to your server." }
                 }
-            }
 
-            if let Some(message) = status.read().clone() {
-                pre { class: "log", "{message}" }
+                div { class: "setup-field",
+                    label { r#for: "setup-address", "Server address" }
+                    input {
+                        id: "setup-address",
+                        class: "search",
+                        placeholder: "nas.tailnet.ts.net:7700",
+                        value: "{address}",
+                        autofocus: true,
+                        oninput: move |event| address.set(event.value()),
+                        onkeydown: on_enter,
+                    }
+                    span { class: "muted", "Where stelly-server listens." }
+                }
+
+                div { class: "setup-field",
+                    label { r#for: "setup-token", "Device token" }
+                    div { class: "secret",
+                        input {
+                            id: "setup-token",
+                            class: "search",
+                            r#type: if reveal() { "text" } else { "password" },
+                            placeholder: "paste the token",
+                            value: "{token}",
+                            oninput: move |event| token.set(event.value()),
+                            onkeydown: on_enter,
+                        }
+                        button {
+                            class: "reveal",
+                            onclick: move |_| reveal.set(!reveal()),
+                            if reveal() { "hide" } else { "show" }
+                        }
+                    }
+                }
+
+                if let Some(message) = failure.read().clone() {
+                    div { class: "setup-error", "{message}" }
+                }
+
+                button {
+                    class: "primary setup-connect",
+                    disabled: busy(),
+                    onclick: move |_| connect(),
+                    if busy() { "Connecting…" } else { "Connect" }
+                }
+
+                details { class: "setup-help",
+                    summary { "No token yet?" }
+                    p { class: "muted",
+                        "An admin device can pair this one from Settings, under People & devices. \
+                         Or, on the server:"
+                    }
+                    code { "stelly-server pair --name phone --scope play" }
+                }
             }
         }
     }
@@ -243,7 +278,7 @@ fn Shell() -> Element {
     use_context_provider(|| Weights(generator.weights));
     let crawler = use_context_provider(Crawler::new);
     let pipeline = use_context_provider(Pipeline::new);
-    use_context_provider(|| Family(Signal::new(Vec::new())));
+    use_context_provider(Family::new);
 
     // What is known of the space: what the disk had at once, then whatever
     // the server says behind the window. Nothing waits on the network to open.
@@ -417,7 +452,7 @@ fn Shell() -> Element {
         }
     });
     // A server older than users answers no `me`, and let any device hide.
-    let editable = use_memo(move || me.read().as_ref().is_none_or(|device| device.scope == Scope::Pipeline));
+    let editable = use_memo(move || me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin));
 
     use_context_provider(|| Blocklist {
         artists: blocked,

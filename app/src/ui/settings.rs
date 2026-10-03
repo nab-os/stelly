@@ -1,8 +1,9 @@
 //! Settings: one row per group, top to bottom, the server this device talks
-//! to, the version it runs, how it plays, which devices may talk to that server, who is hidden,
+//! to, the version it runs, how it plays, who uses it and from which devices, who is hidden,
 //! and the pipeline that builds the space, with its output last.
 
-use super::pipeline::{Devices, People, PipelineControls, PipelineLog};
+use super::family::FamilyRow;
+use super::pipeline::{PipelineControls, PipelineLog};
 use super::player::{quality_label, Player};
 use super::prefs;
 use super::release::ReleaseRow;
@@ -18,8 +19,7 @@ pub fn SettingsScreen() -> Element {
             ServerRow {}
             ReleaseRow {}
             PlaybackRow {}
-            People {}
-            Devices {}
+            FamilyRow {}
             HiddenArtists {}
             PipelineControls {}
             PipelineLog {}
@@ -171,7 +171,7 @@ fn HiddenArtists() -> Element {
             } else if hidden.is_empty() {
                 p { class: "muted", "Nobody." }
             } else if !*blocklist.editable.read() {
-                p { class: "muted", "Hidden from the whole family's space. Only a pipeline device can change this." }
+                p { class: "muted", "Hidden from the whole family's space. Only an admin device can change this." }
             }
             if open() {
                 ul { class: "list hidden-artists",
