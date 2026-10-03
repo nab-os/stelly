@@ -1,5 +1,5 @@
-//! The play session every paired device shares: one queue, one position, and
-//! which device the sound comes out of.
+//! The play session one person's devices share: one queue, one position, and
+//! which device the sound comes out of. The server keeps one per user.
 //!
 //! The server holds the real one and applies each device's `Op` to it. The
 //! app applies the same op to its own copy first, so a tap shows at once and

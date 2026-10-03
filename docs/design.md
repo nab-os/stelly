@@ -68,13 +68,14 @@ labels that are plain text in `pipeline/labels.rs`, and a permissive licence.
 
 ## One queue across devices
 
-Every paired device follows one play session: the queue, the position, and
-which device the sound comes out of. The server holds it in memory; a restart
-empties the queue.
+Each person's devices follow one play session: the queue, the position, and
+which device the sound comes out of. Everyone in the family has their own, and
+only sees their own devices to play on. The server holds them in memory; a
+restart empties the queues.
 
 The rules are `stelly_core::session`, which both sides run. A button applies its
 `Op` to the app's own copy at once and posts it; the server applies the same
-op to the real copy and pushes the result over SSE to every device. An op that
+op to the real copy and pushes the result over SSE to each of that person's devices. An op that
 names a row by index carries the queue version it was made against, and is
 refused when the queue has changed since, so a drag cannot move the wrong row.
 

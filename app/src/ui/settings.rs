@@ -78,9 +78,16 @@ fn ServerRow() -> Element {
         Err(err) => status.set(Some(format!("could not clear the pairing: {err:#}"))),
     };
 
+    let me = use_context::<super::Me>().0;
+
     rsx! {
         section { class: "panel setting",
             h2 { "Server" }
+            if let Some(device) = me.read().as_ref().filter(|device| !device.user.is_empty()) {
+                p { class: "muted",
+                    "This device is “{device.name}”, {device.user}’s, paired for {device.scope.as_str()}."
+                }
+            }
             div { class: "setting-fields",
                 input {
                     class: "search",
@@ -158,8 +165,12 @@ fn HiddenArtists() -> Element {
                     }
                 }
             }
-            if hidden.is_empty() {
+            if hidden.is_empty() && *blocklist.editable.read() {
                 p { class: "muted", "Nobody. Hide an artist from their page or any row's menu." }
+            } else if hidden.is_empty() {
+                p { class: "muted", "Nobody." }
+            } else if !*blocklist.editable.read() {
+                p { class: "muted", "Hidden from the whole family's space. Only a pipeline device can change this." }
             }
             if open() {
                 ul { class: "list hidden-artists",
@@ -169,10 +180,12 @@ fn HiddenArtists() -> Element {
                             if let Some(reason) = entry.reason.clone() {
                                 span { class: "muted", "{reason}" }
                             }
-                            button {
-                                class: "chip",
-                                onclick: move |_| blocklist.unblock.call(entry.artist_id),
-                                "unhide"
+                            if *blocklist.editable.read() {
+                                button {
+                                    class: "chip",
+                                    onclick: move |_| blocklist.unblock.call(entry.artist_id),
+                                    "unhide"
+                                }
                             }
                         }
                     }

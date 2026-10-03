@@ -353,6 +353,14 @@ pub(crate) struct Liked {
     pub(crate) tracks: std::collections::HashSet<i64>,
     pub(crate) albums: std::collections::HashSet<String>,
     pub(crate) artists: std::collections::HashSet<i64>,
+    /// Who in the family liked each, by "kind:id", where the server knows.
+    by: std::collections::HashMap<String, String>,
+}
+
+impl Liked {
+    pub(crate) fn by(&self, kind: &str, id: &str) -> Option<String> {
+        self.by.get(&format!("{kind}:{id}")).cloned()
+    }
 }
 
 impl Library {
@@ -426,22 +434,20 @@ impl Library {
                 backend().favourite_albums(LIST_CAP),
                 backend().favourite_artists(LIST_CAP),
             );
+            let (tracks, albums, artists) =
+                (tracks.unwrap_or_default(), albums.unwrap_or_default(), artists.unwrap_or_default());
+            let by = tracks
+                .iter()
+                .map(|t| (format!("track:{}", t.id), t.liked_by.clone()))
+                .chain(albums.iter().map(|a| (format!("album:{}", a.id), a.liked_by.clone())))
+                .chain(artists.iter().map(|a| (format!("artist:{}", a.id), a.liked_by.clone())))
+                .filter_map(|(key, name)| Some((key, name?)))
+                .collect();
             liked.set(Some(Liked {
-                tracks: tracks
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|t| t.id)
-                    .collect(),
-                albums: albums
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| a.id.clone())
-                    .collect(),
-                artists: artists
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| a.id)
-                    .collect(),
+                tracks: tracks.iter().map(|t| t.id).collect(),
+                albums: albums.iter().map(|a| a.id.clone()).collect(),
+                artists: artists.iter().map(|a| a.id).collect(),
+                by,
             }));
         });
     }
@@ -471,10 +477,20 @@ impl Library {
     /// before the cache has ever been loaded: there is no set to flip a
     /// member of yet, and by the time one is loaded it will ask Qobuz fresh
     /// rather than replay this.
-    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool) {
+    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool, by: Option<String>) {
         let mut signal = self.liked;
         let mut current = signal.write();
         let Some(current) = current.as_mut() else { return };
+        let key = format!("{kind}:{id}");
+        match by.filter(|_| liked) {
+            // The first liker keeps it, as on the server.
+            Some(name) => {
+                current.by.entry(key).or_insert(name);
+            }
+            None => {
+                current.by.remove(&key);
+            }
+        }
         match kind {
             "track" => {
                 if let Ok(track_id) = id.parse::<i64>() {

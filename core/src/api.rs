@@ -368,7 +368,8 @@ pub struct OrderRequest {
 // ----------------------------------------------------------------- the auth
 
 /// What a device is allowed to do. `Play` is every device; `Pipeline` is hours
-/// of CPU, the shared rate limit, and `block --purge`, which deletes rows.
+/// of CPU, the shared rate limit, the family's hidden artists, and
+/// `block --purge`, which deletes rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
