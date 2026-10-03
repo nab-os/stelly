@@ -1,8 +1,8 @@
 //! `stelly-server`: everything but the screen.
 //!
 //! Holds the Qobuz token, the shared rate limit, the database, the CLAP
-//! models and the whole pipeline, crawl, analyse, build-space, layout. Clients
-//! get a slim catalogue and the vectors, and ask for the rest over HTTP.
+//! models, the whole pipeline, crawl, analyse, build-space, layout, and the
+//! loaded space every client navigates. Clients ask for all of it over HTTP.
 //!
 //! ```sh
 //! stelly-server login                                  # Qobuz, once
@@ -15,7 +15,6 @@
 
 mod auth;
 mod cache;
-mod catalog;
 mod cli;
 mod crawl;
 mod db;
@@ -25,7 +24,7 @@ mod pipeline;
 mod playback;
 mod qobuz;
 mod routes;
-// Shared with the client, which reads the slim copy through the same tables.
+mod space;
 use stelly_core::schema;
 mod stages;
 mod text;
@@ -38,7 +37,6 @@ use axum::response::{IntoResponse, Response};
 use hub::Hub;
 use pipeline::Paths;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use stelly_core::api::Scope;
 
@@ -52,8 +50,6 @@ pub struct AppState {
     pub auth: Arc<AuthStore>,
     /// The queue and output every device shares.
     pub playback: Arc<playback::Playback>,
-    pub data_dir: PathBuf,
-    pub db_path: PathBuf,
 }
 
 // ------------------------------------------------------------------ errors
@@ -89,6 +85,13 @@ impl Failure {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
         }
     }
@@ -145,7 +148,6 @@ pub enum Command {
     Pair(Pair),
     Devices(Devices),
     Revoke(Revoke),
-    BuildCatalog(BuildCatalog),
 
     Login(cli::Login),
     RefreshCredentials(cli::RefreshCredentials),
@@ -204,11 +206,6 @@ pub struct Revoke {
     #[argh(positional)]
     id: i64,
 }
-
-/// Rebuild the slim catalogue clients sync.
-#[derive(FromArgs)]
-#[argh(subcommand, name = "build-catalog")]
-pub struct BuildCatalog {}
 
 /// Spellings argh would otherwise refuse. Only the subcommand is rewritten,
 /// never an argument that happens to match.
@@ -285,24 +282,11 @@ fn main() -> Result<()> {
             println!("Revoked device {}.", args.id);
             Ok(())
         }
-        Command::BuildCatalog(_) => {
-            store()?;
-            let target = data_dir.join("catalog.db");
-            let bytes = catalog::build(&db_path, &target)?;
-            println!(
-                "Wrote {} ({:.1} MB) from {}.",
-                target.display(),
-                bytes as f64 / 1_048_576.0,
-                db_path.display()
-            );
-            Ok(())
-        }
         pipeline => cli::run(pipeline, &paths),
     }
 }
 
 fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
-    let (data_dir, db_path) = (paths.data_dir.clone(), paths.db_path.clone());
     let address: SocketAddr = bind
         .parse()
         .with_context(|| format!("“{bind}” is not an address:port"))?;
@@ -329,16 +313,18 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
         hub,
         auth: Arc::new(store),
         playback: playback::Playback::new(),
-        data_dir: data_dir.clone(),
-        db_path: db_path.clone(),
     };
 
     let runtime = tokio::runtime::Runtime::new()?;
     let served = runtime.block_on(async move {
-        // The slim catalogue has to follow the space: a client syncing new
-        // vectors against an old catalogue draws the right points with the
-        // wrong labels.
-        tokio::spawn(rebuild_catalog(db_path, data_dir));
+        // Behind the listener rather than before it: until it lands the
+        // space answers as not built, and everything else already works.
+        let space = state.hub.space().clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) = space.reload() {
+                eprintln!("no space loaded yet: {err:#}");
+            }
+        });
 
         let listener = tokio::net::TcpListener::bind(address).await?;
         println!("stelly-server listening on http://{address}");
@@ -353,23 +339,6 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     // runs on one of those until it finishes.
     runtime.shutdown_background();
     served
-}
-
-/// Rebuild `catalog.db` once at startup: a catalogue left by an older server
-/// may not match the schema clients now read. After that the hub rebuilds it
-/// with every stage that rewrites the space.
-async fn rebuild_catalog(db_path: PathBuf, data_dir: PathBuf) {
-    let target = data_dir.join("catalog.db");
-    let shown = target.clone();
-    match tokio::task::spawn_blocking(move || catalog::build(&db_path, &target)).await {
-        Ok(Ok(bytes)) => println!(
-            "rebuilt {} ({:.1} MB)",
-            shown.display(),
-            bytes as f64 / 1_048_576.0
-        ),
-        Ok(Err(err)) => eprintln!("could not rebuild the slim catalogue: {err:#}"),
-        Err(err) => eprintln!("could not rebuild the slim catalogue: {err}"),
-    }
 }
 
 async fn shutdown() {

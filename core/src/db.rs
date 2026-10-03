@@ -1,32 +1,12 @@
-//! Track metadata, read from the slim catalogue the server hands out. The
-//! schema lives in `schema.sql` at the repo root, and its typed mirror in
-//! `schema`; only the server writes.
+//! Track metadata, read from the corpus when the space is loaded. The schema
+//! lives in `schema.sql` at the repo root, and its typed mirror in `schema`.
 
 use crate::schema::{albums, artists, blocked_artists, features, layout, tracks};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
-use serde::Serialize;
+pub use crate::api::TrackMeta;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct TrackMeta {
-    pub track_id: i64,
-    pub title: String,
-    pub artist: String,
-    pub album: String,
-    pub genre: String,
-    pub artist_id: i64,
-    pub album_id: String,
-    pub bpm: Option<f32>,
-    pub seed_distance: i32,
-    /// Names the recording rather than the release; see
-    /// `qobuz::RemoteTrack::identity`.
-    pub isrc: Option<String>,
-    /// UMAP coordinates for the map, if the layout step has been run.
-    pub x: Option<f32>,
-    pub y: Option<f32>,
-}
 
 pub struct Catalog {
     pub tracks: Vec<TrackMeta>,

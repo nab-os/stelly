@@ -29,8 +29,8 @@ pub fn SettingsScreen() -> Element {
 /// Where the server address and token can be changed after the first run.
 ///
 /// Saves and asks for a restart rather than reconnecting in place: the
-/// backend could be swapped, but the space the engine has mapped, the loaded
-/// catalogue and every screen's state all came from the old server.
+/// backend could be swapped, but the cached space, the open pages and every
+/// screen's state all came from the old server.
 #[component]
 fn ServerRow() -> Element {
     let stored = use_signal(ServerConfig::load);

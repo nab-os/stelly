@@ -1,18 +1,18 @@
 //! Core of the Stelly client.
 //!
-//! Holds a synced copy of what the server builds, `space.bin`, `space.json`,
-//! the slim `catalog.db`, and answers navigation queries in process. Every
-//! thing else, Qobuz included, goes through the server: see `backend`.
+//! Holds nothing of the space: navigation, the map's points and the search
+//! over the space are all asked of the server, like everything else, see
+//! `backend`. What it keeps on disk is the pairing and a small cache, so the
+//! window has something to show before the network answers.
 //!
 //! Shared by the desktop and Android apps. What the server needs too lives in
 //! `stelly_core`, re-exported here under the same names.
 
 pub mod backend;
-pub mod map;
-pub mod paths;
+pub mod cache;
 pub mod update;
 
-pub use stelly_core::{api, db, logbuffer, qobuz, schema, session, space};
+pub use stelly_core::{api, logbuffer, qobuz, session};
 
 /// The window, and everything in it. Shared by every platform that has one.
 #[cfg(feature = "gui")]
@@ -33,100 +33,8 @@ pub(crate) use dioxus::desktop as platform;
 pub(crate) use dioxus::mobile as platform;
 
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-
-/// The loaded space, for the life of the process.
-///
-/// A global because every panel needs it and it is one thing. Not behind the
-/// backend split: neighbours, paths, drift and the sliders are answered here
-/// whether or not there is a server.
-static ENGINE: OnceLock<Mutex<Engine>> = OnceLock::new();
-
-pub fn init_engine(data_dir: &Path, db_path: &Path) -> Result<()> {
-    let loaded = Engine::load(data_dir, db_path)?;
-    let _ = ENGINE.set(Mutex::new(loaded));
-    Ok(())
-}
-
-/// Swap in a freshly built space, after `build-space` or `layout`, or, in
-/// remote mode, after a sync brought a newer one down.
-pub fn reload_engine(data_dir: &Path, db_path: &Path) -> Result<()> {
-    let loaded = Engine::load(data_dir, db_path)?;
-    *engine().lock().unwrap() = loaded;
-    Ok(())
-}
-
-pub fn engine() -> &'static Mutex<Engine> {
-    ENGINE.get().expect("init_engine runs before launch")
-}
-
-/// Whether a space has been loaded yet. The mobile client starts before it has
-/// synced one, so it has to be able to ask.
-pub fn engine_ready() -> bool {
-    ENGINE.get().is_some()
-}
-
-/// Everything the navigation side needs, loaded once at startup.
-pub struct Engine {
-    pub data_dir: PathBuf,
-    pub space: space::Space,
-    pub navigator: paths::Navigator,
-}
-
-impl Engine {
-    pub fn load(data_dir: &Path, db_path: &Path) -> Result<Self> {
-        let space = space::Space::load(data_dir)?;
-        let catalog = db::Catalog::load(db_path, &space.manifest.track_ids)?;
-        let weights = space.default_weights();
-        let navigator = paths::Navigator::new(&space, &weights, catalog);
-
-        Ok(Self {
-            data_dir: data_dir.to_path_buf(),
-            space,
-            navigator,
-        })
-    }
-
-    /// Whether the corpus carries the raw CLAP embeddings text steering
-    /// anchors against. Only half the question, the backend answers whether
-    /// the text tower is available.
-    pub fn has_audio_embeddings(&self) -> bool {
-        self.navigator.catalog.clap.is_some()
-    }
-
-    /// Rebuild the weighted view after a slider move. Milliseconds, no I/O.
-    pub fn set_weights(&mut self, weights: &HashMap<String, f32>) -> Result<()> {
-        let catalog = db::Catalog {
-            tracks: std::mem::take(&mut self.navigator.catalog.tracks),
-            clap: self.navigator.catalog.clap.take(),
-            clap_dims: self.navigator.catalog.clap_dims,
-            blocked_artists: std::mem::take(&mut self.navigator.catalog.blocked_artists),
-        };
-        self.navigator = paths::Navigator::new(&self.space, weights, catalog);
-        Ok(())
-    }
-
-    /// Apply a block list the backend has already settled. Takes ids rather
-    /// than reading the database, because remotely there is none here.
-    /// Blocking only filters, so nothing needs rebuilding.
-    pub fn set_blocked(&mut self, blocked: HashSet<i64>) {
-        self.navigator.catalog.blocked_artists = blocked;
-        // The kNN graph was built over the old visibility, so drop it.
-        self.navigator.invalidate_graph();
-    }
-
-    /// Re-read the block list from a database this process can see.
-    pub fn refresh_blocked(&mut self, db_path: &Path) -> Result<()> {
-        self.set_blocked(db::blocked_artist_ids(db_path)?);
-        Ok(())
-    }
-
-    pub fn blocked_count(&self) -> usize {
-        self.navigator.catalog.blocked_artists.len()
-    }
-}
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 // ------------------------------------------------------------------ paths
 
@@ -140,10 +48,10 @@ pub fn set_data_dir(dir: PathBuf) {
     let _ = DATA_DIR_OVERRIDE.set(dir);
 }
 
-/// Where the client keeps its synced copy of the space.
+/// Where the client keeps its pairing and its cache.
 ///
-/// Never the server's `STELLY_DATA_DIR`: with both on one machine, a sync
-/// would otherwise write over the corpus it was syncing from.
+/// Never the server's `STELLY_DATA_DIR`: with both on one machine, the two
+/// would otherwise share files neither expects the other to touch.
 pub fn client_data_dir() -> PathBuf {
     if let Some(dir) = DATA_DIR_OVERRIDE.get() {
         return dir.clone();
@@ -159,7 +67,7 @@ pub fn client_data_dir() -> PathBuf {
 
     // Windows sets neither XDG_DATA_HOME nor HOME, so the fallback below would
     // land in whatever directory the app was started from. Local rather than
-    // roaming: the synced space is too big to follow a profile around.
+    // roaming: a cache has no business following a profile around.
     #[cfg(windows)]
     if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(dir).join("stelly");
@@ -207,7 +115,7 @@ fn android_files_dir() -> Option<PathBuf> {
 
 // ----------------------------------------------------------------- wiring
 
-/// The server this client talks to, and where it keeps its synced copy.
+/// The server this client talks to.
 ///
 /// Two environment variables on desktop:
 ///
@@ -220,7 +128,6 @@ fn android_files_dir() -> Option<PathBuf> {
 pub struct Wiring {
     base: String,
     token: String,
-    data_dir: PathBuf,
 }
 
 /// A server address and a device token, as the setup screen stores them.
@@ -282,25 +189,11 @@ impl Wiring {
     }
 
     pub fn remote(base: String, token: String) -> Self {
-        Wiring {
-            base,
-            token,
-            data_dir: client_data_dir(),
-        }
-    }
-
-    /// Where the engine should load the space from.
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
-    }
-
-    /// The slim catalogue sync brings down, not the database the server keeps.
-    pub fn db_path(&self) -> PathBuf {
-        self.data_dir.join("catalog.db")
+        Wiring { base, token }
     }
 
     pub fn into_backend(self) -> backend::Backend {
-        backend::Backend::new(self.base, self.token, self.data_dir)
+        backend::Backend::new(self.base, self.token)
     }
 }
 

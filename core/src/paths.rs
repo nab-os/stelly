@@ -1,8 +1,8 @@
 //! Navigation: neighbours, paths, drift, radio.
 
-use crate::db::{Catalog, TrackMeta};
+pub use crate::api::Step;
+use crate::db::Catalog;
 use crate::space::{argsort_desc, Space, WeightedSpace};
-use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -24,13 +24,6 @@ impl Default for Constraints {
             exclude: HashSet::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Step {
-    #[serde(flatten)]
-    pub track: TrackMeta,
-    pub similarity: Option<f32>,
 }
 
 pub struct Navigator {
@@ -665,6 +658,7 @@ impl PartialOrd for Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::TrackMeta;
 
     /// Points on a unit circle, one per track id. Cosine distance between two
     /// of them grows with the angle between them, so the shortest route

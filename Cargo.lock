@@ -5861,7 +5861,6 @@ dependencies = [
  "bytemuck",
  "diesel",
  "libsqlite3-sys",
- "md-5",
  "memmap2",
  "serde",
  "serde_json",

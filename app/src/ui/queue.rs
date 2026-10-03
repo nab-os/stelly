@@ -8,7 +8,8 @@
 use super::menu::{open_menu, ContextMenu, MenuTarget};
 use super::player::{clear_queue, move_to, play_at, remove_at, set_upcoming, Player};
 use super::{album_link, artist_link, icons, Cover, Library};
-use crate::engine;
+use crate::api::OrderRequest;
+use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
 use dioxus::prelude::*;
 
@@ -19,31 +20,50 @@ use dioxus::prelude::*;
 /// the queue, not its past. Tracks the space has never analysed keep their
 /// order among themselves and follow the sorted ones, since there is no
 /// distance by which to place them.
-fn sort_queue(mut player: Player) {
+fn sort_queue(player: Player) {
+    let weights = try_consume_context::<super::Weights>()
+        .map(|weights| weights.0.peek().clone())
+        .unwrap_or_default();
+    spawn(async move {
+        let mut player = player;
+        if let Err(err) = sort_upcoming(player, weights).await {
+            player.status.set(Some(format!("could not sort the queue: {err:#}")));
+        }
+    });
+}
+
+async fn sort_upcoming(mut player: Player, weights: std::collections::HashMap<String, f32>) -> anyhow::Result<()> {
     let queue = player.queue.peek().clone();
     if queue.is_empty() {
-        return;
+        return Ok(());
     }
 
     let index = (*player.index.peek()).min(queue.len() - 1);
     let upcoming = &queue[index + 1..];
     if upcoming.len() < 2 {
-        return;
+        return Ok(());
     }
 
     let ids: Vec<i64> = upcoming.iter().map(|track| track.id).collect();
-    let ordered = engine()
-        .lock()
-        .unwrap()
-        .navigator
-        .shortest_path_order(&ids, Some(queue[index].id));
+    let request = OrderRequest {
+        ids,
+        from: Some(queue[index].id),
+        weights,
+    };
+    let ordered = backend().order(&request).await?;
 
     if ordered.is_empty() {
         player.status.set(Some(
             "none of the queued tracks have been analysed, so there is no distance to sort by"
                 .into(),
         ));
-        return;
+        return Ok(());
+    }
+
+    // The queue moved while the server was thinking: sorting the old one
+    // would undo whatever was just done to it.
+    if *player.queue.peek() != queue || (*player.index.peek()).min(queue.len() - 1) != index {
+        return Ok(());
     }
 
     // Consume by id rather than index: `ordered` drops what the space does not
@@ -65,6 +85,7 @@ fn sort_queue(mut player: Player) {
         0 => "queue sorted by distance".into(),
         n => format!("queue sorted; {n} not in the space, left at the end"),
     }));
+    Ok(())
 }
 
 #[component]
