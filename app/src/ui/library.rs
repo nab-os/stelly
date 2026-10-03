@@ -491,18 +491,6 @@ impl Library {
         }
     }
 
-    /// After an import: ask for the likes again, and redraw them if they are
-    /// what is on screen.
-    pub(crate) fn likes_changed(self) {
-        let mut liked = self.liked;
-        liked.set(None);
-        self.ensure_liked_loaded();
-        let view = self.view.peek().clone();
-        if matches!(view, View::Favourites { .. }) {
-            self.show(view);
-        }
-    }
-
     /// Navigate, remembering where we came from.
     pub(crate) fn go(mut self, target: View) {
         leaving("go", 0.0);
@@ -1292,7 +1280,7 @@ fn BrowseScreen() -> Element {
                 if empty_search {
                     p { class: "muted", "Type to search." }
                 } else if nothing_visible && matches!(view, View::Favourites { scope: Scope::Everything }) {
-                    p { class: "muted", "No likes yet. Heart anything, or import the Qobuz favourites from settings." }
+                    p { class: "muted", "No likes yet. Heart anything to keep it here." }
                 } else if nothing_visible {
                     p { class: "muted", "nothing here" }
                 }

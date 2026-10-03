@@ -22,13 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use stelly_core::api::{
-    BlockedArtist, Corpus, CrawlStatus, Imported, LogSlice, PipelineStatus, Stage, Target, FULL_RUN,
+    BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN,
 };
 use stelly_core::logbuffer::LogBuffer;
-
-/// More than any account's favourites; Qobuz pages at 100, so this is the
-/// ceiling on the import's requests too.
-const IMPORT_CAP: usize = 10_000;
 
 pub struct Hub {
     paths: Paths,
@@ -291,40 +287,11 @@ impl Hub {
             }
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };
-        likes::record(&self.db_path, user_id, kind, id, &item, likes::now())?;
-        Ok(())
+        likes::record(&self.db_path, user_id, kind, id, &item, likes::now())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
         likes::forget(&self.db_path, user_id, kind, id)
-    }
-
-    /// Copy the Qobuz account's favourites into one person's likes, keeping
-    /// when each was favourited. Run again, it only adds what is new there;
-    /// nothing is ever written back.
-    pub async fn import_favourites(&self, user_id: i64) -> Result<Imported> {
-        let mut imported = Imported::default();
-        for (plural, kind) in [("tracks", "track"), ("albums", "album"), ("artists", "artist")] {
-            let items = self.session().await?.favorites_raw(plural, IMPORT_CAP).await?;
-            for item in items {
-                let Some(id) = item.get("id").and_then(|id| match id {
-                    serde_json::Value::Number(n) => Some(n.to_string()),
-                    serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
-                    _ => None,
-                }) else {
-                    continue;
-                };
-                let liked_at = item.get("favorited_at").and_then(|at| at.as_i64()).unwrap_or_else(likes::now);
-                if likes::record(&self.db_path, user_id, kind, &id, &item, liked_at)? {
-                    match kind {
-                        "track" => imported.tracks += 1,
-                        "album" => imported.albums += 1,
-                        _ => imported.artists += 1,
-                    }
-                }
-            }
-        }
-        Ok(imported)
     }
 
     // --------------------------------------------------------- text steering

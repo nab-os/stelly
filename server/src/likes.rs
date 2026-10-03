@@ -1,8 +1,7 @@
 //! Likes: each person's own, kept here and nowhere else.
 //!
-//! Qobuz is never told. The account's favourites are read once, when someone
-//! asks to import them, and copied into that person's likes; after that the
-//! two drift apart freely. Nobody sees anyone else's likes. What they are
+//! Qobuz is never told, and the account's own favourites are not read: the
+//! two are separate lists. Nobody sees anyone else's likes. What they are
 //! shared into is the crawl, which seeds from the whole family's.
 //!
 //! Each like keeps the Qobuz object as it was fetched, so listing them needs
@@ -47,9 +46,9 @@ pub fn now() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// Whether it was new. Liking twice keeps the first time.
-pub fn record(db_path: &Path, user_id: i64, kind: &str, ref_id: &str, item: &Value, liked_at: i64) -> Result<bool> {
-    let added = diesel::insert_or_ignore_into(likes::table)
+/// Liking twice keeps the first time.
+pub fn record(db_path: &Path, user_id: i64, kind: &str, ref_id: &str, item: &Value, liked_at: i64) -> Result<()> {
+    diesel::insert_or_ignore_into(likes::table)
         .values((
             likes::user_id.eq(user_id),
             likes::kind.eq(kind),
@@ -58,7 +57,7 @@ pub fn record(db_path: &Path, user_id: i64, kind: &str, ref_id: &str, item: &Val
             likes::liked_at.eq(liked_at),
         ))
         .execute(&mut open(db_path)?)?;
-    Ok(added > 0)
+    Ok(())
 }
 
 pub fn forget(db_path: &Path, user_id: i64, kind: &str, ref_id: &str) -> Result<()> {
@@ -118,8 +117,8 @@ mod tests {
 
         let one = json!({"id": 1, "title": "one"});
         let two = json!({"id": 2, "title": "two"});
-        assert!(record(&db_path, sasha.id, "track", "1", &one, 10).unwrap());
-        assert!(!record(&db_path, sasha.id, "track", "1", &one, 20).unwrap());
+        record(&db_path, sasha.id, "track", "1", &one, 10).unwrap();
+        record(&db_path, sasha.id, "track", "1", &one, 20).unwrap();
         record(&db_path, sasha.id, "track", "2", &two, 30).unwrap();
         record(&db_path, sam.id, "track", "1", &one, 40).unwrap();
         record(&db_path, sam.id, "album", "a", &json!({"id": "a"}), 50).unwrap();
