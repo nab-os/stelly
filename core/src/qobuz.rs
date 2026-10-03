@@ -55,6 +55,10 @@ pub struct RemoteTrack {
     /// listing has one; everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
+    /// Which of the family liked it, when it was liked through Stelly. Filled
+    /// in by the server, Qobuz has no idea.
+    #[serde(default)]
+    pub liked_by: Option<String>,
 }
 
 impl RemoteTrack {
@@ -99,6 +103,10 @@ pub struct RemoteAlbum {
     /// listing has one; everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
+    /// Which of the family liked it, when it was liked through Stelly. Filled
+    /// in by the server, Qobuz has no idea.
+    #[serde(default)]
+    pub liked_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -112,6 +120,10 @@ pub struct RemoteArtist {
     /// listing has one; everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
+    /// Which of the family liked it, when it was liked through Stelly. Filled
+    /// in by the server, Qobuz has no idea.
+    #[serde(default)]
+    pub liked_by: Option<String>,
     /// Qobuz's biography, as plain text. Only `artist/get` sends one, so only
     /// the artist page ever has it.
     #[serde(default)]
@@ -282,6 +294,7 @@ impl RemoteTrack {
             // comment on `RemoteTrack`.
             performers: text(value, "performers"),
             liked_at: as_i64(value, "favorited_at"),
+            liked_by: None,
         })
     }
 
@@ -322,6 +335,7 @@ impl RemoteAlbum {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             liked_at: as_i64(value, "favorited_at"),
+            liked_by: None,
         })
     }
 
@@ -343,6 +357,7 @@ impl RemoteArtist {
             albums_count: as_i64(value, "albums_count"),
             image: image(value),
             liked_at: as_i64(value, "favorited_at"),
+            liked_by: None,
             biography: value
                 .get("biography")
                 .and_then(|bio| text(bio, "content"))

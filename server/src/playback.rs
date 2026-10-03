@@ -1,8 +1,10 @@
-//! The shared play session: one queue and one output for every paired device.
+//! The play sessions: one queue and one output per member of the family,
+//! shared by all of their devices.
 //!
 //! The rules live in `stelly_core::session`, which the app runs too. This only
-//! holds the one real copy, knows which devices are listening, and pushes
-//! every change to them.
+//! holds the real copies, knows which devices are listening to each, and
+//! pushes every change to them. Someone else's devices are not in your output
+//! picker, so nobody takes over the living room from another queue.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,6 +17,22 @@ use stelly_core::session::{Clocked, Command, Output, Session, Stale};
 /// Long enough to ride out a phone switching networks, short enough that
 /// another device can pick up the sound without a trip to the picker.
 const GRACE: Duration = Duration::from_secs(10);
+
+/// Everyone's session, each made the first time its user asks for it. Held
+/// for as long as the server runs, which for a family is a handful.
+#[derive(Default)]
+pub struct Sessions(Mutex<HashMap<i64, Arc<Playback>>>);
+
+impl Sessions {
+    pub fn of(&self, user_id: i64) -> Arc<Playback> {
+        self.0
+            .lock()
+            .unwrap()
+            .entry(user_id)
+            .or_insert_with(Playback::new)
+            .clone()
+    }
+}
 
 pub struct Playback {
     inner: Mutex<Inner>,

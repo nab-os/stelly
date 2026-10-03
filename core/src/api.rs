@@ -408,6 +408,20 @@ pub struct Device {
     pub scope: Scope,
     pub created_at: String,
     pub last_seen: Option<String>,
+    /// Whose device it is. Absent from servers older than users.
+    #[serde(default)]
+    pub user_id: i64,
+    #[serde(default)]
+    pub user: String,
+}
+
+/// One member of the family. Each has their own devices and play session;
+/// the Qobuz account, its favourites and the space are everyone's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
 }
 
 /// The one time a token is ever transmitted.
@@ -420,7 +434,7 @@ pub struct PairingGrant {
 // -------------------------------------------------------------- the errors
 
 /// A failure, in the shape the client can turn back into an `anyhow::Error`.
-/// The server sends the message it would have logged: single-user, private
+/// The server sends the message it would have logged: a family on a private
 /// network, and a real error beats a sanitised 500.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiError {
