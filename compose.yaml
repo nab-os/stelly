@@ -2,7 +2,7 @@
 #
 #   cp .env.example .env                                  # Qobuz credentials
 #   docker compose pull
-#   docker compose run --rm server pair --name desktop --scope pipeline
+#   docker compose run --rm server pair --name desktop --scope admin
 #   docker compose up -d
 #
 # Pairing prints a token once. Point a client at it with:
