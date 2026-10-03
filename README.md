@@ -239,7 +239,8 @@ refuses to act rather than guessing.
 
 Two scopes, both authenticated: `play` is browsing, navigating and minting a stream
 URL, and **Add to space**, which is bounded; `admin` is crawling and
-analysing the whole backlog, hiding artists, and pairing devices and adding people. Each device gets its own token, stored
+analysing the whole backlog, hiding artists, and pairing devices and adding people. A
+`play` device can still pair more `play` devices for its own person, and revoke them. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
 
 A person's devices share one queue. The speaker button in the player bar lists

@@ -196,7 +196,7 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
                 details { class: "setup-help",
                     summary { "No token yet?" }
                     p { class: "muted",
-                        "An admin device can pair this one from Settings, under People & devices. \
+                        "Another of your devices, or an admin one, can pair this one from Settings, under Devices. \
                          Or, on the server:"
                     }
                     code { "stelly-server pair --name phone --scope play" }

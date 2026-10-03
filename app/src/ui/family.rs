@@ -3,8 +3,9 @@
 //! "whose" to pick, and the token it prints is shown in that group, once.
 //!
 //! An `admin` device sees everyone and can add people and pair devices. A
-//! `play` one sees its own person's devices and can revoke them, a lost phone
-//! should not need whoever has the admin device to hand.
+//! `play` one sees its own person's devices, can pair more `play` ones and
+//! revoke them: a new or lost phone should not need whoever has the admin
+//! device to hand.
 
 use crate::api::{Device, Scope, User};
 use crate::backend::backend;
@@ -237,7 +238,7 @@ fn PersonGroup(
                     span { class: "muted", "{count}" }
                 }
                 span { class: "spacer" }
-                if admin {
+                if admin || you {
                     button {
                         class: if open { "chip active" } else { "chip" },
                         onclick: move |_| {
@@ -250,7 +251,7 @@ fn PersonGroup(
             }
 
             if open {
-                PairForm { person: name.clone(), pairing, granted, status }
+                PairForm { person: name.clone(), admin, pairing, granted, status }
             }
 
             if let Some(grant) = token {
@@ -323,6 +324,7 @@ fn Avatar(name: String) -> Element {
 #[component]
 fn PairForm(
     person: String,
+    admin: bool,
     pairing: Signal<Option<String>>,
     granted: Signal<Option<Granted>>,
     status: Signal<Option<String>>,
@@ -362,7 +364,7 @@ fn PairForm(
     let mut submit = pair.clone();
 
     let hint = match scope() {
-        Scope::Play => "Browse, play and like. Can revoke this person's own devices.",
+        Scope::Play => "Browse, play and like. Can pair and revoke this person's own devices.",
         Scope::Admin => "Everything play can, plus the pipeline, hidden artists, people and pairing.",
     };
 
@@ -382,15 +384,18 @@ fn PairForm(
                     }
                 },
             }
-            div { class: "segmented", role: "radiogroup",
-                for (option, label) in [(Scope::Play, "Play"), (Scope::Admin, "Admin")] {
-                    button {
-                        key: "{label}",
-                        role: "radio",
-                        aria_checked: scope() == option,
-                        class: if scope() == option { "active" } else { "" },
-                        onclick: move |_| scope.set(option),
-                        "{label}"
+            // A play device can only pair play ones; the server says so too.
+            if admin {
+                div { class: "segmented", role: "radiogroup",
+                    for (option, label) in [(Scope::Play, "Play"), (Scope::Admin, "Admin")] {
+                        button {
+                            key: "{label}",
+                            role: "radio",
+                            aria_checked: scope() == option,
+                            class: if scope() == option { "active" } else { "" },
+                            onclick: move |_| scope.set(option),
+                            "{label}"
+                        }
                     }
                 }
             }
