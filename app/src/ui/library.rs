@@ -344,10 +344,8 @@ pub struct Library {
 /// few pages; a shelf can hold hundreds of rows, so not the whole history.
 const KEPT: usize = 8;
 
-/// The signed-in account's favourites, by id, fetched once and cached
-/// rather than asked per row: Qobuz has no "is this one favourited" lookup,
-/// only "list them all", so checking membership after one fetch is the whole
-/// of what is affordable.
+/// This user's likes, by id, fetched once and cached rather than asked per
+/// row: the server lists them, it has no "is this one liked" lookup.
 #[derive(Clone, Default)]
 pub(crate) struct Liked {
     pub(crate) tracks: std::collections::HashSet<i64>,
@@ -427,21 +425,9 @@ impl Library {
                 backend().favourite_artists(LIST_CAP),
             );
             liked.set(Some(Liked {
-                tracks: tracks
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|t| t.id)
-                    .collect(),
-                albums: albums
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| a.id.clone())
-                    .collect(),
-                artists: artists
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|a| a.id)
-                    .collect(),
+                tracks: tracks.unwrap_or_default().iter().map(|t| t.id).collect(),
+                albums: albums.unwrap_or_default().iter().map(|a| a.id.clone()).collect(),
+                artists: artists.unwrap_or_default().iter().map(|a| a.id).collect(),
             }));
         });
     }
@@ -502,6 +488,18 @@ impl Library {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// After an import: ask for the likes again, and redraw them if they are
+    /// what is on screen.
+    pub(crate) fn likes_changed(self) {
+        let mut liked = self.liked;
+        liked.set(None);
+        self.ensure_liked_loaded();
+        let view = self.view.peek().clone();
+        if matches!(view, View::Favourites { .. }) {
+            self.show(view);
         }
     }
 
@@ -1293,6 +1291,8 @@ fn BrowseScreen() -> Element {
                 }
                 if empty_search {
                     p { class: "muted", "Type to search." }
+                } else if nothing_visible && matches!(view, View::Favourites { scope: Scope::Everything }) {
+                    p { class: "muted", "No likes yet. Heart anything, or import the Qobuz favourites from settings." }
                 } else if nothing_visible {
                     p { class: "muted", "nothing here" }
                 }

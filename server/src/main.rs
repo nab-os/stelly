@@ -4,10 +4,15 @@
 //! models, the whole pipeline, crawl, analyse, build-space, layout, and the
 //! loaded space every client navigates. Clients ask for all of it over HTTP.
 //!
+//! Sized for a family: a few people on the one Qobuz account, each with their
+//! own devices, play session and likes, sharing the space.
+//!
 //! ```sh
-//! stelly-server login                                  # Qobuz, once
-//! stelly-server pair --name desktop --scope pipeline   # first device
-//! stelly-server serve                                  # 127.0.0.1:7700
+//! stelly-server login                                    # Qobuz, once
+//! stelly-server pair --name desktop --scope pipeline     # first device
+//! stelly-server user add sam                             # someone else
+//! stelly-server pair --name phone --user sam             # and their phone
+//! stelly-server serve                                    # 127.0.0.1:7700
 //! ```
 //!
 //! Plain HTTP, loopback by default. The token and the signed stream URLs are
@@ -19,6 +24,7 @@ mod cli;
 mod crawl;
 mod db;
 mod hub;
+mod likes;
 mod login;
 mod pipeline;
 mod playback;
@@ -48,8 +54,8 @@ pub struct AppState {
     /// translate to and from it.
     pub hub: Arc<Hub>,
     pub auth: Arc<AuthStore>,
-    /// The queue and output every device shares.
-    pub playback: Arc<playback::Playback>,
+    /// A queue and an output per user, which their devices share.
+    pub playback: Arc<playback::Sessions>,
 }
 
 // ------------------------------------------------------------------ errors
@@ -97,8 +103,8 @@ impl Failure {
     }
 }
 
-/// Report what actually went wrong. Deliberately not sanitised: single-user
-/// system behind a VPN, and a real message beats sending someone to the logs
+/// Report what actually went wrong. Deliberately not sanitised: a family's
+/// server behind a VPN, and a real message beats sending someone to the logs
 /// on another machine.
 impl From<anyhow::Error> for Failure {
     fn from(err: anyhow::Error) -> Self {
@@ -127,8 +133,8 @@ impl IntoResponse for Failure {
 #[derive(FromArgs)]
 #[argh(
     example = "{command_name} login\n{command_name} pair --name desktop --scope pipeline\n{command_name} serve",
-    note = "Devices are stored in the same database as the catalogue. A token is shown
-once, at pairing, and only its hash is kept.
+    note = "Users and devices are stored in the same database as the catalogue. A token
+is shown once, at pairing, and only its hash is kept.
 
 STELLY_DATA_DIR, STELLY_MODEL_DIR and STELLY_CACHE_DIR move the corpus,
 the model weights and the excerpt cache; STELLY_ENV_DIR, the .env holding
@@ -145,6 +151,7 @@ struct Cli {
 #[argh(subcommand)]
 pub enum Command {
     Serve(Serve),
+    User(UserCommand),
     Pair(Pair),
     Devices(Devices),
     Revoke(Revoke),
@@ -177,6 +184,54 @@ pub struct Serve {
     bind: String,
 }
 
+/// Add, list, rename or remove the people sharing this server.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "user")]
+pub struct UserCommand {
+    #[argh(subcommand)]
+    action: UserAction,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum UserAction {
+    Add(UserAdd),
+    List(UserList),
+    Rename(UserRename),
+    Remove(UserRemove),
+}
+
+/// Add someone, before pairing their first device.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "add")]
+struct UserAdd {
+    #[argh(positional)]
+    name: String,
+}
+
+/// List everyone, with how many devices each has.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "list")]
+struct UserList {}
+
+/// Rename someone; their devices and likes follow.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "rename")]
+struct UserRename {
+    #[argh(positional)]
+    from: String,
+    #[argh(positional)]
+    to: String,
+}
+
+/// Remove someone whose devices are all revoked.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "remove")]
+struct UserRemove {
+    #[argh(positional)]
+    name: String,
+}
+
 /// Mint a token for a new device.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "pair")]
@@ -187,6 +242,9 @@ pub struct Pair {
     /// play or pipeline (default play)
     #[argh(option, from_str_fn(scope), default = "Scope::Play")]
     scope: Scope,
+    /// whose device it is, see `user list` (default: the only user there is)
+    #[argh(option)]
+    user: Option<String>,
 }
 
 fn scope(text: &str) -> Result<Scope, String> {
@@ -249,28 +307,33 @@ fn main() -> Result<()> {
 
     match command {
         Command::Serve(args) => serve(args.bind, paths, store()?),
+        Command::User(args) => user(args.action, &store()?),
         Command::Pair(args) => {
-            let grant = store()?.issue(&args.name, args.scope)?;
+            let store = store()?;
+            let user = store.user_for_pairing(args.user.as_deref())?;
+            let grant = store.issue(&args.name, args.scope, &user)?;
             println!(
-                "Paired “{}” with scope {}.\n\nSet this on the device, it is not shown again:\n\n  \
+                "Paired “{}” for {} with scope {}.\n\nSet this on the device, it is not shown again:\n\n  \
                  export STELLY_SERVER=http://<this-host>:7700\n  \
                  export STELLY_TOKEN={}\n",
                 grant.device.name,
+                user.name,
                 args.scope.as_str(),
                 grant.token
             );
             Ok(())
         }
         Command::Devices(_) => {
-            let devices = store()?.list()?;
+            let devices = store()?.list(None)?;
             if devices.is_empty() {
                 println!("No devices paired. Start with:\n  stelly-server pair --name desktop --scope pipeline");
             }
             for device in devices {
                 println!(
-                    "{:>4}  {:<24} {:<9} last seen {}",
+                    "{:>4}  {:<24} {:<16} {:<9} last seen {}",
                     device.id,
                     device.name,
+                    device.user,
                     device.scope.as_str(),
                     device.last_seen.as_deref().unwrap_or("never")
                 );
@@ -278,12 +341,40 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Revoke(args) => {
-            store()?.revoke(args.id)?;
+            store()?.revoke(args.id, None)?;
             println!("Revoked device {}.", args.id);
             Ok(())
         }
         pipeline => cli::run(pipeline, &paths),
     }
+}
+
+fn user(action: UserAction, store: &AuthStore) -> Result<()> {
+    match action {
+        UserAction::Add(args) => {
+            let user = store.add_user(&args.name)?;
+            println!(
+                "Added {}. Pair their first device with:\n  stelly-server pair --name phone --user {}",
+                user.name, user.name
+            );
+        }
+        UserAction::List(_) => {
+            let devices = store.list(None)?;
+            for user in store.users()? {
+                let paired = devices.iter().filter(|device| device.user_id == user.id).count();
+                println!("{:>4}  {:<16} {paired} device(s), since {}", user.id, user.name, user.created_at);
+            }
+        }
+        UserAction::Rename(args) => {
+            store.rename_user(&args.from, &args.to)?;
+            println!("Renamed {} to {}.", args.from, args.to);
+        }
+        UserAction::Remove(args) => {
+            store.remove_user(&args.name)?;
+            println!("Removed {}.", args.name);
+        }
+    }
+    Ok(())
 }
 
 fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
@@ -312,7 +403,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     let state = AppState {
         hub,
         auth: Arc::new(store),
-        playback: playback::Playback::new(),
+        playback: Arc::default(),
     };
 
     let runtime = tokio::runtime::Runtime::new()?;

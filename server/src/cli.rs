@@ -94,20 +94,20 @@ impl FromStr for Kind {
     }
 }
 
-/// Grow the catalogue from the favourites outwards.
+/// Grow the catalogue from the family's likes outwards.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "crawl")]
 pub struct Crawl {
     /// stop once the catalogue holds this many tracks (default 5000)
     #[argh(option, default = "5000")]
     max_tracks: i64,
-    /// how many similar-artist hops from a favourite to follow (default 2)
+    /// how many similar-artist hops from a like to follow (default 2)
     #[argh(option, default = "stelly_core::api::DEFAULT_MAX_DISTANCE")]
     max_distance: i64,
     /// requests per second to Qobuz (default 2)
     #[argh(option, default = "DEFAULT_RATE_PER_SEC")]
     rate: f64,
-    /// skip seeding from the favourites
+    /// skip seeding from the likes
     #[argh(switch)]
     no_seed: bool,
 }
@@ -269,6 +269,7 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
         Command::Unblock(args) => unblock_command(args, paths),
         Command::Blocked(_) => blocked(paths),
         Command::Serve(_)
+        | Command::User(_)
         | Command::Pair(_)
         | Command::Devices(_)
         | Command::Revoke(_) => unreachable!("main runs the serving commands"),
@@ -371,8 +372,8 @@ async fn crawl_command(args: Crawl, paths: &Paths) -> Result<()> {
     client.login().await.context("signing in to Qobuz")?;
 
     if !args.no_seed {
-        eprintln!("seeding from favourites…");
-        let seeded = crawl::seed(conn, &mut client, 5000).await?;
+        eprintln!("seeding from the family's likes…");
+        let seeded = crawl::seed(conn)?;
         eprintln!(
             "  seeded {} tracks, {} albums, {} artists",
             seeded.tracks_added, seeded.albums_expanded, seeded.artists_expanded

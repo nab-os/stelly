@@ -273,7 +273,7 @@ fn ShelfTrackItems(index: usize) -> Element {
             GenerationItems { track_id: track.id }
         }
 
-        if let Some((artist_id, name)) = artist {
+        if let Some((artist_id, name)) = artist.filter(|_| *blocklist.editable.read()) {
             div { class: "menu-rule" }
             button {
                 class: "menu-item danger",
@@ -378,7 +378,7 @@ fn ShelfAlbumItems(index: usize) -> Element {
             "Add to space"
         }
 
-        if let Some((artist_id, name)) = artist {
+        if let Some((artist_id, name)) = artist.filter(|_| *blocklist.editable.read()) {
             button {
                 class: "menu-item danger",
                 onclick: move |_| {
@@ -435,16 +435,18 @@ fn ShelfArtistItems(index: usize, similar: bool) -> Element {
             "Add to space"
         }
 
-        div { class: "menu-rule" }
-        button {
-            class: "menu-item danger",
-            onclick: move |_| {
-                if let Some(entry) = artist_at() {
-                    blocklist.block.call(entry);
-                }
-                menu.set(None);
-            },
-            "Hide everywhere"
+        if *blocklist.editable.read() {
+            div { class: "menu-rule" }
+            button {
+                class: "menu-item danger",
+                onclick: move |_| {
+                    if let Some(entry) = artist_at() {
+                        blocklist.block.call(entry);
+                    }
+                    menu.set(None);
+                },
+                "Hide everywhere"
+            }
         }
     }
 }

@@ -228,11 +228,15 @@ pub fn purge(conn: &mut SqliteConnection, artist_id: i64) -> Result<Purged> {
 }
 
 pub fn utc_now() -> String {
-    // UTC, seconds precision: sorts as text.
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    utc_at(seconds)
+}
+
+/// UTC, seconds precision: sorts as text.
+pub fn utc_at(seconds: u64) -> String {
     let days = seconds / 86_400;
     let (year, month, day) = civil_from_days(days as i64);
     let rest = seconds % 86_400;

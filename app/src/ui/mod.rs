@@ -24,14 +24,14 @@ pub use crawler::Crawler;
 pub use generate::Generator;
 pub use library::{open_initial, Library, MainScreen, View};
 pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
-pub use pipeline::Pipeline;
+pub use pipeline::{Family, Pipeline};
 pub use player::{use_session, use_transport, Player, PlayerBar};
 pub use queue::QueueView;
 pub use release::{ReleaseNotice, Releases};
 pub use side::{GeneratePanel, PathPill};
 
 use dioxus::prelude::*;
-use crate::api::{BlockedArtist, SpaceIndex, SpaceInfo, TrackMeta};
+use crate::api::{BlockedArtist, Device, SpaceIndex, SpaceInfo, TrackMeta};
 use crate::backend::backend;
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use std::collections::{HashMap, HashSet};
@@ -389,14 +389,22 @@ pub(crate) fn album_link(library: Library, track: &RemoteTrack, class: &'static 
 #[derive(Clone, Copy)]
 pub struct SpaceMatches(pub Signal<(Vec<SpaceRow>, usize)>);
 
-/// Artists the user has hidden, and the actions that change that.
+/// Artists hidden from the family's space, and the actions that change that.
 #[derive(Clone, Copy)]
 pub struct Blocklist {
     pub artists: Signal<Vec<BlockedArtist>>,
     /// (artist_id, name)
     pub block: Callback<(i64, String)>,
     pub unblock: Callback<i64>,
+    /// Whether this device may: hiding is for `pipeline` devices, so a `play`
+    /// one is not offered what the server would refuse.
+    pub editable: Memo<bool>,
 }
+
+/// This device as the server knows it: its name, whose it is, its scope.
+/// `None` until the server says, or for good against one older than users.
+#[derive(Clone, Copy)]
+pub struct Me(pub Signal<Option<Device>>);
 
 impl Blocklist {
     pub fn contains(&self, artist_id: i64) -> bool {
