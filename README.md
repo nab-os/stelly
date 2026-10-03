@@ -162,7 +162,7 @@ Start the server, pair a device, and point the app at it:
 
 ```sh
 cd server
-cargo run --release -- pair --name desktop --scope pipeline   # prints a token, once
+cargo run --release -- pair --name desktop --scope admin   # prints a token, once
 cargo run --release -- serve                                  # 127.0.0.1:7700
 
 cd app
@@ -206,7 +206,7 @@ through the real pipeline, and serve that:
 ```sh
 cd server
 cargo run --release -- demo /tmp/stelly-demo
-STELLY_DATA_DIR=/tmp/stelly-demo/data cargo run --release -- pair --name demo --scope pipeline
+STELLY_DATA_DIR=/tmp/stelly-demo/data cargo run --release -- pair --name demo --scope admin
 STELLY_DATA_DIR=/tmp/stelly-demo/data cargo run --release -- serve
 ```
 
@@ -223,7 +223,7 @@ stelly-server blocked                   # list
 stelly-server unblock 224109
 ```
 
-Or click **hide** on any artist or track in the app, from a `pipeline` device:
+Or click **hide** on any artist or track in the app, from an `admin` device:
 the space is the whole family's, so a `play` device sees the list but cannot
 change it. The **Hidden artists** row in settings lists them with a way back.
 
@@ -238,8 +238,8 @@ refuses to act rather than guessing.
 ## Devices and the network
 
 Two scopes, both authenticated: `play` is browsing, navigating and minting a stream
-URL, and **Add to space**, which is bounded; `pipeline` is crawling and
-analysing the whole backlog, and hiding artists. Each device gets its own token, stored
+URL, and **Add to space**, which is bounded; `admin` is crawling and
+analysing the whole backlog, hiding artists, and pairing devices and adding people. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
 
 A person's devices share one queue. The speaker button in the player bar lists
@@ -277,7 +277,7 @@ stelly-server user rename sam samuel
 stelly-server user remove samuel              # once their devices are revoked
 ```
 
-A `pipeline` device can do the same from the app's settings: add someone
+An `admin` device can do the same from the app's settings: add someone
 under **People**, then pair them a device. A `play` device sees and can revoke
 only its own person's devices. A server from before users puts the devices it
 already has under `owner`; rename that to whoever it is.

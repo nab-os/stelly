@@ -367,42 +367,44 @@ pub struct OrderRequest {
 
 // ----------------------------------------------------------------- the auth
 
-/// What a device is allowed to do. `Play` is every device; `Pipeline` is hours
-/// of CPU, the shared rate limit, the family's hidden artists, and
-/// `block --purge`, which deletes rows.
+/// What a device is allowed to do. `Play` is every device; `Admin` is the
+/// pipeline's hours of CPU, the shared rate limit, the family's hidden artists,
+/// pairing and people, and `block --purge`, which deletes rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Play,
-    Pipeline,
+    /// Was `pipeline` before 0.17; still read as such.
+    #[serde(alias = "pipeline")]
+    Admin,
 }
 
 impl Scope {
     pub fn as_str(self) -> &'static str {
         match self {
             Scope::Play => "play",
-            Scope::Pipeline => "pipeline",
+            Scope::Admin => "admin",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "play" => Some(Scope::Play),
-            "pipeline" => Some(Scope::Pipeline),
+            "admin" | "pipeline" => Some(Scope::Admin),
             _ => None,
         }
     }
 
-    /// `pipeline` implies `play`: a device trusted to start `analyse` is
+    /// `admin` implies `play`: a device trusted to start `analyse` is
     /// already trusted to search. The reverse is not true.
     pub fn covers(self, needed: Scope) -> bool {
-        self == needed || (self == Scope::Pipeline && needed == Scope::Play)
+        self == needed || (self == Scope::Admin && needed == Scope::Play)
     }
 }
 
-/// A paired device, as the pipeline view lists them. The token itself is never
+/// A paired device, as the settings list them. The token itself is never
 /// in here, it is shown once, at pairing, and only its hash is stored.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Device {
     pub id: i64,
     pub name: String,
@@ -440,4 +442,16 @@ pub struct PairingGrant {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiError {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_was_called_pipeline() {
+        assert_eq!(Scope::parse("pipeline"), Some(Scope::Admin));
+        assert_eq!(serde_json::from_str::<Scope>("\"pipeline\"").unwrap(), Scope::Admin);
+        assert_eq!(serde_json::to_string(&Scope::Admin).unwrap(), "\"admin\"");
+    }
 }
