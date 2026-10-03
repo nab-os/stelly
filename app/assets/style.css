@@ -84,7 +84,7 @@ code {
   background: var(--panel);
   border-left: 3px solid var(--accent);
 }
-.release-notice > span { flex: 1; }
+.release-notice > span:first-child { flex: 1; }
 .release-notice a, .setting a { color: var(--accent); }
 
 .panel {
