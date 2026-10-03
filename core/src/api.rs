@@ -1,10 +1,10 @@
 //! Wire types shared by the app and the server.
 //!
-//! Space navigation is deliberately absent: neighbours, radio, paths and drift
-//! stay client-side in both modes. Only `embed` crosses, because the CLAP
-//! tower is 500MB and its answer is 512 floats.
+//! Space navigation is among them: neighbours, radio, paths and drift are
+//! answered by the server, which holds the one copy of the space.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // --------------------------------------------------------------- the stages
 
@@ -50,8 +50,8 @@ impl Stage {
         }
     }
 
-    /// Whether finishing this stage invalidates the client's space. Remotely
-    /// that means re-syncing, not just reloading.
+    /// Whether finishing this stage changes the space, so the server loads it
+    /// again and clients refetch what they cache of it.
     pub fn rebuilds_space(self) -> bool {
         matches!(self, Stage::BuildSpace | Stage::Layout)
     }
@@ -118,8 +118,8 @@ pub struct Corpus {
     pub pending: i64,
     /// What `build-space` would include if run now.
     pub buildable: i64,
-    /// Tracks in the space the client has loaded. Filled in by the client,
-    /// the server cannot answer for someone else's stale sync.
+    /// Tracks in the loaded space. Filled in by the client from `SpaceInfo`,
+    /// what the map draws rather than what is on disk.
     pub in_space: i64,
     /// Of those, the ones with coordinates, the points actually drawn.
     pub on_map: i64,
@@ -156,8 +156,8 @@ pub struct PipelineStatus {
     pub running: Option<Stage>,
     /// Stages queued behind the running one, in the order they will run.
     pub queued: Vec<Stage>,
-    /// Bumped when a space-rebuilding stage finishes. The client re-reads
-    /// (local) or re-syncs (remote) when it differs from what it loaded.
+    /// Bumped when a space-rebuilding stage finishes, once the server has
+    /// loaded the result. Clients ask for the space again when it moves.
     pub generation: u64,
     /// What the running analyse is scoped to, when it is not the backlog.
     #[serde(default)]
@@ -220,37 +220,149 @@ pub struct BlockedArtist {
     pub reason: Option<String>,
 }
 
-// ----------------------------------------------------------------- the sync
+// ---------------------------------------------------------------- the space
 
-/// What the server holds, so a client can tell whether its copy is stale. The
-/// digests cover the case where a restart has reset `generation`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SyncManifest {
-    pub generation: u64,
-    pub files: Vec<SyncFile>,
+/// One track of the space, as navigation and the map know it. Not a Qobuz
+/// track: no art, no duration, a genre and a position instead.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TrackMeta {
+    pub track_id: i64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub artist_id: i64,
+    pub album_id: String,
+    pub bpm: Option<f32>,
+    pub seed_distance: i32,
+    /// Names the recording rather than the release; see
+    /// `qobuz::RemoteTrack::identity`.
+    pub isrc: Option<String>,
+    /// UMAP coordinates for the map, if the layout step has been run.
+    pub x: Option<f32>,
+    pub y: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SyncFile {
-    /// Name within the data directory: `space.bin`, `space.json`, `catalog.db`.
+/// One row of a generated sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Step {
+    #[serde(flatten)]
+    pub track: TrackMeta,
+    pub similarity: Option<f32>,
+}
+
+/// What the server's space looks like, small enough to ask for on every start.
+///
+/// `stamp` changes whenever anything a client caches would: a rebuild, or a
+/// change to the hidden artists. Unlike the pipeline's generation it survives
+/// a server restart, so a client can keep its copy across one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpaceInfo {
+    /// Empty when no space has been built yet.
+    pub stamp: String,
+    pub n_tracks: usize,
+    pub blocks: Vec<BlockWeight>,
+    /// Drift and mood: the corpus carries audio embeddings and the text tower
+    /// is there to embed a phrase.
+    pub can_steer: bool,
+    /// Visible tracks, and how many of them have a place on the map.
+    pub in_space: i64,
+    pub on_map: i64,
+}
+
+/// A block of the space and the weight it gets unless a slider says otherwise.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlockWeight {
     pub name: String,
-    pub bytes: u64,
-    /// Hex md5 of the contents. md5 because it is already a dependency for
-    /// request signing and this is a cache key, not a security boundary.
-    pub digest: String,
+    pub default_weight: f32,
 }
 
-/// Hex md5, the shape both halves compare sync files by. Spelled out because
-/// `finalize` returns a `GenericArray`, which has no `LowerHex`.
-pub fn digest(bytes: &[u8]) -> String {
-    use md5::Digest;
-    let mut hasher = md5::Md5::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+/// Every visible track id, and the albums and artists they reach, for marking
+/// a Qobuz row as one the space holds without asking per row.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpaceIndex {
+    pub stamp: String,
+    pub ids: Vec<i64>,
+    pub albums: Vec<String>,
+    pub artists: Vec<i64>,
+}
+
+/// The space's own tracks matching a phrase, and the albums and artists
+/// behind them, for a search narrowed to the space.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpaceSearch {
+    /// Every track that matched, of which `tracks` is the head.
+    pub total: usize,
+    /// Matched on the title alone: a track found through its artist's or
+    /// album's name is that artist's or album's tile to show.
+    pub tracks: Vec<TrackMeta>,
+    /// Matched on any of artist, title or album, every word somewhere.
+    pub albums: Vec<SpaceAlbum>,
+    pub artists: Vec<SpaceArtist>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpaceAlbum {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub artist_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpaceArtist {
+    pub id: i64,
+    pub name: String,
+}
+
+/// How a space search orders the tracks it hands back. The order matters on
+/// the server: only the head of the list crosses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpaceSort {
+    /// Best match first, then the space's own order.
+    #[default]
+    Rank,
+    Title,
+    Artist,
+    Album,
+}
+
+/// What produced a sequence, and what to produce one from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum Recipe {
+    Neighbours { seed: i64 },
+    Radio { seed: i64 },
+    Path { a: i64, b: i64, even: bool },
+    Drift { seed: i64, phrase: String },
+    Mood { phrase: String },
+}
+
+/// Weights are sent with every request rather than held per device: the
+/// sliders are the client's, and the server has nowhere to keep them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GenerateRequest {
+    pub recipe: Recipe,
+    pub count: usize,
+    /// Similarity subtracted per prior use of an artist, for radio and mood.
+    pub penalty: f32,
+    #[serde(default)]
+    pub weights: HashMap<String, f32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TracksRequest {
+    pub ids: Vec<i64>,
+}
+
+/// The queue's upcoming tracks, to be put in an order that flows.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OrderRequest {
+    pub ids: Vec<i64>,
+    pub from: Option<i64>,
+    #[serde(default)]
+    pub weights: HashMap<String, f32>,
 }
 
 // ----------------------------------------------------------------- the auth

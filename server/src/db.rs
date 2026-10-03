@@ -1,7 +1,7 @@
 //! The database, from the side that writes it: the schema, the block list,
 //! and the helpers every stage shares. `schema.sql` at the repo root is the
-//! contract, and `schema` its typed mirror; the app only ever reads the slim
-//! copy `catalog` builds from it.
+//! contract, and `schema` its typed mirror; `stelly_core::db` reads it back
+//! when the space is loaded.
 
 use crate::schema::{albums, artists, blocked_artists, failures, features, frontier, layout, tracks};
 use anyhow::{Context, Result};
@@ -264,7 +264,7 @@ mod tests {
     use super::*;
     use crate::pipeline::analyse;
     use crate::pipeline::descriptors::Descriptors;
-    use crate::{catalog, crawl, stages};
+    use crate::{crawl, stages};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -285,7 +285,7 @@ mod tests {
     }
 
     /// The queries every stage leans on, end to end on a scratch database:
-    /// upserts, the frontier, blocking, purging and the slim catalogue.
+    /// upserts, the frontier, blocking, purging and the catalogue the space loads.
     #[test]
     fn catalogue_round_trip() {
         let dir = scratch("round-trip");
@@ -367,20 +367,8 @@ mod tests {
         let purged = purge(conn, 7).unwrap();
         assert_eq!((purged.tracks, purged.features, purged.albums), (1, 1, 1));
 
-        let target = dir.join("catalog.db");
-        catalog::build(&db_path, &target).unwrap();
-        let slim = &mut connect(&target, Duration::from_secs(5)).unwrap();
-        let json: Option<String> = features::table
-            .find(2)
-            .select(features::descriptors_json)
-            .first(slim)
-            .unwrap();
-        assert_eq!(json.as_deref(), Some(r#"{"bpm":120.0}"#));
-        let qobuz: Option<String> = tracks::table.find(2).select(tracks::qobuz_json).first(slim).unwrap();
-        assert_eq!(qobuz, None, "the slim copy leaves the payloads behind");
-
-        // And the client reads it back, in the space's row order.
-        let loaded = stelly_core::db::Catalog::load(&target, &[99, 2]).unwrap();
+        // And the space reads it back, in its own row order.
+        let loaded = stelly_core::db::Catalog::load(&db_path, &[99, 2]).unwrap();
         assert_eq!(loaded.get(0).title, "<missing 99>");
         let two = loaded.get(1);
         assert_eq!((two.title.as_str(), two.artist.as_str(), two.bpm), ("Two", "Eight", Some(120.0)));

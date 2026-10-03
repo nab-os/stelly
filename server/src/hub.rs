@@ -11,7 +11,8 @@ use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, Remot
 use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
-use crate::{catalog, crawl, db};
+use crate::space::SpaceService;
+use crate::{crawl, db};
 use anyhow::{Context, Result};
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
 use std::collections::VecDeque;
@@ -44,6 +45,8 @@ pub struct Hub {
     crawl: Arc<CrawlJob>,
     pipeline: Arc<PipelineJob>,
     log: Arc<LogBuffer>,
+    /// The loaded space, which every client's navigation runs against.
+    space: Arc<SpaceService>,
 }
 
 // ------------------------------------------------------------------- jobs
@@ -107,6 +110,7 @@ impl Queue {
 impl Hub {
     pub fn new(paths: Paths) -> Self {
         Self {
+            space: Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone())),
             env_dir: paths.env_dir.clone(),
             db_path: paths.db_path.clone(),
             model_dir: paths.model_dir.clone(),
@@ -121,6 +125,10 @@ impl Hub {
             pipeline: Arc::new(PipelineJob::default()),
             log: Arc::new(LogBuffer::default()),
         }
+    }
+
+    pub fn space(&self) -> &Arc<SpaceService> {
+        &self.space
     }
 
     /// The shared Qobuz client, built on first reach.
@@ -287,11 +295,23 @@ impl Hub {
     }
 
     pub async fn block_artist(&self, artist_id: i64, name: &str) -> Result<()> {
-        db::block_artist(&self.db_path, artist_id, name, None)
+        db::block_artist(&self.db_path, artist_id, name, None)?;
+        self.refresh_blocked().await
     }
 
     pub async fn unblock_artist(&self, artist_id: i64) -> Result<()> {
-        db::unblock_artist(&self.db_path, artist_id)
+        db::unblock_artist(&self.db_path, artist_id)?;
+        self.refresh_blocked().await
+    }
+
+    /// Tell the loaded space, which filters on every read rather than being
+    /// rebuilt.
+    async fn refresh_blocked(&self) -> Result<()> {
+        let blocked = db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+        let space = self.space.clone();
+        tokio::task::spawn_blocking(move || space.set_blocked(blocked))
+            .await
+            .context("the worker thread panicked")
     }
 
     // ------------------------------------------- extending the catalogue
@@ -439,6 +459,7 @@ impl Hub {
         let job = self.pipeline.clone();
         let log = self.log.clone();
         let paths = self.paths.clone();
+        let space = self.space.clone();
 
         job.cancel.store(false, Ordering::SeqCst);
 
@@ -472,18 +493,16 @@ impl Hub {
                     && job.queue.lock().unwrap().stages.contains(&Stage::Layout);
                 let settled = stage.rebuilds_space() && !layout_next;
 
-                // Before the generation moves, not after: a client syncs as
-                // soon as it sees the new one, and the layout only reaches it
-                // through catalog.db. Rebuilt later, the client keeps the old
-                // map until the next stage.
+                // Before the generation moves, not after: a client refetches
+                // what it caches as soon as it sees the new one.
                 if settled {
-                    let (source, target) = (paths.db_path.clone(), paths.data_dir.join("catalog.db"));
-                    let built = tokio::task::spawn_blocking(move || catalog::build(&source, &target))
+                    let space = space.clone();
+                    let loaded = tokio::task::spawn_blocking(move || space.reload())
                         .await
                         .context("the worker thread panicked")
-                        .and_then(|built| built);
-                    if let Err(err) = built {
-                        log.push(format!("could not rebuild the slim catalogue: {err:#}"));
+                        .and_then(|loaded| loaded);
+                    if let Err(err) = loaded {
+                        log.push(format!("could not load the rebuilt space: {err:#}"));
                     }
                 }
 

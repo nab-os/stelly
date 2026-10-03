@@ -234,7 +234,7 @@ button.danger:hover:not(:disabled),
   gap: 12px;
 }
 
-/* A space syncing behind the app. Opposite the fabs, and never in the way:
+/* The server not answering. Opposite the fabs, and never in the way:
    clicks go through it. */
 .sync-notice {
   position: absolute;

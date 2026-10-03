@@ -1,12 +1,13 @@
 //! The same surface, over HTTP to a server.
 //!
-//! Browsing, playback URLs, the block list, the pipeline and the text tower
-//! live on the server. The space is *synced*, not queried, so neighbours and
-//! the sliders stay local. Audio does not proxy.
+//! Browsing, playback URLs, the block list, the pipeline and the space all
+//! live on the server. The space is queried, not synced: a phone has nothing
+//! to download before it can generate. Audio does not proxy.
 
 use crate::api::{
-    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope,
-    Stage, SyncManifest, Target,
+    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest,
+    PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage,
+    Step, Target, TrackMeta, TracksRequest,
 };
 use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -15,30 +16,23 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-/// What a sync is doing, as far as someone waiting on it cares.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum SyncStep {
-    /// Asking the server what it holds and comparing digests.
-    #[default]
-    Checking,
-    Downloading,
-    Done,
+/// The token was refused: not a passing failure, the pairing itself is gone.
+#[derive(Debug)]
+pub struct Unauthorised(String);
+
+impl std::fmt::Display for Unauthorised {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-/// How far a sync has got. Totals count only the files that were stale.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SyncProgress {
-    pub step: SyncStep,
-    /// The one coming down, while `Downloading`.
-    pub file: String,
-    pub files_done: usize,
-    pub files_total: usize,
-    pub bytes_done: u64,
-    pub bytes_total: u64,
+impl std::error::Error for Unauthorised {}
+
+pub fn is_unauthorised(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Unauthorised>().is_some()
 }
 
 pub struct Remote {
@@ -46,30 +40,20 @@ pub struct Remote {
     /// No trailing slash.
     base: String,
     token: String,
-    /// Where synced artefacts land, and where the engine loads them from.
-    data_dir: PathBuf,
     log: Arc<LogBuffer>,
-    /// How far the running `sync_space` has got, for the loading screen.
-    sync: Arc<Mutex<SyncProgress>>,
-    /// Held for a whole sync. It runs behind the app now, so a second rebuild
-    /// can land mid-download, and two syncs would write the same `.partial`.
-    syncing: tokio::sync::Mutex<()>,
     /// Whether the SSE task is already running. The log is pushed, not polled,
     /// so a stage that prints nothing for minutes costs nothing to watch.
     streaming: Arc<AtomicBool>,
 }
 
 impl Remote {
-    pub fn new(base: impl Into<String>, token: impl Into<String>, data_dir: PathBuf) -> Self {
+    pub fn new(base: impl Into<String>, token: impl Into<String>) -> Self {
         let base = base.into();
         Self {
             http: http_client(),
             base: base.trim_end_matches('/').to_string(),
             token: token.into(),
-            data_dir,
             log: Arc::new(LogBuffer::default()),
-            sync: Arc::new(Mutex::new(SyncProgress::default())),
-            syncing: tokio::sync::Mutex::new(()),
             streaming: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -91,7 +75,10 @@ impl Remote {
             .unwrap_or(body);
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            anyhow::bail!("the server rejected this device's token ({status}): {message}");
+            return Err(Unauthorised(format!(
+                "the server rejected this device's token ({status}): {message}"
+            ))
+            .into());
         }
         if status == reqwest::StatusCode::FORBIDDEN {
             anyhow::bail!("this device is not paired for that ({status}): {message}");
@@ -296,32 +283,6 @@ impl Remote {
         Ok(created.id)
     }
 
-    // --------------------------------------------------------- text steering
-
-    pub async fn embed(&self, phrase: &str) -> Result<Vec<f32>> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            phrase: &'a str,
-        }
-        #[derive(serde::Deserialize)]
-        struct Embedding {
-            embedding: Vec<f32>,
-        }
-        let found: Embedding = self.post("/api/embed", &Body { phrase }).await?;
-        Ok(found.embedding)
-    }
-
-    pub async fn can_steer(&self) -> Result<bool> {
-        #[derive(serde::Deserialize)]
-        struct Steering {
-            available: bool,
-        }
-        // Not being able to ask is not the same as the answer being no, but
-        // it produces the same UI.
-        let found: Steering = self.get("/api/embed/available").await?;
-        Ok(found.available)
-    }
-
     // ---------------------------------------------------------------- hiding
 
     pub async fn blocked_artists(&self) -> Result<Vec<BlockedArtist>> {
@@ -474,75 +435,60 @@ impl Remote {
 
     // ----------------------------------------------------------- the space
 
-    /// Bring the local copy of the space up to date. Digest-compared per file,
-    /// not by generation alone: a restart resets the counter.
-    pub async fn sync_space(&self) -> Result<bool> {
-        let _syncing = self.syncing.lock().await;
-        self.set_sync(SyncProgress::default());
-        let manifest: SyncManifest = self.get("/api/sync/manifest").await?;
-        std::fs::create_dir_all(&self.data_dir)
-            .with_context(|| format!("creating {}", self.data_dir.display()))?;
+    pub async fn space_info(&self) -> Result<SpaceInfo> {
+        self.get("/api/space").await
+    }
 
-        let stale: Vec<_> = manifest
-            .files
-            .iter()
-            .filter(|file| {
-                local_digest(&self.data_dir.join(&file.name)).as_deref() != Some(file.digest.as_str())
-            })
-            .collect();
-        let mut progress = SyncProgress {
-            step: SyncStep::Downloading,
-            files_total: stale.len(),
-            bytes_total: stale.iter().map(|file| file.bytes).sum(),
-            ..SyncProgress::default()
+    pub async fn space_index(&self) -> Result<SpaceIndex> {
+        self.get("/api/space/index").await
+    }
+
+    /// The space's rows for these ids, leaving out any it does not hold.
+    pub async fn space_tracks(&self, ids: Vec<i64>) -> Result<Vec<TrackMeta>> {
+        self.post("/api/space/tracks", &TracksRequest { ids }).await
+    }
+
+    pub async fn space_search(
+        &self,
+        query: &str,
+        sort: SpaceSort,
+        descending: bool,
+        limit: usize,
+    ) -> Result<SpaceSearch> {
+        let sort = match sort {
+            SpaceSort::Rank => "rank",
+            SpaceSort::Title => "title",
+            SpaceSort::Artist => "artist",
+            SpaceSort::Album => "album",
         };
-
-        for file in &stale {
-            progress.file = file.name.clone();
-            self.set_sync(progress.clone());
-
-            let target = self.data_dir.join(&file.name);
-            let response = self
-                .http
-                .get(self.url(&format!("/api/sync/{}", urlencode(&file.name))))
-                .bearer_auth(&self.token)
-                .send()
-                .await
-                .with_context(|| format!("downloading {}", file.name))?;
-            // Comes down zstd-compressed and is inflated as it arrives, so
-            // the counts below are still in the manifest's uncompressed bytes.
-            let mut body = Self::check(response).await?.bytes_stream();
-
-            // Write beside the target and rename: an interrupted sync must
-            // not leave a half-written space.bin for the engine to map.
-            let staging = target.with_extension("partial");
-            let mut out = std::fs::File::create(&staging)
-                .with_context(|| format!("writing {}", staging.display()))?;
-            while let Some(chunk) = body.next().await {
-                let chunk = chunk.with_context(|| format!("downloading {}", file.name))?;
-                std::io::Write::write_all(&mut out, &chunk)
-                    .with_context(|| format!("writing {}", staging.display()))?;
-                progress.bytes_done += chunk.len() as u64;
-                self.set_sync(progress.clone());
-            }
-            drop(out);
-            std::fs::rename(&staging, &target)
-                .with_context(|| format!("replacing {}", target.display()))?;
-            progress.files_done += 1;
-        }
-
-        progress.step = SyncStep::Done;
-        self.set_sync(progress);
-        Ok(!stale.is_empty())
+        self.get(&format!(
+            "/api/space/search?q={}&sort={sort}&desc={descending}&limit={limit}",
+            urlencode(query)
+        ))
+        .await
     }
 
-    /// Where the running sync is, or where the last one stopped.
-    pub fn sync_progress(&self) -> SyncProgress {
-        self.sync.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    /// The map's points, `map::payload`'s binary, or with `meta` its JSON.
+    pub async fn space_points(&self, meta: bool) -> Result<Vec<u8>> {
+        let path = if meta { "/api/space/points/meta" } else { "/api/space/points" };
+        let response = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .with_context(|| format!("GET {path}"))?;
+        Ok(Self::check(response).await?.bytes().await?.to_vec())
     }
 
-    fn set_sync(&self, progress: SyncProgress) {
-        *self.sync.lock().unwrap_or_else(|e| e.into_inner()) = progress;
+    pub async fn generate(&self, request: &GenerateRequest) -> Result<Vec<Step>> {
+        self.post("/api/space/generate", request).await
+    }
+
+    /// The queue's upcoming tracks in an order that flows, those the space
+    /// does not hold left out.
+    pub async fn order(&self, request: &OrderRequest) -> Result<Vec<i64>> {
+        self.post("/api/space/order", request).await
     }
 
     // ------------------------------------------------------------ devices
@@ -644,8 +590,17 @@ async fn read_session(
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn http_client() -> reqwest::Client {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .expect("a client with only a connect timeout configured")
 }
+
+/// How long to wait for a server to answer at all. Short: on a phone with a
+/// poor connection a request that will fail should say so while the cached
+/// copy is still on screen, not after the OS gives up. Never an overall
+/// timeout, the session and the log are streams that stay open.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// reqwest's default verifier is rustls-platform-verifier, which on Android
 /// calls into Java and panics unless it was handed a JNI context at startup,
@@ -674,15 +629,9 @@ pub(crate) fn http_client() -> reqwest::Client {
 
     reqwest::Client::builder()
         .tls_certs_only(certs)
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .expect("a client with only root certificates configured")
-}
-
-/// Hex md5 of a file, or None if it is not there. md5 because it is already a
-/// dependency for request signing, and this is a cache key.
-fn local_digest(path: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(crate::api::digest(&bytes))
 }
 
 /// Percent-encode the handful of characters that actually turn up in a search

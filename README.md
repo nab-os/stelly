@@ -30,12 +30,13 @@ Two programs, one of each side of a socket.
 ```
   stelly-server                                stelly-app (desktop, Android)
   ─────────────                                ─────────────────────────────
-  Qobuz credentials, ONE 2/s rate limit        syncs space.bin + catalog.db
-  crawl       favourites → similar artists     neighbours · radio · path · drift
-  analyse     middle 90s of each track           → in process, live sliders
-                → CLAP (ONNX) + descriptors    map, library, playback
-  build-space features → space.bin/json                  │
+  Qobuz credentials, ONE 2/s rate limit        neighbours · radio · path · drift
+  crawl       favourites → similar artists       → asked of the server
+  analyse     middle 90s of each track         map, library, playback
+                → CLAP (ONNX) + descriptors    caches the index, the map and
+  build-space features → space.bin/json          the favourites, opens on them
   layout      UMAP → map coordinates                     │
+  space       loaded once, navigated per request         │
   embed       CLAP text tower                  plays the signed stream URL
          │                                               ▲
          └── /api/… + SSE for stage output ──────────────┘
@@ -47,10 +48,12 @@ pipeline, with CLAP running in ONNX Runtime. The apps are clients of it and
 nothing else, there is no local mode, so a desktop on its own runs the server
 beside it and pairs with it like any other device.
 
-The space is synced, not queried: a neighbour lookup is microseconds, so routing
-a weight slider through a socket would cost the one property the space was built
-for. Only `embed` crosses the wire. Clients get `catalog.db`, a projection of the
-corpus down to what navigation reads, **269MB → 39MB**.
+The space is queried, not synced: the server loads it once and answers every
+walk, so a phone downloads nothing before it can generate, and opens straight
+onto the app. A walk is a few milliseconds on the server, one round trip for
+the client, with the weight sliders sent along with it. What a client keeps is
+small and only a head start: the space's index, the map's points and the
+favourites, shown from the disk while the server is asked again.
 
 Design notes, measurements and the space layout are in
 [docs/design.md](docs/design.md).
@@ -231,7 +234,7 @@ refuses to act rather than guessing.
 
 ## Devices and the network
 
-Two scopes, both authenticated: `play` is browsing, syncing and minting a stream
+Two scopes, both authenticated: `play` is browsing, navigating and minting a stream
 URL, and **Add to space**, which is bounded; `pipeline` is crawling and
 analysing the whole backlog. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
@@ -261,8 +264,8 @@ docker run -d --init --name stelly -p 127.0.0.1:7700:7700 \
 docker exec stelly stelly-server pair --name phone --scope play
 ```
 
-[`compose.yaml`](compose.yaml) is the worked version, pairing, the slim
-catalogue, the volumes and the loopback-only port mapping.
+[`compose.yaml`](compose.yaml) is the worked version, pairing, the volumes and
+the loopback-only port mapping.
 
 The image carries the API and the whole pipeline; the CLAP weights are fetched
 into the `/data` volume on first use (`docker exec stelly stelly-server
@@ -299,7 +302,7 @@ not install on a phone. **arm64 only**, `manganis`, the asset crate dioxus
 pulls in, refuses to build for 32-bit Android.
 
 Pairing happens on a setup screen rather than through environment variables, and
-is stored in `server.json` beside the synced space.
+is stored in `server.json` in the app's own data directory.
 
 Use `dx`, not `cargo android build`, the two generate conflicting JNI
 trampolines. `gen/`, `mobile.toml` and the `[package.metadata.cargo-android]`
