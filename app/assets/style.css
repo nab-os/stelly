@@ -204,6 +204,7 @@ button.danger:hover:not(:disabled),
   flex: none;
 }
 .chip.active { background: var(--accent); color: #12131a; }
+.chip.active:hover:not(:disabled) { background: #8fb3ff; }
 
 /* An artist, album or track name that opens its own page. Stays the colour
    of the text around it until pointed at: every row has one, and a column of
@@ -572,6 +573,7 @@ ol.list .row::before {
 .segmented button { background: transparent; color: var(--muted); padding: 5px 12px; font-size: 12px; }
 .segmented button:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
 .segmented button.active { background: var(--accent); color: #12131a; font-weight: 600; }
+.segmented button.active:hover:not(:disabled) { background: #8fb3ff; color: #12131a; }
 
 /* ------------------------------------------------------------ detail pages
    Track, album, artist. Cover and names up top, what you can do with it
