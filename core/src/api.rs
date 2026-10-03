@@ -425,14 +425,6 @@ pub struct User {
     pub created_at: String,
 }
 
-/// What an import of the Qobuz favourites added to someone's likes.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Imported {
-    pub tracks: usize,
-    pub albums: usize,
-    pub artists: usize,
-}
-
 /// The one time a token is ever transmitted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairingGrant {

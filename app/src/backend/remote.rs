@@ -7,7 +7,7 @@
 use crate::api::{
     ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest,
     PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage,
-    Step, Target, TrackMeta, TracksRequest, User, Imported,
+    Step, Target, TrackMeta, TracksRequest, User,
 };
 use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -276,11 +276,6 @@ impl Remote {
             .await?;
         Self::check(response).await?;
         Ok(())
-    }
-
-    /// Copy the Qobuz account's favourites into this user's likes.
-    pub async fn import_favourites(&self) -> Result<Imported> {
-        self.post("/api/favourites/import", &serde_json::json!({})).await
     }
 
     pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {

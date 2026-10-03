@@ -437,8 +437,7 @@ impl QobuzClient {
     }
 
     /// Raw favourites, exactly as Qobuz returned them. `kind` is 'tracks',
-    /// 'albums' or 'artists'. The likes import keeps the untouched objects,
-    /// which the crawl later stores as `qobuz_json`.
+    /// 'albums' or 'artists'. What `favourites` prints.
     pub async fn favorites_raw(&mut self, kind: &str, cap: usize) -> Result<Vec<Value>> {
         self.login().await?;
         let params = BTreeMap::from([("type".to_string(), kind.to_string())]);
