@@ -1,12 +1,19 @@
-//! Whether a newer release than this build is out, for the shell to say so.
+//! Whether a newer release than this build is out, for the shell to say so,
+//! and installing it when asked to.
 //!
 //! Asks GitHub directly rather than the server: the server is whatever version
 //! its owner deployed, and says nothing about what is published.
 //!
-//! A release only counts once this platform's installer is attached to it. The
-//! release job creates the release and then uploads a dozen files into it, and
-//! announcing it in between would send people to a page with nothing on it
-//! for them yet.
+//! A release only counts once the file this install would update from is
+//! attached to it. The release job creates the release and then uploads a
+//! dozen files into it, and announcing it in between would offer an update
+//! with nothing to download yet.
+
+mod install;
+#[cfg(target_os = "android")]
+mod android;
+
+pub use install::{install, Done, Install};
 
 use serde::Deserialize;
 
@@ -26,6 +33,19 @@ pub struct Release {
     pub version: String,
     /// The release page, notes and every download.
     pub url: String,
+    /// What this install updates from. `None` where the app cannot replace
+    /// itself, a build from source say, and only the page is any use.
+    pub file: Option<Download>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Download {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    /// Hex, from the digest GitHub computes on upload. Missing on assets
+    /// uploaded before GitHub started recording one.
+    pub sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -46,23 +66,13 @@ struct Asset {
     /// `uploaded` once the file can be downloaded.
     #[serde(default)]
     state: String,
-}
-
-/// The end of the file name that installs this build, as the release job
-/// names them. Linux looks for the AppImage because it is the one file built
-/// for every Ubuntu leg; the .debs and tarballs land alongside it. `None` on a
-/// platform nothing is published for, where anyone running it built it
-/// themselves and only the version is worth comparing.
-fn installer() -> Option<&'static str> {
-    if cfg!(target_os = "android") {
-        Some("_arm64.apk")
-    } else if cfg!(target_os = "windows") {
-        Some("_x64-setup.exe")
-    } else if cfg!(target_os = "linux") {
-        Some(".AppImage")
-    } else {
-        None
-    }
+    #[serde(default)]
+    browser_download_url: String,
+    #[serde(default)]
+    size: u64,
+    /// `sha256:<hex>`.
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 /// The newest release, if it is newer than this build and ready to download.
@@ -72,10 +82,7 @@ pub async fn check() -> anyhow::Result<Option<Release>> {
     let response = crate::backend::remote::http_client()
         .get(LATEST)
         // GitHub refuses a request without one.
-        .header(
-            reqwest::header::USER_AGENT,
-            concat!("stelly/", env!("CARGO_PKG_VERSION")),
-        )
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(15))
         .send()
@@ -85,10 +92,12 @@ pub async fn check() -> anyhow::Result<Option<Release>> {
         return Ok(None);
     }
     let latest: Latest = response.error_for_status()?.json().await?;
-    Ok(announce(CURRENT, &latest, installer()))
+    Ok(announce(CURRENT, &latest, Install::current()))
 }
 
-fn announce(current: &str, latest: &Latest, installer: Option<&str>) -> Option<Release> {
+const USER_AGENT: &str = concat!("stelly/", env!("CARGO_PKG_VERSION"));
+
+fn announce(current: &str, latest: &Latest, install: &Install) -> Option<Release> {
     if latest.draft || latest.prerelease {
         return None;
     }
@@ -96,19 +105,31 @@ fn announce(current: &str, latest: &Latest, installer: Option<&str>) -> Option<R
     if parse(version)? <= parse(current)? {
         return None;
     }
-    if let Some(suffix) = installer {
-        let ready = latest.assets.iter().any(|asset| {
-            asset.name.starts_with("stelly_")
-                && asset.name.ends_with(suffix)
-                && (asset.state.is_empty() || asset.state == "uploaded")
-        });
-        if !ready {
-            return None;
+
+    // Nothing to look for on an install that cannot update itself, where
+    // only the version is worth comparing.
+    let file = match install.asset(version) {
+        None => None,
+        Some(wanted) => {
+            let asset = latest.assets.iter().find(|asset| {
+                asset.name == wanted && (asset.state.is_empty() || asset.state == "uploaded")
+            })?;
+            Some(Download {
+                name: asset.name.clone(),
+                url: asset.browser_download_url.clone(),
+                size: asset.size,
+                sha256: asset
+                    .digest
+                    .as_deref()
+                    .and_then(|digest| digest.strip_prefix("sha256:"))
+                    .map(str::to_ascii_lowercase),
+            })
         }
-    }
+    };
     Some(Release {
         version: version.to_string(),
         url: latest.html_url.clone(),
+        file,
     })
 }
 
@@ -134,6 +155,7 @@ fn parse(version: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn release(tag: &str, assets: &[&str]) -> Latest {
         Latest {
@@ -146,12 +168,15 @@ mod tests {
                 .map(|name| Asset {
                     name: (*name).into(),
                     state: "uploaded".into(),
+                    browser_download_url: format!("https://example.invalid/{name}"),
+                    size: 1,
+                    digest: None,
                 })
                 .collect(),
         }
     }
 
-    const APK: Option<&str> = Some("_arm64.apk");
+    const APK: Install = Install::Apk;
 
     #[test]
     fn versions_compare_numerically() {
@@ -166,9 +191,10 @@ mod tests {
     #[test]
     fn a_newer_release_with_the_installer_is_announced() {
         let latest = release("v0.12.0", &["stelly_0.12.0_arm64.apk"]);
-        let found = announce("0.11.0", &latest, APK).unwrap();
+        let found = announce("0.11.0", &latest, &APK).unwrap();
         assert_eq!(found.version, "0.12.0");
         assert!(found.url.ends_with("/v0.12.0"));
+        assert_eq!(found.file.unwrap().name, "stelly_0.12.0_arm64.apk");
     }
 
     #[test]
@@ -177,7 +203,7 @@ mod tests {
             announce(
                 "0.11.0",
                 &release("v0.11.0", &["stelly_0.11.0_arm64.apk"]),
-                APK
+                &APK
             ),
             None
         );
@@ -185,7 +211,7 @@ mod tests {
             announce(
                 "0.11.0",
                 &release("v0.10.2", &["stelly_0.10.2_arm64.apk"]),
-                APK
+                &APK
             ),
             None
         );
@@ -195,31 +221,70 @@ mod tests {
     fn a_release_still_uploading_is_not() {
         // The server's tarball is there, this platform's installer is not.
         let mut latest = release("v0.12.0", &["stelly-server_0.12.0_ubuntu-24.04.tar.gz"]);
-        assert_eq!(announce("0.11.0", &latest, APK), None);
+        assert_eq!(announce("0.11.0", &latest, &APK), None);
 
         latest.assets.push(Asset {
             name: "stelly_0.12.0_arm64.apk".into(),
             state: "starter".into(),
+            browser_download_url: String::new(),
+            size: 0,
+            digest: None,
         });
-        assert_eq!(announce("0.11.0", &latest, APK), None);
+        assert_eq!(announce("0.11.0", &latest, &APK), None);
     }
 
     #[test]
     fn the_server_package_does_not_stand_in_for_the_app() {
         let latest = release("v0.12.0", &["stelly-server_0.12.0_amd64.ubuntu-24.04.deb"]);
-        assert_eq!(announce("0.11.0", &latest, Some(".deb")), None);
+        let deb = Install::Deb {
+            exe: PathBuf::from("/usr/bin/stelly-app"),
+            ubuntu: "24.04",
+        };
+        assert_eq!(announce("0.11.0", &latest, &deb), None);
+    }
+
+    #[test]
+    fn each_linux_install_picks_its_own_file() {
+        let latest = release(
+            "v0.12.0",
+            &[
+                "stelly_0.12.0_amd64.ubuntu-24.04.deb",
+                "stelly_0.12.0_amd64.ubuntu-26.04.deb",
+                "stelly_0.12.0_ubuntu-24.04.AppImage",
+                "stelly_0.12.0_ubuntu-26.04.AppImage",
+                "stelly_0.12.0_ubuntu-26.04.tar.gz",
+            ],
+        );
+        let name = |install: Install| announce("0.11.0", &latest, &install).unwrap().file.unwrap().name;
+
+        let deb = Install::Deb {
+            exe: PathBuf::from("/usr/bin/stelly-app"),
+            ubuntu: "26.04",
+        };
+        assert_eq!(name(deb), "stelly_0.12.0_amd64.ubuntu-26.04.deb");
+        let appimage = Install::AppImage {
+            path: PathBuf::from("/home/me/Apps/stelly.AppImage"),
+            ubuntu: "24.04",
+        };
+        assert_eq!(name(appimage), "stelly_0.12.0_ubuntu-24.04.AppImage");
+        let tarball = Install::Tarball {
+            exe: PathBuf::from("/opt/stelly/stelly-app"),
+            ubuntu: "26.04",
+        };
+        assert_eq!(name(tarball), "stelly_0.12.0_ubuntu-26.04.tar.gz");
     }
 
     #[test]
     fn drafts_and_prereleases_are_not() {
         let mut latest = release("v0.12.0", &["stelly_0.12.0_arm64.apk"]);
         latest.prerelease = true;
-        assert_eq!(announce("0.11.0", &latest, APK), None);
+        assert_eq!(announce("0.11.0", &latest, &APK), None);
     }
 
     #[test]
-    fn with_no_installer_to_look_for_the_version_decides() {
-        assert!(announce("0.11.0", &release("v0.12.0", &[]), None).is_some());
+    fn with_nothing_to_update_from_the_version_decides() {
+        let found = announce("0.11.0", &release("v0.12.0", &[]), &Install::Manual).unwrap();
+        assert_eq!(found.file, None);
     }
 
     #[test]
@@ -229,10 +294,22 @@ mod tests {
             "html_url": "https://github.com/nab-os/Stelly/releases/tag/v0.12.0",
             "draft": false,
             "prerelease": false,
-            "assets": [{ "name": "stelly_0.12.0_x64-setup.exe", "state": "uploaded", "size": 1 }],
+            "assets": [{
+                "name": "stelly_0.12.0_x64-setup.exe",
+                "state": "uploaded",
+                "size": 4096,
+                "digest": "sha256:ABCDEF",
+                "browser_download_url": "https://github.com/nab-os/Stelly/releases/download/v0.12.0/stelly_0.12.0_x64-setup.exe"
+            }],
             "body": "notes"
         }"#;
         let latest: Latest = serde_json::from_str(body).unwrap();
-        assert!(announce("0.11.0", &latest, Some("_x64-setup.exe")).is_some());
+        let nsis = Install::Nsis {
+            exe: PathBuf::from(r"C:\Users\me\AppData\Local\Programs\stelly\stelly-app.exe"),
+        };
+        let file = announce("0.11.0", &latest, &nsis).unwrap().file.unwrap();
+        assert_eq!(file.size, 4096);
+        assert_eq!(file.sha256.as_deref(), Some("abcdef"));
+        assert!(file.url.ends_with("/stelly_0.12.0_x64-setup.exe"));
     }
 }
