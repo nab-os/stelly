@@ -3,210 +3,83 @@
 //! In the library rather than `main.rs` because an Android build has no
 //! `main`: the APK loads the .so and calls `start_app`.
 
-use crate::backend::{self, backend, SyncStep};
+use crate::api::{SpaceIndex, SpaceInfo, SpaceSort};
+use crate::backend::{self, backend};
 use crate::ui::{
-    icons, space_track, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel,
-    Generator, Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar,
-    QueueView, ReleaseNotice, Releases, Search, Selection, SpaceMatches, SpaceReach, SpaceRow,
-    View, Weights,
+    icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel, Generator,
+    Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar, QueueView,
+    ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, View,
+    Weights,
 };
-use crate::{engine, map, Wiring};
-use crate::ui::library::{names_track, Sort};
+use crate::Wiring;
+use crate::ui::library::Sort;
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
+use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::OnceLock;
-
-/// A track's searchable text, lowercased once. Fields stay separate rather
-/// than being joined: terms are split on whitespace, so no term can span a
-/// field boundary, which makes "matches any field" and "matches the joined
-/// string" the same test, without the join's allocation.
-#[derive(PartialEq)]
-struct Haystack {
-    artist: String,
-    title: String,
-    album: String,
-}
-
-#[cfg(test)]
-impl Haystack {
-    fn contains(&self, term: &str) -> bool {
-        self.artist.contains(term) || self.title.contains(term) || self.album.contains(term)
-    }
-}
-
-/// Where the engine loads the space from: the synced copy. Fixed by
-/// `bootstrap`, or by the setup screen on a first pairing.
-static DATA_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-static DB_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-
-pub(crate) fn data_dir() -> &'static std::path::Path {
-    DATA_DIR.get().expect("set by bootstrap")
-}
-
-pub(crate) fn db_path() -> &'static std::path::Path {
-    DB_PATH.get().expect("set by bootstrap")
-}
+use std::sync::Mutex;
 
 /// Wire up the backend from the environment or a stored pairing. Fallible but
-/// not fatal: an unpaired client opens on the setup screen. The sync waits for
-/// the window, where the loading screen can show it.
+/// not fatal: an unpaired client opens on the setup screen. Nothing here
+/// touches the network, so a paired client opens straight onto the app.
 pub fn bootstrap() -> anyhow::Result<()> {
+    crate::cache::forget_synced_space();
     wire(Wiring::from_env()?);
     Ok(())
 }
 
 fn wire(wiring: Wiring) {
-    let _ = DATA_DIR.set(wiring.data_dir().to_path_buf());
-    let _ = DB_PATH.set(wiring.db_path());
     backend::init(wiring.into_backend());
 }
 
-/// Sync, then load what came down. The sync goes first: the engine
-/// memory-maps what it finds and will not look again until told to.
-async fn sync_and_load() -> anyhow::Result<()> {
-    backend().sync_space().await?;
-    // Off the UI thread, so the loading screen keeps moving while the
-    // catalogue is read in.
-    tokio::task::spawn_blocking(|| crate::init_engine(data_dir(), db_path())).await?
-}
-
-/// Where the root is: fetching the space, asking for a pairing, or the app.
+/// Where the root is: asking for a pairing, or the app.
 #[derive(Clone, PartialEq)]
 enum Phase {
-    Loading,
     /// With why the last attempt failed, if there was one.
     Setup(Option<String>),
     Ready,
 }
 
-/// The root: either the app, or the screens that get you to the app.
+/// The root: either the app, or the screen that gets you to it.
 ///
 /// Separate components rather than an early return, Dioxus counts hooks per
 /// scope, and changing that count between renders panics.
 #[component]
 pub fn App() -> Element {
     let phase = use_signal(|| {
-        if crate::engine_ready() {
+        if backend::wired() {
             Phase::Ready
-        } else if backend::wired() {
-            Phase::Loading
         } else {
             Phase::Setup(None)
         }
     });
+    use_context_provider(|| phase);
 
     rsx! {
         style { {include_str!("../assets/style.css")} }
         match phase() {
             Phase::Ready => rsx! { Shell {} },
-            Phase::Loading => rsx! { Connect { phase } },
             Phase::Setup(error) => rsx! { Setup { phase, error } },
         }
     }
 }
 
-/// The first sync, on launch or right after pairing, behind a loading screen.
-/// A failure goes back to the setup screen, which says what went wrong.
+/// The server not answering, bottom left of the main area, opposite the
+/// buttons. The app carries on from what it has cached; this says why
+/// nothing new is arriving.
 #[component]
-fn Connect(phase: Signal<Phase>) -> Element {
-    use_future(move || async move {
-        match sync_and_load().await {
-            Ok(()) => phase.set(Phase::Ready),
-            Err(err) => phase.set(Phase::Setup(Some(format!(
-                "{err:#}\n\nIf the address and token are right, the server may not have \
-                 built a space yet, run build-space and layout on it."
-            )))),
-        }
-    });
-
-    rsx! {
-        Loading { title: "Fetching the catalogue" }
-    }
-}
-
-/// What a sync is up to, polled from the backend: it runs outside any scope
-/// and cannot write a signal itself.
-#[component]
-pub fn Loading(title: &'static str) -> Element {
-    let mut progress = use_signal(|| backend().sync_progress());
-    use_future(move || async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let now = backend().sync_progress();
-            if *progress.peek() != now {
-                progress.set(now);
-            }
-        }
-    });
-
-    let progress = progress.read();
-    let (detail, fraction) = match progress.step {
-        SyncStep::Checking => ("asking the server what changed…".to_string(), None),
-        SyncStep::Downloading => (
-            format!(
-                "downloading {} ({} of {}), {} of {}",
-                progress.file,
-                progress.files_done + 1,
-                progress.files_total,
-                megabytes(progress.bytes_done),
-                megabytes(progress.bytes_total),
-            ),
-            Some(progress.bytes_done as f64 / progress.bytes_total.max(1) as f64),
-        ),
-        SyncStep::Done => ("loading the space…".to_string(), None),
+fn OfflineNotice() -> Element {
+    let offline = use_context::<Space>().offline;
+    let Some(reason) = offline() else {
+        return rsx! {};
     };
-
     rsx! {
-        div { class: "loading",
-            h1 { "{title}" }
-            div { class: if fraction.is_some() { "loading-bar" } else { "loading-bar busy" },
-                div {
-                    class: "loading-fill",
-                    style: "width: {fraction.unwrap_or(0.0) * 100.0:.1}%",
-                }
-            }
-            p { class: "muted", "{detail}" }
-        }
+        div { class: "sync-notice muted", title: "{reason}", "server unreachable, retrying…" }
     }
-}
-
-/// A rebuilt space coming down behind the app, bottom left of the main area,
-/// opposite the buttons. Says how far it is and nothing else: there is nothing
-/// to do about it but wait, and nothing that has to wait for it.
-#[component]
-fn SyncNotice() -> Element {
-    let mut progress = use_signal(|| backend().sync_progress());
-    use_future(move || async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            let now = backend().sync_progress();
-            if *progress.peek() != now {
-                progress.set(now);
-            }
-        }
-    });
-
-    let progress = progress.read();
-    let label = match progress.step {
-        SyncStep::Downloading if progress.bytes_total > 0 => format!(
-            "updating the map, {:.0}%",
-            progress.bytes_done as f64 / progress.bytes_total as f64 * 100.0
-        ),
-        _ => "updating the map…".to_string(),
-    };
-
-    rsx! {
-        div { class: "sync-notice muted", "{label}" }
-    }
-}
-
-fn megabytes(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 /// Pairing, for a device not configured through the environment. The address
-/// and token are typed once and written beside the synced space.
+/// and token are typed once and kept in the client's data directory.
 #[component]
 fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
     let mut address = use_signal(|| {
@@ -244,7 +117,15 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
             }
 
             wire(Wiring::remote(base, secret));
-            phase.set(Phase::Loading);
+            // One cheap request, so a wrong address or token is said here
+            // rather than by every panel of an app that cannot reach anything.
+            match backend().space_info().await {
+                Ok(_) => phase.set(Phase::Ready),
+                Err(err) => {
+                    status.set(Some(format!("{err:#}")));
+                    busy.set(false);
+                }
+            }
         });
     };
 
@@ -252,8 +133,8 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
         div { class: "setup",
             h1 { "Connect to your server" }
             p { class: "muted",
-                "This device navigates the space on its own, but the catalogue, playback and \
-                 the pipeline live on a machine that can host them. Pair one with "
+                "The space, the catalogue, playback and the pipeline live on a machine that \
+                 can host them, and this device asks it for everything. Pair one with "
                 code { "stelly-server pair --name phone --scope play" }
                 "."
             }
@@ -303,7 +184,9 @@ fn MapCard() -> Element {
     let map = use_context::<MapView>();
     let selected = use_context::<Selection>().0;
 
-    let track = selected().and_then(space_track);
+    let track = selected()
+        .and_then(crate::ui::space_row)
+        .map(|meta| crate::ui::generate::as_remote(&meta));
     let target = track.clone();
 
     rsx! {
@@ -334,9 +217,6 @@ fn Shell() -> Element {
     // Read-only here: the box that writes it is `SearchBar`, kept separate so
     // the shell's renders cannot clobber what is being typed.
     let query = search.text;
-    use_context_provider(|| {
-        Weights(Signal::new(engine().lock().unwrap().space.default_weights()))
-    });
 
     // The track in hand, for the generate panel and the map.
     let selection = use_context_provider(|| Selection(Signal::new(None)));
@@ -360,8 +240,46 @@ fn Shell() -> Element {
     let library = use_context_provider(Library::new);
 
     let generator = use_context_provider(Generator::new);
+    use_context_provider(|| Weights(generator.weights));
     let crawler = use_context_provider(Crawler::new);
     let pipeline = use_context_provider(Pipeline::new);
+
+    // What is known of the space: what the disk had at once, then whatever
+    // the server says behind the window. Nothing waits on the network to open.
+    let space = use_context_provider(|| {
+        let cached = crate::cache::read::<CachedSpace>(SPACE_CACHE).unwrap_or_default();
+        load_cached_points();
+        Space {
+            info: Signal::new(cached.info),
+            index: Signal::new(Rc::new(cached.index)),
+            offline: Signal::new(None),
+            seen: Signal::new(0),
+        }
+    });
+
+    // The blocks decide the sliders, and the server whether steering is on.
+    use_effect(move || {
+        let info = space.info.read();
+        let mut generator = generator;
+        let mut pipeline = pipeline;
+        generator.tower.set(info.can_steer);
+        pipeline.space_counts.set((info.in_space, info.on_map));
+
+        // Kept across a rebuild with the same blocks, so a tuned space stays
+        // tuned; reset when the blocks themselves changed.
+        let defaults: std::collections::HashMap<String, f32> = info
+            .blocks
+            .iter()
+            .map(|block| (block.name.clone(), block.default_weight))
+            .collect();
+        let same_blocks = {
+            let current = generator.weights.peek();
+            current.len() == defaults.len() && current.keys().all(|name| defaults.contains_key(name))
+        };
+        if !same_blocks {
+            generator.weights.set(defaults);
+        }
+    });
 
     // The crawl and pipeline publish status rather than writing these signals,
     // a server cannot reach into a Dioxus scope.
@@ -385,74 +303,75 @@ fn Shell() -> Element {
     let mut map_route = use_signal(|| false);
     use_context_provider(|| MapView { map_open, map_route });
 
-    // A rebuilt space means the loaded one is stale. The bytes come down and
-    // the new engine is built behind the app, which keeps answering from the
-    // old one until the swap. A loading screen here would lock the app out
-    // for the whole download, once per rebuild.
-    let mut resyncing = use_signal(|| false);
-    use_effect(move || {
-        let generation = *pipeline.generation.read();
-
-        spawn(async move {
-            if generation > 0 {
-                resyncing.set(true);
-                let reloaded = match backend().sync_space().await {
-                    Ok(_) => tokio::task::spawn_blocking(|| crate::reload_engine(data_dir(), db_path()))
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|loaded| loaded)
-                        .map_err(|err| (err, "reload")),
-                    Err(err) => Err((err, "sync")),
-                };
-                resyncing.set(false);
-                match reloaded {
+    // Asked for again whenever the pipeline says the space moved, an artist
+    // is hidden, or the server comes back. Only the stamp is asked first: the
+    // index costs more, and only a changed stamp is worth it.
+    let mut nudge = use_signal(|| 0u64);
+    let mut phase = use_context::<Signal<Phase>>();
+    use_future(move || async move {
+        let mut space = space;
+        let mut done: Option<(u64, u64)> = None;
+        let mut wait = std::time::Duration::from_secs(2);
+        loop {
+            let want = (*pipeline.generation.peek(), *nudge.peek());
+            if done != Some(want) {
+                match refresh_space(space, selected, generator).await {
                     Ok(()) => {
-                        // Both are track ids, so they outlive the swap. Only a
-                        // track the rebuild dropped has to go; the result is
-                        // kept and marked out of date, the distances behind it
-                        // having moved.
-                        if selected.peek().is_some_and(|id| space_track(id).is_none()) {
-                            selected.set(None);
+                        done = Some(want);
+                        wait = std::time::Duration::from_secs(2);
+                        if space.offline.peek().is_some() {
+                            space.offline.set(None);
                         }
-                        generator.invalidate();
-                        document::eval(
-                            "window.stellyReloadPoints && window.stellyReloadPoints();",
-                        );
                     }
-                    Err((err, what)) => eprintln!("could not {what} the rebuilt space: {err:#}"),
+                    Err(err) if backend::is_unauthorised(&err) => {
+                        phase.set(Phase::Setup(Some(format!("{err:#}"))));
+                        return;
+                    }
+                    Err(err) => {
+                        space.offline.set(Some(format!("{err:#}")));
+                        tokio::time::sleep(wait).await;
+                        wait = (wait * 2).min(std::time::Duration::from_secs(30));
+                        continue;
+                    }
                 }
             }
+            tokio::time::sleep(crate::ui::POLL).await;
+        }
+    });
 
-            // Only the shell sees the engine, and "how many points are drawn"
-            // is about the loaded space, not the database.
-            let (in_space, on_map) = {
-                let guard = engine().lock().unwrap();
-                let catalog = &guard.navigator.catalog;
-                (
-                    catalog.visible().count() as i64,
-                    catalog
-                        .visible()
-                        .filter(|&i| catalog.get(i).x.is_some())
-                        .count() as i64,
-                )
-            };
-            let mut pipeline = pipeline;
-            pipeline.space_counts.set((in_space, on_map));
+    // The map's points, fetched the first time the map is opened on a stamp
+    // they do not match rather than with every refresh: on a phone that is
+    // a megabyte most sessions never look at.
+    let mut fetching_points = use_signal(|| false);
+    use_effect(move || {
+        let stamp = space.info.read().stamp.clone();
+        if !map_open() || stamp.is_empty() || points_stamp().as_deref() == Some(stamp.as_str()) {
+            return;
+        }
+        if *fetching_points.peek() {
+            return;
+        }
+        fetching_points.set(true);
+        spawn(async move {
+            let fetched = tokio::try_join!(backend().space_points(false), backend().space_points(true));
+            if let Ok((data, meta)) = fetched {
+                crate::cache::write_bytes(POINTS_CACHE, &data);
+                crate::cache::write_bytes(POINTS_META_CACHE, &meta);
+                crate::cache::write_bytes(POINTS_STAMP_CACHE, stamp.as_bytes());
+                *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Points { stamp, data, meta });
+                document::eval("window.stellyReloadPoints && window.stellyReloadPoints();");
+            }
+            fetching_points.set(false);
         });
     });
 
-    // Write, refresh the engine's filter, redraw, all three, or the halves
-    // disagree. The engine is told the ids because remotely there is no local
-    // database to re-read.
+    // Write, then ask the space again: hiding moves its stamp, which brings
+    // down the index and the map without the hidden artist.
     let blocked = use_signal(Vec::new);
 
     use_future(move || async move {
         let mut blocked = blocked;
         if let Ok(found) = backend().blocked_artists().await {
-            engine()
-                .lock()
-                .unwrap()
-                .set_blocked(found.iter().map(|a| a.artist_id).collect());
             blocked.set(found);
         }
     });
@@ -465,13 +384,9 @@ fn Shell() -> Element {
                 return;
             }
             if let Ok(found) = backend().blocked_artists().await {
-                engine()
-                    .lock()
-                    .unwrap()
-                    .set_blocked(found.iter().map(|a| a.artist_id).collect());
                 blocked.set(found);
             }
-            document::eval("window.stellyReloadPoints && window.stellyReloadPoints();");
+            *nudge.write() += 1;
         });
     });
 
@@ -483,13 +398,9 @@ fn Shell() -> Element {
                 return;
             }
             if let Ok(found) = backend().blocked_artists().await {
-                engine()
-                    .lock()
-                    .unwrap()
-                    .set_blocked(found.iter().map(|a| a.artist_id).collect());
                 blocked.set(found);
             }
-            document::eval("window.stellyReloadPoints && window.stellyReloadPoints();");
+            *nudge.write() += 1;
         });
     });
 
@@ -499,45 +410,18 @@ fn Shell() -> Element {
         unblock: lift_block,
     });
 
-    // Recomputed when the block list changes: a hidden track should stop
-    // offering to locate itself on the map.
-    let local_ids = use_memo(move || {
-        blocked.read();
-        pipeline.generation.read();
-        Rc::new(engine().lock().unwrap().navigator.catalog.id_set())
-    });
+    // Follows the index, which the server rebuilds when an artist is hidden:
+    // a hidden track should stop offering to locate itself on the map.
+    let local_ids = use_memo(move || Rc::new(space.index.read().ids.iter().copied().collect::<HashSet<i64>>()));
     use_context_provider(|| LocalIds(local_ids));
     let space_reach = use_memo(move || {
-        blocked.read();
-        pipeline.generation.read();
-        Rc::new(engine().lock().unwrap().navigator.catalog.reach())
+        let index = space.index.read();
+        Rc::new((
+            index.albums.iter().cloned().collect::<HashSet<String>>(),
+            index.artists.iter().copied().collect::<HashSet<i64>>(),
+        ))
     });
     use_context_provider(|| SpaceReach(space_reach));
-
-    // One lowercased copy of every track's searchable text, built when the
-    // space is loaded rather than on every keystroke. The filter below used to
-    // `format!` a fresh haystack per track per character typed; at ~28k tracks
-    // that is an allocation storm where a scan would do.
-    //
-    // Indexed by catalog row, so `catalog.visible()` indexes straight into it.
-    // Deliberately not filtered by the block list, that changes far more
-    // often than the space does, and the filter applies it anyway.
-    let haystacks = use_memo(move || {
-        pipeline.generation.read();
-        let guard = engine().lock().unwrap();
-        let catalog = &guard.navigator.catalog;
-        let rows: Vec<Haystack> = (0..catalog.len())
-            .map(|i| {
-                let track = catalog.get(i);
-                Haystack {
-                    artist: track.artist.to_lowercase(),
-                    title: track.title.to_lowercase(),
-                    album: track.album.to_lowercase(),
-                }
-            })
-            .collect();
-        Rc::new(rows)
-    });
 
     crate::ui::use_transport(player);
     crate::ui::use_session(player);
@@ -704,19 +588,23 @@ fn Shell() -> Element {
         }
     });
 
-    // Bulk point data crosses as binary here, never through eval.
+    // Bulk point data crosses as binary here, never through eval. Answered
+    // from what is held, never by waiting on the server: until the points
+    // arrive the map is empty, and `stellyReloadPoints` draws them when they do.
     crate::platform::use_asset_handler("points", move |request, responder| {
-        let guard = engine().lock().unwrap();
-        let catalog = &guard.navigator.catalog;
         let path = request.uri().path().to_string();
+        let held = POINTS.lock().unwrap_or_else(|e| e.into_inner());
 
         let (content_type, body) = if path.ends_with("/meta") {
             (
                 "application/json",
-                serde_json::to_vec(&map::meta(catalog)).unwrap_or_default(),
+                held.as_ref().map(|points| points.meta.clone()).unwrap_or_else(|| EMPTY_META.as_bytes().to_vec()),
             )
         } else {
-            ("application/octet-stream", map::payload(catalog))
+            (
+                "application/octet-stream",
+                held.as_ref().map(|points| points.data.clone()).unwrap_or_default(),
+            )
         };
 
         responder.respond(
@@ -802,78 +690,51 @@ fn Shell() -> Element {
     /// with and grows on request; this is the ceiling on what is kept ready.
     const SHOWN: usize = 720;
 
-    // Kept out of the render body: this runs on every keystroke, and inside
-    // the body it also re-ran for every unrelated signal the shell touches.
-    let filtered = use_memo(move || {
-        // Subscribe, so hiding an artist empties them out of this list too.
-        blocked.read();
-        let terms: Vec<String> = query()
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-
-        let haystacks = haystacks.read();
-        let guard = engine().lock().unwrap();
-        let catalog = &guard.navigator.catalog;
-
-        let row = |t: &crate::db::TrackMeta| SpaceRow {
-            track_id: t.track_id,
-            artist: t.artist.clone(),
-            artist_id: Some(t.artist_id).filter(|id| *id >= 0),
-            title: t.title.clone(),
-            album: t.album.clone(),
-            album_id: t.album_id.clone(),
-        };
-
-        let sort = *library.sort.read();
-
-        if terms.is_empty() {
-            let total = catalog.visible().count();
-            // The first `SHOWN` are only the right ones unsorted; any other
-            // order needs every row to pick them from.
-            let rows: Vec<SpaceRow> = if sort == Sort::default() {
-                catalog.visible().map(|i| catalog.get(i)).take(SHOWN).map(row).collect()
-            } else {
-                let rows = catalog.visible().map(|i| catalog.get(i)).map(row).collect();
-                let mut rows = sort.space_rows(rows);
-                rows.truncate(SHOWN);
-                rows
-            };
-            (rows, total)
-        } else {
-            let first = terms[0].as_str();
-            let mut found: Vec<(u8, SpaceRow)> = Vec::new();
-
-            for i in catalog.visible() {
-                let Some(haystack) = haystacks.get(i) else {
-                    // The space was rebuilt under us; the memo is about to
-                    // run again with matching rows.
-                    continue;
-                };
-                // Title only: a track found through its artist's or album's
-                // name is that artist's or album's tile to show.
-                if !names_track(&terms, &haystack.title) {
-                    continue;
-                }
-                // Something starting with what was typed is far likelier to
-                // be the thing meant than something merely containing it.
-                let rank = if haystack.artist.starts_with(first)
-                    || haystack.title.starts_with(first)
-                {
-                    0
-                } else {
-                    1
-                };
-                found.push((rank, row(catalog.get(i))));
+    // The space's tracks matching the search box, asked of the server once
+    // the text stops moving, and only while a search is showing: the list is
+    // the search screen's, and nothing else needs it fetched.
+    let mut filtered = use_signal(|| (Vec::<SpaceRow>::new(), 0usize));
+    use_future(move || async move {
+        let mut asked: Option<(String, Sort, String)> = None;
+        loop {
+            tokio::time::sleep(crate::ui::POLL).await;
+            if !matches!(&*library.view.peek(), View::Search { .. }) {
+                continue;
+            }
+            let text = query.peek().trim().to_lowercase();
+            let wanted = (text.clone(), *library.sort.peek(), space.info.peek().stamp.clone());
+            if asked.as_ref() == Some(&wanted) {
+                continue;
+            }
+            // Stable for two ticks, i.e. the user has stopped typing.
+            tokio::time::sleep(crate::ui::POLL).await;
+            if query.peek().trim().to_lowercase() != text {
+                continue;
             }
 
-            let total = found.len();
-            found.sort_by_key(|entry| entry.0);
-            let rows = found.into_iter().map(|(_, row)| row).collect();
-            let mut rows = sort.space_rows(rows);
-            rows.truncate(SHOWN);
-            (rows, total)
+            let (sort, descending) = space_sort(wanted.1);
+            match backend().space_search(&text, sort, descending, SHOWN).await {
+                Ok(found) => {
+                    crate::ui::remember(&found.tracks);
+                    let rows = found
+                        .tracks
+                        .iter()
+                        .map(|t| SpaceRow {
+                            track_id: t.track_id,
+                            artist: t.artist.clone(),
+                            artist_id: Some(t.artist_id).filter(|id| *id >= 0),
+                            title: t.title.clone(),
+                            album: t.album.clone(),
+                            album_id: t.album_id.clone(),
+                        })
+                        .collect();
+                    filtered.set((rows, found.total));
+                    asked = Some(wanted);
+                }
+                // Offline, or no space yet: the refresh loop says so, and
+                // this tries again once things have had time to change.
+                Err(_) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
+            }
         }
     });
 
@@ -928,9 +789,7 @@ fn Shell() -> Element {
                         }
                     }
 
-                    if resyncing() {
-                        SyncNotice {}
-                    }
+                    OfflineNotice {}
 
                     // Bottom right of the main area, over the map as well,
                     // since its own button is how you close it again. On a
@@ -980,68 +839,116 @@ fn Shell() -> Element {
     }
 }
 
+/// The space as last heard of, for the next start to open with.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct CachedSpace {
+    info: SpaceInfo,
+    index: SpaceIndex,
+}
+
+const SPACE_CACHE: &str = "space.json";
+const POINTS_CACHE: &str = "points.bin";
+const POINTS_META_CACHE: &str = "points-meta.json";
+const POINTS_STAMP_CACHE: &str = "points.stamp";
+
+/// The map's points as `map.js` reads them, and the stamp they were cut at.
+/// A global because the asset handler answers outside any scope.
+struct Points {
+    stamp: String,
+    data: Vec<u8>,
+    meta: Vec<u8>,
+}
+
+static POINTS: Mutex<Option<Points>> = Mutex::new(None);
+
+/// What `/points/meta` says before there are any points: nothing to draw.
+const EMPTY_META: &str = r#"{"n":0,"genres":[],"labels":[],"bounds":{"min_x":0,"max_x":0,"min_y":0,"max_y":0},"has_layout":false}"#;
+
+/// Last session's points, so the map draws at once even offline.
+fn load_cached_points() {
+    let cached = (|| {
+        Some(Points {
+            stamp: String::from_utf8(crate::cache::read_bytes(POINTS_STAMP_CACHE)?).ok()?,
+            data: crate::cache::read_bytes(POINTS_CACHE)?,
+            meta: crate::cache::read_bytes(POINTS_META_CACHE)?,
+        })
+    })();
+    if cached.is_some() {
+        *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = cached;
+    }
+}
+
+fn points_stamp() -> Option<String> {
+    POINTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|points| points.stamp.clone())
+}
+
+/// Ask what the space looks like now, and bring the index down if it moved.
+/// A rebuild keeps the selection and the result where it can: both are track
+/// ids, so only a track the rebuild dropped has to go, and the result is kept
+/// but marked out of date, the distances behind it having moved.
+async fn refresh_space(
+    space: Space,
+    mut selected: Signal<Option<i64>>,
+    generator: Generator,
+) -> anyhow::Result<()> {
+    let mut space = space;
+    let info = backend().space_info().await?;
+    let previous = space.info.peek().stamp.clone();
+
+    if info.stamp != space.index.peek().stamp {
+        let index = if info.stamp.is_empty() {
+            SpaceIndex::default()
+        } else {
+            backend().space_index().await?
+        };
+        if selected.peek().is_some_and(|id| !index.ids.contains(&id)) {
+            selected.set(None);
+        }
+        space.index.set(Rc::new(index));
+    }
+
+    if info.stamp != previous {
+        crate::ui::forget_known();
+        if !previous.is_empty() {
+            generator.invalidate();
+        }
+    }
+    if *space.info.peek() != info {
+        space.info.set(info);
+    }
+
+    crate::cache::write(
+        SPACE_CACHE,
+        &CachedSpace {
+            info: space.info.peek().clone(),
+            index: (**space.index.peek()).clone(),
+        },
+    );
+    Ok(())
+}
+
+/// The library's sort, as the space search on the server understands it.
+/// Only title, artist and album mean anything for a space track; "original
+/// order" is the server's own, reversed when asked.
+fn space_sort(sort: Sort) -> (SpaceSort, bool) {
+    use crate::ui::library::SortKey;
+    match sort.key {
+        SortKey::Title => (SpaceSort::Title, sort.descending),
+        SortKey::Artist => (SpaceSort::Artist, sort.descending),
+        SortKey::Album => (SpaceSort::Album, sort.descending),
+        SortKey::Default => (SpaceSort::Rank, sort.descending),
+        _ => (SpaceSort::Rank, false),
+    }
+}
+
 /// Something a back took away, for forward to give back.
 enum Undone {
     Page,
     Queue,
     Panel,
     Map { route: bool },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Haystack;
-
-    fn haystack(artist: &str, title: &str, album: &str) -> Haystack {
-        Haystack {
-            artist: artist.to_lowercase(),
-            title: title.to_lowercase(),
-            album: album.to_lowercase(),
-        }
-    }
-
-    /// The filter used to test terms against `format!("{artist} {title} {album}")`.
-    /// Testing each field separately is the same predicate only because terms
-    /// are split on whitespace and so can never span the joins, if that ever
-    /// stops being true, this test is where it shows up.
-    #[test]
-    fn per_field_matches_the_joined_string() {
-        let cases = [
-            ("Aphex Twin", "Xtal", "Selected Ambient Works"),
-            ("Burial", "Near Dark", "Untrue"),
-            ("", "Untitled", ""),
-        ];
-
-        for (artist, title, album) in cases {
-            let subject = haystack(artist, title, album);
-            let joined = format!(
-                "{} {} {}",
-                artist.to_lowercase(),
-                title.to_lowercase(),
-                album.to_lowercase()
-            );
-
-            for term in ["aph", "xtal", "works", "near", "untrue", "zzz", "twin"] {
-                assert_eq!(
-                    subject.contains(term),
-                    joined.contains(term),
-                    "{term:?} against {artist:?}/{title:?}/{album:?}"
-                );
-            }
-        }
-    }
-
-    /// The one case where the two differ, and why splitting on whitespace
-    /// before matching keeps the difference unreachable.
-    #[test]
-    fn a_term_spanning_two_fields_cannot_be_produced_by_splitting() {
-        let subject = haystack("Aphex Twin", "Xtal", "Ambient");
-        // The joined string contains "twin xtal"; no single field does.
-        assert!(!subject.contains("twin xtal"));
-        assert!("aphex twin xtal ambient".contains("twin xtal"));
-        // But a query is split first, so "twin xtal" is never one term.
-        let terms: Vec<&str> = "twin xtal".split_whitespace().collect();
-        assert_eq!(terms, ["twin", "xtal"]);
-        assert!(terms.iter().all(|term| subject.contains(term)));
-    }
 }
