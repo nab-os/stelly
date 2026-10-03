@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest, PairingGrant,
     PipelineStatus, Recipe, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
-    Target, TrackMeta, TracksRequest, User, Imported,
+    Target, TrackMeta, TracksRequest, User,
 };
 use stelly_core::session::{Command, Session, Update};
 use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -59,7 +59,6 @@ pub fn router(state: AppState) -> Router {
             "/api/favourites/{kind}/{id}",
             post(favorite_add).delete(favorite_remove),
         )
-        .route("/api/favourites/import", post(import_favourites))
         // ----------------------------------------------------------- counts
         .route("/api/corpus", get(corpus))
         // --------------------------------------------------------- crawling
@@ -426,14 +425,6 @@ async fn favorite_remove(
 ) -> Reply<serde_json::Value> {
     state.hub.favorite_remove(&kind, &id, device.user_id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// Copy the Qobuz account's favourites into the asking user's likes.
-async fn import_favourites(
-    State(state): State<AppState>,
-    PlayAuth(device): PlayAuth,
-) -> Reply<Imported> {
-    Ok(Json(state.hub.import_favourites(device.user_id).await?))
 }
 
 // ------------------------------------------------------------------- counts
