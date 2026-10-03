@@ -5,6 +5,7 @@
 //! server, and what the client knows of it is what it has been told.
 
 pub mod crawler;
+pub mod family;
 pub mod generate;
 pub mod icons;
 pub mod library;
@@ -24,7 +25,8 @@ pub use crawler::Crawler;
 pub use generate::Generator;
 pub use library::{open_initial, Library, MainScreen, View};
 pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
-pub use pipeline::{Family, Pipeline};
+pub use family::Family;
+pub use pipeline::Pipeline;
 pub use player::{use_session, use_transport, Player, PlayerBar};
 pub use queue::QueueView;
 pub use release::{ReleaseNotice, Releases};
@@ -396,7 +398,7 @@ pub struct Blocklist {
     /// (artist_id, name)
     pub block: Callback<(i64, String)>,
     pub unblock: Callback<i64>,
-    /// Whether this device may: hiding is for `pipeline` devices, so a `play`
+    /// Whether this device may: hiding is for `admin` devices, so a `play`
     /// one is not offered what the server would refuse.
     pub editable: Memo<bool>,
 }
