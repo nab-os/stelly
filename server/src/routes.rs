@@ -5,7 +5,7 @@
 //!
 //! Bounded gestures are `play`, unbounded jobs are `pipeline`.
 
-use crate::auth::{PipelineAuth, PlayAuth};
+use crate::auth::{AdminAuth, PlayAuth};
 use crate::{AppState, Failure};
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -391,7 +391,7 @@ struct BlockBody {
 /// server. `block --purge`, which deletes, is not exposed over HTTP at all.
 async fn block(
     State(state): State<AppState>,
-    _: PipelineAuth,
+    _: AdminAuth,
     Json(body): Json<BlockBody>,
 ) -> Reply<serde_json::Value> {
     state.hub.block_artist(body.artist_id, &body.name).await?;
@@ -400,7 +400,7 @@ async fn block(
 
 async fn unblock(
     State(state): State<AppState>,
-    _: PipelineAuth,
+    _: AdminAuth,
     Path(id): Path<i64>,
 ) -> Reply<serde_json::Value> {
     state.hub.unblock_artist(id).await?;
@@ -452,14 +452,14 @@ fn default_distance() -> i64 {
 /// Unbounded, so `pipeline`: this runs until the frontier empties.
 async fn crawl_start(
     State(state): State<AppState>,
-    _: PipelineAuth,
+    _: AdminAuth,
     Json(body): Json<CrawlBody>,
 ) -> Reply<serde_json::Value> {
     state.hub.crawl_start(body.max_distance).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn crawl_stop(State(state): State<AppState>, _: PipelineAuth) -> Reply<serde_json::Value> {
+async fn crawl_stop(State(state): State<AppState>, _: AdminAuth) -> Reply<serde_json::Value> {
     state.hub.crawl_stop().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -477,7 +477,7 @@ struct StageBody {
 
 async fn pipeline_start(
     State(state): State<AppState>,
-    _: PipelineAuth,
+    _: AdminAuth,
     Json(body): Json<StageBody>,
 ) -> Reply<serde_json::Value> {
     state.hub.pipeline_start(body.stage).await?;
@@ -486,7 +486,7 @@ async fn pipeline_start(
 
 async fn pipeline_start_full(
     State(state): State<AppState>,
-    _: PipelineAuth,
+    _: AdminAuth,
 ) -> Reply<serde_json::Value> {
     state.hub.pipeline_start_full().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -503,7 +503,7 @@ async fn pipeline_add(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn pipeline_stop(State(state): State<AppState>, _: PipelineAuth) -> Reply<serde_json::Value> {
+async fn pipeline_stop(State(state): State<AppState>, _: AdminAuth) -> Reply<serde_json::Value> {
     state.hub.pipeline_stop().await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -648,10 +648,10 @@ async fn me(PlayAuth(device): PlayAuth) -> Json<Device> {
     Json(device)
 }
 
-/// `pipeline` sees the whole family's devices, anyone else their own.
+/// `admin` sees the whole family's devices, anyone else their own.
 fn owned_by(device: &Device) -> Option<i64> {
     match device.scope {
-        Scope::Pipeline => None,
+        Scope::Admin => None,
         Scope::Play => Some(device.user_id),
     }
 }
@@ -672,7 +672,7 @@ struct PairBody {
 
 async fn pair_device(
     State(state): State<AppState>,
-    PipelineAuth(device): PipelineAuth,
+    AdminAuth(device): AdminAuth,
     Json(body): Json<PairBody>,
 ) -> Reply<PairingGrant> {
     let user = state
@@ -682,7 +682,7 @@ async fn pair_device(
 }
 
 /// `play` may revoke its own user's devices, a lost phone should not need
-/// whoever has the pipeline device to hand.
+/// whoever has the admin device to hand.
 async fn revoke_device(
     State(state): State<AppState>,
     PlayAuth(device): PlayAuth,
@@ -692,7 +692,7 @@ async fn revoke_device(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn users(State(state): State<AppState>, _: PipelineAuth) -> Reply<Vec<User>> {
+async fn users(State(state): State<AppState>, _: AdminAuth) -> Reply<Vec<User>> {
     Ok(Json(state.auth.users()?))
 }
 
@@ -705,7 +705,7 @@ struct UserBody {
 /// a device, which is the next thing to do.
 async fn add_user(
     State(state): State<AppState>,
-    _: PipelineAuth,
+    _: AdminAuth,
     Json(body): Json<UserBody>,
 ) -> Reply<User> {
     Ok(Json(state.auth.add_user(&body.name)?))

@@ -9,7 +9,7 @@
 //!
 //! ```sh
 //! stelly-server login                                    # Qobuz, once
-//! stelly-server pair --name desktop --scope pipeline     # first device
+//! stelly-server pair --name desktop --scope admin     # first device
 //! stelly-server user add sam                             # someone else
 //! stelly-server pair --name phone --user sam             # and their phone
 //! stelly-server serve                                    # 127.0.0.1:7700
@@ -132,7 +132,7 @@ impl IntoResponse for Failure {
 /// stelly-server: everything in Stelly but the screen.
 #[derive(FromArgs)]
 #[argh(
-    example = "{command_name} login\n{command_name} pair --name desktop --scope pipeline\n{command_name} serve",
+    example = "{command_name} login\n{command_name} pair --name desktop --scope admin\n{command_name} serve",
     note = "Users and devices are stored in the same database as the catalogue. A token
 is shown once, at pairing, and only its hash is kept.
 
@@ -239,7 +239,7 @@ pub struct Pair {
     /// what to call the device in `devices`
     #[argh(option)]
     name: String,
-    /// play or pipeline (default play)
+    /// play or admin (default play)
     #[argh(option, from_str_fn(scope), default = "Scope::Play")]
     scope: Scope,
     /// whose device it is, see `user list` (default: the only user there is)
@@ -248,7 +248,7 @@ pub struct Pair {
 }
 
 fn scope(text: &str) -> Result<Scope, String> {
-    Scope::parse(text).ok_or_else(|| format!("unknown scope “{text}”; use play or pipeline"))
+    Scope::parse(text).ok_or_else(|| format!("unknown scope “{text}”; use play or admin"))
 }
 
 /// List paired devices.
@@ -326,7 +326,7 @@ fn main() -> Result<()> {
         Command::Devices(_) => {
             let devices = store()?.list(None)?;
             if devices.is_empty() {
-                println!("No devices paired. Start with:\n  stelly-server pair --name desktop --scope pipeline");
+                println!("No devices paired. Start with:\n  stelly-server pair --name desktop --scope admin");
             }
             for device in devices {
                 println!(
@@ -394,7 +394,7 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
     if store.count()? == 0 {
         eprintln!(
             "No devices are paired, so every request will be refused. Mint one with:\n  \
-             stelly-server pair --name desktop --scope pipeline\n"
+             stelly-server pair --name desktop --scope admin\n"
         );
     }
 
