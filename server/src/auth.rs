@@ -5,7 +5,7 @@
 //! revoked one phone at a time. A user is little more than a name the devices
 //! hang off, so each person gets their own play session and likes.
 //!
-//! `play` is every device; `pipeline` is hours of CPU, the shared rate limit,
+//! `play` is every device; `admin` is hours of CPU, the shared rate limit,
 //! the hidden artists and a `--purge` that deletes rows, so it is whoever looks
 //! after the server. `play` still needs a token: a stream URL is minted
 //! against the account, so handing those out is sharing it.
@@ -168,6 +168,10 @@ impl AuthStore {
         if !has_owner {
             conn.batch_execute("ALTER TABLE devices ADD COLUMN user_id INTEGER REFERENCES users(id)")?;
         }
+        // `admin` was called `pipeline`.
+        diesel::update(devices::table.filter(devices::scope.eq("pipeline")))
+            .set(devices::scope.eq(Scope::Admin.as_str()))
+            .execute(conn)?;
 
         // Devices from before there were users all belonged to the one there
         // was.
@@ -394,11 +398,11 @@ fn hex(bytes: &[u8]) -> String {
 // ------------------------------------------------------------- extractors
 
 /// A request that carried a valid token. Every route takes one of these or
-/// `PipelineAuth`, so there is no unauthed path by construction.
+/// `AdminAuth`, so there is no unauthed path by construction.
 pub struct PlayAuth(pub Device);
 
 /// A request from a device trusted with the expensive, destructive half.
-pub struct PipelineAuth(pub Device);
+pub struct AdminAuth(pub Device);
 
 fn bearer(parts: &Parts) -> Option<String> {
     parts
@@ -443,13 +447,13 @@ impl FromRequestParts<crate::AppState> for PlayAuth {
     }
 }
 
-impl FromRequestParts<crate::AppState> for PipelineAuth {
+impl FromRequestParts<crate::AppState> for AdminAuth {
     type Rejection = crate::Failure;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorise(parts, state, Scope::Pipeline).map(PipelineAuth)
+        authorise(parts, state, Scope::Admin).map(AdminAuth)
     }
 }
