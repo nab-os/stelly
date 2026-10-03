@@ -9,7 +9,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 out=${1:?usage: android/icons.sh OUT_DIR}
-project=${CARGO_TARGET_DIR:-$here/../../target}/dx/stelly-app/release/android/app
+project=${CARGO_TARGET_DIR:-$here/../../target}/dx/stelly/release/android/app
 res=$project/app/src/main/res
 
 [ -d "$res" ] || { echo "no gradle project at $project, run dx bundle first" >&2; exit 1; }
