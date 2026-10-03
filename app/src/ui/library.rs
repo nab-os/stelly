@@ -135,16 +135,6 @@ impl Sort {
         });
         keyed.into_iter().map(|(_, item)| item).collect()
     }
-
-    /// The space's own rows, which know no release date or duration.
-    pub(crate) fn space_rows(self, rows: Vec<SpaceRow>) -> Vec<SpaceRow> {
-        self.apply(rows, |row, key| match key {
-            SortKey::Title => text(&row.title),
-            SortKey::Artist => text(&row.artist),
-            SortKey::Album => text(&row.album),
-            _ => None,
-        })
-    }
 }
 
 /// Whether every term turns up in a track's title, what a tracks search asks
@@ -276,7 +266,7 @@ pub enum Grouping {
 
 /// Whatever the current view loaded. One struct rather than a per-view enum:
 /// search fills three of these at once, and an artist fills two.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Shelf {
     pub tracks: Vec<RemoteTrack>,
     pub albums: Vec<crate::qobuz::RemoteAlbum>,
@@ -702,6 +692,7 @@ impl Library {
 
         spawn(async move {
             let mut library = self;
+            let home = target == home();
             let loaded = load(target, space_only).await;
 
             // Someone asked for a different view while this was in flight.
@@ -713,6 +704,9 @@ impl Library {
 
             match loaded {
                 Ok(shelf) => {
+                    if home {
+                        crate::cache::write(HOME_CACHE, &shelf);
+                    }
                     let sort = *library.sort.peek();
                     library.loaded.set(shelf.clone());
                     library.shelf.set(shelf.sorted(sort));
@@ -777,9 +771,25 @@ fn scroll_to(top: f64) {
 
 /// First load, so the app shell does not have to reach into navigation.
 /// Favourites, because that is also what the crawl seeds from.
+///
+/// What the favourites were last time goes up at once, from the disk, and is
+/// fetched again underneath like any view `kept` remembers: on a phone the
+/// fetch can take seconds, and an empty home page for all of them is the app
+/// looking broken.
 pub fn open_initial(library: Library) {
-    library.show(View::Favourites { scope: Scope::Everything });
+    let mut library = library;
+    if let Some(shelf) = crate::cache::read::<Shelf>(HOME_CACHE) {
+        let source = *library.source.peek();
+        library.kept.write().push((home(), source, shelf));
+    }
+    library.show(home());
 }
+
+fn home() -> View {
+    View::Favourites { scope: Scope::Everything }
+}
+
+const HOME_CACHE: &str = "favourites.json";
 
 async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
     let mut shelf = Shelf::default();
@@ -788,7 +798,7 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
         // Clicking the search tab before typing anything is not a query.
         View::Search { query, .. } if query.trim().is_empty() => {}
         View::Search { query, scope } if space_only => {
-            let (albums, artists) = space_groups(&query);
+            let (albums, artists) = space_groups(&query).await?;
             if scope.albums() {
                 shelf.albums = albums;
             }
@@ -887,73 +897,31 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
 /// space-only search. Matched the way the space list is, every word somewhere
 /// in the artist, title or album, and put in the shelf so the tiles, their
 /// menus and the liked filter all work as they do for a Qobuz search.
-fn space_groups(query: &str) -> (Vec<RemoteAlbum>, Vec<RemoteArtist>) {
-    let terms: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
-    let Some(first) = terms.first() else {
-        return Default::default();
-    };
-
-    let mut albums: Vec<(u8, RemoteAlbum)> = Vec::new();
-    let mut artists: Vec<(u8, RemoteArtist)> = Vec::new();
-    let mut album_at = std::collections::HashMap::new();
-    let mut artist_at = std::collections::HashMap::new();
-
-    let guard = crate::engine().lock().unwrap();
-    let catalog = &guard.navigator.catalog;
-    for i in catalog.visible() {
-        let track = catalog.get(i);
-        let artist = track.artist.to_lowercase();
-        let title = track.title.to_lowercase();
-        let album = track.album.to_lowercase();
-        if !terms
-            .iter()
-            .all(|term| artist.contains(term) || title.contains(term) || album.contains(term))
-        {
-            continue;
-        }
-
-        // Named after what was typed first, the same preference the space
-        // list gives a track, but on the album's own title here.
-        let rank = u8::from(!(artist.starts_with(first) || album.starts_with(first)));
-        let artist_id = Some(track.artist_id).filter(|id| *id >= 0);
-
-        if !track.album_id.is_empty() {
-            let at = *album_at.entry(track.album_id.clone()).or_insert_with(|| {
-                albums.push((
-                    rank,
-                    RemoteAlbum {
-                        id: track.album_id.clone(),
-                        title: track.album.clone(),
-                        artist: track.artist.clone(),
-                        artist_id,
-                        image: crate::qobuz::cover_url(&track.album_id),
-                        ..Default::default()
-                    },
-                ));
-                albums.len() - 1
-            });
-            albums[at].0 = albums[at].0.min(rank);
-        }
-
-        if let Some(id) = artist_id {
-            let rank = u8::from(!artist.starts_with(first));
-            let at = *artist_at.entry(id).or_insert_with(|| {
-                artists.push((
-                    rank,
-                    RemoteArtist { id, name: track.artist.clone(), ..Default::default() },
-                ));
-                artists.len() - 1
-            });
-            artists[at].0 = artists[at].0.min(rank);
-        }
+async fn space_groups(query: &str) -> anyhow::Result<(Vec<RemoteAlbum>, Vec<RemoteArtist>)> {
+    if query.trim().is_empty() {
+        return Ok(Default::default());
     }
-
-    albums.sort_by_key(|entry| entry.0);
-    artists.sort_by_key(|entry| entry.0);
-    (
-        albums.into_iter().map(|(_, album)| album).collect(),
-        artists.into_iter().map(|(_, artist)| artist).collect(),
-    )
+    let found = backend()
+        .space_search(query, crate::api::SpaceSort::Rank, false, 0)
+        .await?;
+    let albums = found
+        .albums
+        .into_iter()
+        .map(|album| RemoteAlbum {
+            image: crate::qobuz::cover_url(&album.id),
+            id: album.id,
+            title: album.title,
+            artist: album.artist,
+            artist_id: album.artist_id,
+            ..Default::default()
+        })
+        .collect();
+    let artists = found
+        .artists
+        .into_iter()
+        .map(|artist| RemoteArtist { id: artist.id, name: artist.name, ..Default::default() })
+        .collect();
+    Ok((albums, artists))
 }
 
 // ------------------------------------------------------------ adding to space

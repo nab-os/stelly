@@ -25,10 +25,21 @@ never a re-analysis.
 
 Everything that is not the screen is `stelly-server`: the Qobuz client and
 its credentials, the SQLite corpus, the crawl, `analyse`, `build-space`,
-`layout`, the CLAP models. The desktop and Android apps are both clients of it
-and hold nothing but a synced copy of the space and the slim catalogue. There
-is no local mode; a desktop user runs the server on the same machine and
-pairs with it like any other device.
+`layout`, the CLAP models, and the loaded space every walk runs against. The
+desktop and Android apps are both clients of it and hold nothing of the space
+but a cache of its index and the map's points. There is no local mode; a
+desktop user runs the server on the same machine and pairs with it like any
+other device.
+
+The space used to be synced: each client downloaded `space.bin` and a slim
+projection of the catalogue, ~40MB, and walked it in process so the weight
+sliders could reshape distances live. On a phone that meant a startup gated on
+the download, and on checksumming the copy it already had. Now the server
+loads the space once, after every rebuild, and answers each walk; the sliders
+travel with the request and take effect on the next result. A walk costs the
+server milliseconds, so what the client gives up is liveness it rarely used,
+and what it gets is an app that opens on what it cached last time and asks
+the server behind the window.
 
 The pipeline used to be Python, Essentia's descriptors and EffNet heads, CLAP
 under torch, UMAP, driven as `uv run` subprocesses. It was ported so that
@@ -96,8 +107,8 @@ descriptor swamping its neighbours, and row normalisation stops the 40-d
 semantic block silently dominating the 2-d tempo block regardless of any weight
 you set.
 
-Weights are applied by the client at query time, which is what makes the
-sliders live.
+Weights are applied at query time, sent by the client with each request,
+which is what lets the sliders reshape distances without a rebuild.
 
 Decisions worth knowing about:
 
@@ -231,15 +242,12 @@ bandwidth story changes. Ten-minute test: mint a URL on the server, then
 
 Not working, and honestly characterised rather than promised.
 
-`cargo check --target wasm32-unknown-unknown --features web` gets further than
-expected: **every dependency compiles, including rusqlite and memmap2.**
-
-Compiling is not the hard part. The hard part is that both of those crates
-compile and then cannot *work*: there is no filesystem to `std::fs::read` a
-`catalog.db` from and nothing to `mmap`. A real web client needs the space
-fetched into memory rather than mapped, and the catalogue served as a flat
-buffer instead of SQLite, which would also simplify Android. That is a week-ish
-of work on the data layer, not an afternoon of cfg attributes.
+What used to block it was the data layer: the app read a synced `catalog.db`
+through SQLite and memory-mapped `space.bin`, and a browser has no filesystem
+for either. Neither is in the app any more, it asks the server for the space
+like everything else and links no SQLite at all. What is left is untried: the
+pairing and the cache still go through `std::fs`, and the map's points through
+the desktop's asset handler, which a web build would have to fetch instead.
 
 ## Licensing
 

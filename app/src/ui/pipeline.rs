@@ -22,9 +22,9 @@ pub struct Pipeline {
     pub log: Signal<Vec<String>>,
     pub corpus: Signal<Corpus>,
     /// Bumped when the space underneath has been rebuilt, so the shell knows
-    /// to reload the engine and redraw the map.
+    /// to ask for it again and redraw the map.
     pub generation: Signal<u64>,
-    /// (in_space, on_map), written by the shell, only it can see the engine.
+    /// (in_space, on_map), written by the shell from what the server says.
     pub space_counts: Signal<(i64, i64)>,
     /// Whatever the backend last refused to do.
     pub error: Signal<Option<String>>,
@@ -59,8 +59,8 @@ impl Pipeline {
     }
 
     /// Re-read the counts that tell you what still needs running. `in_space`
-    /// and `on_map` come from the loaded engine: the question is what this app
-    /// is drawing, not what is on disk.
+    /// and `on_map` come from the loaded space: the question is what the map
+    /// draws, not what is on disk.
     pub fn refresh(self) {
         spawn(async move {
             let mut pipeline = self;

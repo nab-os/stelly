@@ -12,9 +12,10 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use super::icons;
-use crate::paths::{Constraints, Step};
+pub use crate::api::Recipe;
+use crate::api::{GenerateRequest, Step, TrackMeta};
 use crate::qobuz::RemoteTrack;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -82,31 +83,13 @@ pub const MOODS: [&str; 8] = [
     "warm dinner with friends",
 ];
 
-/// What produced the result currently on screen.
-///
-/// Generation used to follow the selection, so a result was never older than
-/// the last click and needed no label. Now that it is asked for, it outlives
-/// both the selection and the mode that made it, and twenty unlabelled
-/// tracks under a tab that no longer matches them is a puzzle, not a list.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Recipe {
-    Neighbours { seed: i64 },
-    Radio { seed: i64 },
-    Path { a: i64, b: i64, even: bool },
-    Drift { seed: i64, phrase: String },
-    Mood { phrase: String },
-}
-
 #[derive(Clone, Copy)]
 pub struct Generator {
     pub mode: Signal<Mode>,
     pub result: Signal<Vec<Step>>,
     /// What produced `result`, for its heading. `None` when there is none.
     pub produced_by: Signal<Option<Recipe>>,
-    /// A walk is running. Set before the task is spawned so one paint gets
-    /// through: the walk itself takes the engine lock and holds it, and on
-    /// the desktop's single-threaded runtime that blocks the UI outright.
-    /// Radio is the one that shows, it scans the corpus once per step.
+    /// A walk is running on the server.
     pub busy: Signal<bool>,
     /// The weights moved since `result` was produced, so the distances behind
     /// it no longer hold. Kept separate from clearing: the rows stay on
@@ -122,9 +105,12 @@ pub struct Generator {
     /// Path shape: evenly paced interpolation rather than the shortest route.
     pub even: Signal<bool>,
     pub status: Signal<Option<String>>,
-    /// Whether the backend can turn a phrase into an embedding. Half of what
-    /// drift needs; the engine answers the other half.
+    /// Whether the server can steer by a phrase: it has the text tower, and
+    /// the corpus the audio embeddings to match it against.
     pub tower: Signal<bool>,
+    /// The sliders, sent with every request: the server keeps no weights of
+    /// its own for a device.
+    pub weights: Signal<HashMap<String, f32>>,
     /// Whether the panel is slid in, on a phone. A wide screen always shows
     /// it and ignores this.
     pub panel_open: Signal<bool>,
@@ -149,13 +135,14 @@ impl Generator {
             even: Signal::new(false),
             status: Signal::new(None),
             tower: Signal::new(false),
+            weights: Signal::new(HashMap::new()),
             panel_open: Signal::new(false),
         }
     }
 
     /// Whether drift and mood are offerable at all.
     pub(crate) fn can_steer(&self) -> bool {
-        *self.tower.read() && crate::engine().lock().unwrap().has_audio_embeddings()
+        *self.tower.read()
     }
 
     /// Whether the current mode has what it needs.
@@ -168,9 +155,8 @@ impl Generator {
         }
     }
 
-    /// Produce a sequence. Spawned rather than inline because drift has to
-    /// await: turning a phrase into a CLAP embedding may be a round trip. The
-    /// walk itself is always local.
+    /// Produce a sequence. Spawned, because the walk is the server's: one
+    /// round trip, the phrase embedded on the way for drift and mood.
     pub fn run(self, selected: Option<i64>) {
         let mut generator = self;
         generator.status.set(None);
@@ -204,73 +190,29 @@ impl Generator {
             }),
         };
 
+        let weights = self.weights.peek().clone();
+
         // Forever, not scoped: `request` is called from the row menu, which
         // closes in the same click, and a scoped task dies with it before it
         // is ever polled, leaving `busy` set and the button on "working…".
         spawn_forever(async move {
-            let produced = match mode {
-                Mode::Neighbours => selected.map(|id| {
-                    crate::engine()
-                        .lock()
-                        .unwrap()
-                        .navigator
-                        .neighbours(id, count, false)
-                }),
-                Mode::Radio => selected.map(|id| {
-                    crate::engine().lock().unwrap().navigator.radio_nearest(
-                        id,
+            let produced = match recipe.clone() {
+                Some(recipe) => {
+                    let request = GenerateRequest {
+                        recipe,
                         count,
                         penalty,
-                        &Constraints::default(),
-                    )
-                }),
-                Mode::Path => match (from, to) {
-                    (Some(a), Some(b)) => {
-                        let mut guard = crate::engine().lock().unwrap();
-                        Some(if even {
-                            guard.navigator.interpolate(a, b, count, &Constraints::default())
-                        } else {
-                            guard.navigator.graph_path(a, b, 16)
-                        })
-                    }
-                    _ => None,
-                },
-                Mode::Drift => match selected {
-                    Some(id) => {
-                        // Embed first, then walk. The await is outside the
-                        // lock: holding the engine across a round trip would
-                        // freeze every slider.
-                        match backend().embed(&phrase).await {
-                            Ok(embedding) => {
-                                let guard = &mut *crate::engine().lock().unwrap();
-                                Some(guard.navigator.drift_to_text(
-                                    id,
-                                    &embedding,
-                                    count,
-                                    5,
-                                    &Constraints::default(),
-                                ))
-                            }
-                            Err(err) => {
-                                generator.status.set(Some(format!("{err:#}")));
-                                None
-                            }
+                        weights,
+                    };
+                    match backend().generate(&request).await {
+                        Ok(steps) => Some(steps),
+                        Err(err) => {
+                            generator.status.set(Some(format!("{err:#}")));
+                            None
                         }
                     }
-                    None => None,
-                },
-                Mode::Mood => match backend().embed(&phrase).await {
-                    Ok(embedding) => Some(crate::engine().lock().unwrap().navigator.mood(
-                        &embedding,
-                        count,
-                        penalty,
-                        &Constraints::default(),
-                    )),
-                    Err(err) => {
-                        generator.status.set(Some(format!("{err:#}")));
-                        None
-                    }
-                },
+                }
+                None => None,
             };
 
             let Some(produced) = produced else {
@@ -278,6 +220,7 @@ impl Generator {
                 return;
             };
             let produced = dedup_by_recording(produced);
+            super::remember(produced.iter().map(|step| &step.track));
             if produced.is_empty() {
                 generator.status.set(Some(
                     if mode == Mode::Mood {
@@ -455,7 +398,7 @@ fn dedup_by_recording(steps: Vec<Step>) -> Vec<Step> {
 }
 
 /// Present a space track to the player, which speaks in Qobuz terms.
-pub(crate) fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
+pub(crate) fn as_remote(meta: &TrackMeta) -> RemoteTrack {
     RemoteTrack {
         id: meta.track_id,
         title: meta.title.clone(),
@@ -482,8 +425,7 @@ pub(crate) fn as_remote(meta: &crate::db::TrackMeta) -> RemoteTrack {
 #[cfg(test)]
 mod tests {
     use super::dedup_by_recording;
-    use crate::db::TrackMeta;
-    use crate::paths::Step;
+    use crate::api::{Step, TrackMeta};
 
     fn step(track_id: i64, isrc: Option<&str>) -> Step {
         Step {
