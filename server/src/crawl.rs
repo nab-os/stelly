@@ -520,8 +520,8 @@ pub async fn catalogue_target(
             Ok(found)
         }
         Target::Artist(artist_id) => {
-            // Their own releases, as the artist page lists them, not every
-            // album that credits them.
+            // Their own releases, not every album that credits them, the
+            // same ones the artist page counts for its in-space badge.
             let own: Vec<Value> = client
                 .artist_albums_raw(*artist_id, 1000)
                 .await?

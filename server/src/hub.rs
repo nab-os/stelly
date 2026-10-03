@@ -233,7 +233,7 @@ impl Hub {
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         self.catalogue
             .get_or(format!("artist_albums:{artist_id}:{cap}"), async {
-                Ok(self.session().await?.artist_albums(artist_id, cap).await?.1)
+                Ok(self.session().await?.artist_albums(artist_id, cap).await?)
             })
             .await
     }
