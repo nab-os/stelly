@@ -8,7 +8,7 @@ name = "stelly-server"
 path = "src/main.rs"
 
 [dependencies]
-stelly-core.workspace = true
+stelly-core = { workspace = true, features = ["engine"] }
 
 anyhow.workspace = true
 argh = "0.1.19"

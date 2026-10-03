@@ -452,17 +452,12 @@ async fn stream_url(track_id: i64, format_id: u32) -> anyhow::Result<String> {
     backend().file_url(track_id, format_id).await
 }
 
-/// Whether a queued track belongs to a hidden artist. Asked of the loaded
-/// space, not the database: a remote client has none, and the engine's copy is
-/// the one kept in step.
+/// Whether a queued track belongs to a hidden artist. Peeked: this runs in
+/// the task loading a track, which has nothing to redraw when it changes.
 fn is_hidden(artist_id: i64) -> bool {
-    crate::engine()
-        .lock()
-        .unwrap()
-        .navigator
-        .catalog
-        .blocked_artists
-        .contains(&artist_id)
+    try_consume_context::<super::Blocklist>().is_some_and(|blocklist| {
+        blocklist.artists.peek().iter().any(|entry| entry.artist_id == artist_id)
+    })
 }
 
 /// Fire a transport command at the audio element. Guarded because the first

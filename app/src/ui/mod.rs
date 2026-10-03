@@ -1,8 +1,8 @@
 //! The Qobuz half: browsing, playing, and crawling more of it. Live, so it
 //! sees the whole catalogue rather than just the analysed corpus.
 //!
-//! Panels go through `crate::backend` and cannot tell local from remote. The
-//! space is the exception, always answered in-process.
+//! Panels go through `crate::backend`, the space included: it lives on the
+//! server, and what the client knows of it is what it has been told.
 
 pub mod crawler;
 pub mod generate;
@@ -31,10 +31,12 @@ pub use release::{ReleaseNotice, Releases};
 pub use side::{GeneratePanel, PathPill};
 
 use dioxus::prelude::*;
-use crate::api::BlockedArtist;
+use crate::api::{BlockedArtist, SpaceIndex, SpaceInfo, TrackMeta};
+use crate::backend::backend;
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Mutex;
 
 /// Qobuz pages at 100. These caps stop a four-thousand-track favourites list
 /// from stalling the panel the first time it is opened.
@@ -78,13 +80,101 @@ pub(crate) fn space_mark(in_space: bool) -> Element {
 #[derive(Clone, Copy)]
 pub struct Selection(pub Signal<Option<i64>>);
 
-/// A space track, as something to display or play. `None` when the id names
-/// nothing the space currently holds, selected, then the space was rebuilt
-/// without it, or a row's address outlived its target.
+// -------------------------------------------------------------------- space
+
+/// What the client knows of the server's space: its shape, which tracks it
+/// holds, and whether it could be reached. Starts from the disk cache and is
+/// refreshed behind the window, so nothing waits on the network to open.
+#[derive(Clone, Copy)]
+pub struct Space {
+    pub info: Signal<SpaceInfo>,
+    pub index: Signal<Rc<SpaceIndex>>,
+    /// Why the server did not answer, while it does not.
+    pub offline: Signal<Option<String>>,
+    /// Bumped when rows arrive for `space_row`, to draw again what asked.
+    pub seen: Signal<u64>,
+}
+
+/// Every space row the server has sent, by id: generated rows, search
+/// results, the tracks asked for by id. Rows are small and a session sees a
+/// few thousand at most, so nothing is evicted until the space is rebuilt.
+///
+/// A plain map rather than a signal: it is read from event handlers and
+/// tasks with no scope to subscribe. What renders from it goes through
+/// `space_row`, which subscribes to `Space::seen` instead.
+static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
+
+#[derive(Default)]
+struct Known {
+    rows: HashMap<i64, TrackMeta>,
+    /// Asked for already, found or not, so a track the space does not hold
+    /// is not asked for again on every render.
+    asked: HashSet<i64>,
+}
+
+fn with_known<T>(work: impl FnOnce(&mut Known) -> T) -> T {
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    work(known.get_or_insert_with(Known::default))
+}
+
+pub(crate) fn remember<'a>(tracks: impl IntoIterator<Item = &'a TrackMeta>) {
+    with_known(|known| {
+        for track in tracks {
+            known.rows.insert(track.track_id, track.clone());
+        }
+    });
+}
+
+/// Forget every row, after a rebuild moved them.
+pub(crate) fn forget_known() {
+    *KNOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn known(track_id: i64) -> Option<TrackMeta> {
+    with_known(|known| known.rows.get(&track_id).cloned())
+}
+
+/// A space row, from what has been seen or else from the server. `None` when
+/// the space does not hold it, or the server could not be asked.
+pub(crate) async fn space_meta(track_id: i64) -> Option<TrackMeta> {
+    if let Some(found) = known(track_id) {
+        return Some(found);
+    }
+    let found = backend().space_tracks(vec![track_id]).await.ok()?;
+    remember(&found);
+    found.into_iter().next()
+}
+
+/// A space row for a component to show. One not seen yet is asked for, and
+/// the component drawn again when it arrives; until then, and for a track the
+/// space does not hold, `None`.
+pub(crate) fn space_row(track_id: i64) -> Option<TrackMeta> {
+    let mut space = consume_context::<Space>();
+    space.seen.read();
+    if let Some(found) = known(track_id) {
+        return Some(found);
+    }
+    if with_known(|known| known.asked.insert(track_id)) {
+        spawn(async move {
+            match backend().space_tracks(vec![track_id]).await {
+                Ok(found) => {
+                    remember(&found);
+                    *space.seen.write() += 1;
+                }
+                // Not asked after all: the next render may try again.
+                Err(_) => {
+                    with_known(|known| known.asked.remove(&track_id));
+                }
+            }
+        });
+    }
+    None
+}
+
+/// A space track, as something to display or play, if it has been seen. The
+/// synchronous half of `space_meta`, for an event handler that cannot wait.
 pub(crate) fn space_track(track_id: i64) -> Option<RemoteTrack> {
-    let guard = crate::engine().lock().unwrap();
-    let row = *guard.navigator.index_of.get(&track_id)?;
-    Some(generate::as_remote(guard.navigator.catalog.get(row)))
+    known(track_id).as_ref().map(generate::as_remote)
 }
 
 /// Select a space track for the map and the generator, and open its details
@@ -92,8 +182,16 @@ pub(crate) fn space_track(track_id: i64) -> Option<RemoteTrack> {
 /// mean by "look at this track".
 pub fn open_track(library: Library, mut selection: Signal<Option<i64>>, track_id: i64) {
     selection.set(Some(track_id));
-    if let Some(track) = space_track(track_id) {
-        library.go(View::Track(track));
+    match space_track(track_id) {
+        Some(track) => library.go(View::Track(track)),
+        // A point on the map is only an id until it is asked for.
+        None => {
+            spawn(async move {
+                if let Some(meta) = space_meta(track_id).await {
+                    library.go(View::Track(generate::as_remote(&meta)));
+                }
+            });
+        }
     }
 }
 
@@ -123,8 +221,8 @@ pub(crate) fn album_of(track: &RemoteTrack) -> Option<RemoteAlbum> {
 }
 
 /// The dimension weight sliders' values, keyed by block name. A context
-/// rather than a prop: the shell owns the signal and reacts to the space
-/// being rebuilt, but the sliders themselves live in the track sheet.
+/// rather than a prop: the shell owns the signal and resets it when the
+/// space's blocks change, but the sliders themselves live in the panel.
 #[derive(Clone, Copy)]
 pub struct Weights(pub Signal<std::collections::HashMap<String, f32>>);
 
@@ -284,16 +382,14 @@ pub(crate) fn album_link(library: Library, track: &RemoteTrack, class: &'static 
 
 /// Tracks in the space matching the search box, and how many matched in all.
 ///
-/// A context rather than a prop: the shell owns the scan, but the column that
+/// A context rather than a prop: the shell asks the server, but the column that
 /// draws the results is `LibraryPanel`, and threading a list through every
 /// intervening component to get there is how the two lists ended up in two
 /// different columns in the first place.
 #[derive(Clone, Copy)]
-pub struct SpaceMatches(pub Memo<(Vec<SpaceRow>, usize)>);
+pub struct SpaceMatches(pub Signal<(Vec<SpaceRow>, usize)>);
 
-/// Artists the user has hidden, and the actions that change that. A signal
-/// rather than a per-render read: the engine's copy sits behind a mutex the UI
-/// cannot subscribe to.
+/// Artists the user has hidden, and the actions that change that.
 #[derive(Clone, Copy)]
 pub struct Blocklist {
     pub artists: Signal<Vec<BlockedArtist>>,
