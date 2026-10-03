@@ -8,7 +8,7 @@
 use super::crawler::Crawler;
 use super::POLL;
 use dioxus::prelude::*;
-use crate::api::{Corpus, Device, PipelineStatus, Progress, Scope, Stage};
+use crate::api::{Corpus, Device, PipelineStatus, Progress, Scope, Stage, User};
 use crate::backend::backend;
 
 /// How many status polls pass between corpus recounts. Six SQL aggregates
@@ -343,16 +343,99 @@ pub fn PipelineLog() -> Element {
     }
 }
 
-/// Paired devices, and a way to add or revoke one. Needs the `pipeline`
-/// scope itself, a `play` phone cannot mint itself a
-/// promotion.
+/// Everyone in the family, as a `pipeline` device sees them. Read by the
+/// people row and the pairing form, so someone added in one shows in the
+/// other.
+#[derive(Clone, Copy)]
+pub struct Family(pub Signal<Vec<User>>);
+
+/// The people sharing this server, and a way to add one. `pipeline` only, the
+/// same trust as pairing them a device, which is the next thing to do.
+#[component]
+pub fn People() -> Element {
+    let me = use_context::<super::Me>().0;
+    let mut people = use_context::<Family>().0;
+    let mut name = use_signal(String::new);
+    let mut status = use_signal(|| None::<String>);
+
+    use_future(move || async move {
+        if let Ok(found) = backend().users().await {
+            people.set(found);
+        }
+    });
+
+    let pipeline = me.read().as_ref().is_some_and(|device| device.scope == Scope::Pipeline);
+    if !pipeline {
+        return rsx! {};
+    }
+
+    let add = move |_| {
+        let wanted = name.peek().trim().to_string();
+        spawn(async move {
+            match backend().add_user(&wanted).await {
+                Ok(user) => {
+                    status.set(Some(format!("Added {}. Pair them a device below.", user.name)));
+                    name.set(String::new());
+                    if let Ok(found) = backend().users().await {
+                        people.set(found);
+                    }
+                }
+                Err(err) => status.set(Some(format!("{err:#}"))),
+            }
+        });
+    };
+
+    rsx! {
+        section { class: "panel setting",
+            h2 { "People" }
+            p { class: "muted",
+                "Each person has their own devices, queue and likes. The Qobuz account and the space are everyone's."
+            }
+            div { class: "field",
+                input {
+                    class: "search",
+                    placeholder: "name, e.g. sam",
+                    value: "{name}",
+                    oninput: move |event| name.set(event.value()),
+                }
+                button {
+                    class: "primary",
+                    disabled: name.read().trim().is_empty(),
+                    onclick: add,
+                    "add"
+                }
+            }
+            if let Some(message) = status.read().clone() {
+                p { class: "muted", "{message}" }
+            }
+            ul { class: "list",
+                for user in people.read().iter() {
+                    li { key: "{user.id}", class: "row",
+                        span { class: "title", "{user.name}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Paired devices, and a way to add or revoke one. Pairing needs the
+/// `pipeline` scope, a `play` phone cannot mint itself a promotion. A `play`
+/// device sees and can revoke its own user's devices only.
 #[component]
 pub fn Devices() -> Element {
     let pipeline = use_context::<Pipeline>();
+    let me = use_context::<super::Me>().0;
     let mut name = use_signal(String::new);
     let mut scope = use_signal(|| Scope::Play);
+    let mut person = use_signal(String::new);
+    let people = use_context::<Family>().0;
 
     let devices = pipeline.devices.read().clone();
+    // Unknown until the server answers, and then for good on one older than
+    // users, where pairing was the only thing this panel was for.
+    let pairs = me.read().as_ref().is_none_or(|device| device.scope == Scope::Pipeline);
+    let family = devices.iter().any(|device| !device.user.is_empty());
 
     use_future(move || async move {
         let mut pipeline = pipeline;
@@ -376,45 +459,60 @@ pub fn Devices() -> Element {
             p { class: "muted",
                 "Each device gets its own token, so one phone can be revoked without re-pairing the rest. The token is shown once."
             }
-
-            div { class: "field",
-                input {
-                    class: "search",
-                    placeholder: "device name, e.g. phone",
-                    value: "{name}",
-                    oninput: move |event| name.set(event.value()),
-                }
-                button {
-                    class: if *scope.read() == Scope::Play { "chip active" } else { "chip" },
-                    onclick: move |_| scope.set(Scope::Play),
-                    "play"
-                }
-                button {
-                    class: if *scope.read() == Scope::Pipeline { "chip active" } else { "chip" },
-                    onclick: move |_| scope.set(Scope::Pipeline),
-                    "pipeline"
-                }
-                button {
-                    class: "primary",
-                    disabled: name.read().trim().is_empty(),
-                    onclick: move |_| {
-                        let wanted = name.peek().trim().to_string();
-                        let chosen = *scope.peek();
-                        spawn(async move {
-                            let mut pipeline = pipeline;
-                            match backend().pair_device(&wanted, chosen).await {
-                                Ok(grant) => {
-                                    pipeline.granted.set(Some(grant.token));
-                                    name.set(String::new());
-                                    if let Ok(found) = backend().devices().await {
-                                        pipeline.devices.set(found);
-                                    }
-                                }
-                                Err(err) => pipeline.error.set(Some(format!("{err:#}"))),
+            if pairs {
+                div { class: "field",
+                    input {
+                        class: "search",
+                        placeholder: "device name, e.g. phone",
+                        value: "{name}",
+                        oninput: move |event| name.set(event.value()),
+                    }
+                    if people.read().len() > 1 {
+                        select {
+                            class: "search",
+                            value: "{person}",
+                            onchange: move |event| person.set(event.value()),
+                            option { value: "", "yours" }
+                            for user in people.read().iter() {
+                                option { key: "{user.id}", value: "{user.name}", "{user.name}’s" }
                             }
-                        });
-                    },
-                    "pair"
+                        }
+                    }
+                    button {
+                        class: if *scope.read() == Scope::Play { "chip active" } else { "chip" },
+                        onclick: move |_| scope.set(Scope::Play),
+                        "play"
+                    }
+                    button {
+                        class: if *scope.read() == Scope::Pipeline { "chip active" } else { "chip" },
+                        onclick: move |_| scope.set(Scope::Pipeline),
+                        "pipeline"
+                    }
+                    button {
+                        class: "primary",
+                        disabled: name.read().trim().is_empty(),
+                        onclick: move |_| {
+                            let wanted = name.peek().trim().to_string();
+                            let chosen = *scope.peek();
+                            let whose = person.peek().trim().to_string();
+                            spawn(async move {
+                                let mut pipeline = pipeline;
+                                let whose = Some(whose.as_str()).filter(|whose| !whose.is_empty());
+                                match backend().pair_device(&wanted, chosen, whose).await {
+                                    Ok(grant) => {
+                                        pipeline.granted.set(Some(grant.token));
+                                        name.set(String::new());
+                                        person.set(String::new());
+                                        if let Ok(found) = backend().devices().await {
+                                            pipeline.devices.set(found);
+                                        }
+                                    }
+                                    Err(err) => pipeline.error.set(Some(format!("{err:#}"))),
+                                }
+                            });
+                        },
+                        "pair"
+                    }
                 }
             }
 
@@ -434,6 +532,9 @@ pub fn Devices() -> Element {
                 for device in devices {
                     li { key: "{device.id}", class: "row",
                         span { class: "title", "{device.name}" }
+                        if family {
+                            span { class: "muted tag", "{device.user}" }
+                        }
                         span { class: "muted tag", "{device.scope.as_str()}" }
                         span { class: "muted",
                             {device.last_seen.clone().unwrap_or_else(|| "never seen".into())}

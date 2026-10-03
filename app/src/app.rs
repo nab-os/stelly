@@ -3,11 +3,11 @@
 //! In the library rather than `main.rs` because an Android build has no
 //! `main`: the APK loads the .so and calls `start_app`.
 
-use crate::api::{SpaceIndex, SpaceInfo, SpaceSort};
+use crate::api::{Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
 use crate::backend::{self, backend};
 use crate::ui::{
-    icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, GeneratePanel, Generator,
-    Library, LocalIds, MainScreen, MapView, PathPill, Pipeline, Player, PlayerBar, QueueView,
+    icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
+    Library, LocalIds, MainScreen, MapView, Me, PathPill, Pipeline, Player, PlayerBar, QueueView,
     ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, View,
     Weights,
 };
@@ -243,6 +243,7 @@ fn Shell() -> Element {
     use_context_provider(|| Weights(generator.weights));
     let crawler = use_context_provider(Crawler::new);
     let pipeline = use_context_provider(Pipeline::new);
+    use_context_provider(|| Family(Signal::new(Vec::new())));
 
     // What is known of the space: what the disk had at once, then whatever
     // the server says behind the window. Nothing waits on the network to open.
@@ -404,10 +405,25 @@ fn Shell() -> Element {
         });
     });
 
+    // From the disk first, like the favourites, so the controls a `play`
+    // device is refused are not drawn while the server is asked again.
+    let me = use_signal(|| crate::cache::read::<Device>(ME_CACHE));
+    use_context_provider(|| Me(me));
+    use_future(move || async move {
+        let mut me = me;
+        if let Ok(found) = backend().me().await {
+            crate::cache::write(ME_CACHE, &found);
+            me.set(Some(found));
+        }
+    });
+    // A server older than users answers no `me`, and let any device hide.
+    let editable = use_memo(move || me.read().as_ref().is_none_or(|device| device.scope == Scope::Pipeline));
+
     use_context_provider(|| Blocklist {
         artists: blocked,
         block: apply_block,
         unblock: lift_block,
+        editable,
     });
 
     // Follows the index, which the server rebuilds when an artist is hidden:
@@ -850,6 +866,7 @@ const SPACE_CACHE: &str = "space.json";
 const POINTS_CACHE: &str = "points.bin";
 const POINTS_META_CACHE: &str = "points-meta.json";
 const POINTS_STAMP_CACHE: &str = "points.stamp";
+const ME_CACHE: &str = "me.json";
 
 /// The map's points as `map.js` reads them, and the stamp they were cut at.
 /// A global because the asset handler answers outside any scope.

@@ -1,6 +1,6 @@
 //! Catalogue crawler.
 //!
-//! Seeds from favourites at seed_distance 0, then expands through
+//! Seeds from the family's likes at seed_distance 0, then expands through
 //! `artist/getSimilarArtists`. The frontier lives in SQLite, so the crawl is
 //! interruptible.
 
@@ -160,7 +160,7 @@ pub fn upsert_track(
             tracks::duration.eq(coalesce(excluded(tracks::duration), tracks::duration)),
             tracks::isrc.eq(coalesce(excluded(tracks::isrc), tracks::isrc)),
             tracks::qobuz_json.eq(coalesce(excluded(tracks::qobuz_json), tracks::qobuz_json)),
-            // Keep the shortest known distance to a favourite.
+            // Keep the shortest known distance to a like.
             tracks::seed_distance.eq(least(tracks::seed_distance, excluded(tracks::seed_distance))),
         ))
         .execute(conn)?;
@@ -240,33 +240,39 @@ fn is_blocked(conn: &mut SqliteConnection, kind: &str, ref_id: &str, blocked: &H
 
 // --------------------------------------------------------------------- seed
 
-/// Load every favourite into the catalogue at seed_distance 0.
-pub async fn seed(conn: &mut SqliteConnection, client: &mut QobuzClient, cap: usize) -> Result<Stats> {
+/// Load everything the family likes into the catalogue at seed_distance 0.
+///
+/// The likes keep the Qobuz objects they were made from, so this asks Qobuz
+/// for nothing; the frontier it fills is what does.
+pub fn seed(conn: &mut SqliteConnection) -> Result<Stats> {
     let mut stats = Stats::default();
 
-    for track in client.favorites_raw("tracks", cap).await? {
-        if upsert_track(conn, &track, None, None, 0)?.is_some() {
-            stats.tracks_added += 1;
-            if let Some(id) = track.get("performer").and_then(|p| as_i64(p, "id")) {
-                enqueue(conn, "artist", &id.to_string(), 0)?;
+    for (kind, item) in crate::likes::family(conn)? {
+        match kind.as_str() {
+            "track" => {
+                if upsert_track(conn, &item, None, None, 0)?.is_some() {
+                    stats.tracks_added += 1;
+                    if let Some(id) = item.get("performer").and_then(|p| as_i64(p, "id")) {
+                        enqueue(conn, "artist", &id.to_string(), 0)?;
+                    }
+                }
             }
-        }
-    }
-
-    for album in client.favorites_raw("albums", cap).await? {
-        if let Some(album_id) = upsert_album(conn, &album)? {
-            stats.albums_expanded += 1;
-            enqueue(conn, "album", &album_id, 0)?;
-            if let Some(id) = album.get("artist").and_then(|a| as_i64(a, "id")) {
-                enqueue(conn, "artist", &id.to_string(), 0)?;
+            "album" => {
+                if let Some(album_id) = upsert_album(conn, &item)? {
+                    stats.albums_expanded += 1;
+                    enqueue(conn, "album", &album_id, 0)?;
+                    if let Some(id) = item.get("artist").and_then(|a| as_i64(a, "id")) {
+                        enqueue(conn, "artist", &id.to_string(), 0)?;
+                    }
+                }
             }
-        }
-    }
-
-    for artist in client.favorites_raw("artists", cap).await? {
-        if let Some(id) = upsert_artist(conn, &artist)? {
-            stats.artists_expanded += 1;
-            enqueue(conn, "artist", &id.to_string(), 0)?;
+            "artist" => {
+                if let Some(id) = upsert_artist(conn, &item)? {
+                    stats.artists_expanded += 1;
+                    enqueue(conn, "artist", &id.to_string(), 0)?;
+                }
+            }
+            _ => {}
         }
     }
 

@@ -368,7 +368,8 @@ pub struct OrderRequest {
 // ----------------------------------------------------------------- the auth
 
 /// What a device is allowed to do. `Play` is every device; `Pipeline` is hours
-/// of CPU, the shared rate limit, and `block --purge`, which deletes rows.
+/// of CPU, the shared rate limit, the family's hidden artists, and
+/// `block --purge`, which deletes rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
@@ -408,6 +409,28 @@ pub struct Device {
     pub scope: Scope,
     pub created_at: String,
     pub last_seen: Option<String>,
+    /// Whose device it is. Absent from servers older than users.
+    #[serde(default)]
+    pub user_id: i64,
+    #[serde(default)]
+    pub user: String,
+}
+
+/// One member of the family. Each has their own devices, play session and
+/// likes; the Qobuz account and the space are everyone's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+}
+
+/// What an import of the Qobuz favourites added to someone's likes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Imported {
+    pub tracks: usize,
+    pub albums: usize,
+    pub artists: usize,
 }
 
 /// The one time a token is ever transmitted.
@@ -420,7 +443,7 @@ pub struct PairingGrant {
 // -------------------------------------------------------------- the errors
 
 /// A failure, in the shape the client can turn back into an `anyhow::Error`.
-/// The server sends the message it would have logged: single-user, private
+/// The server sends the message it would have logged: a family on a private
 /// network, and a real error beats a sanitised 500.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiError {
