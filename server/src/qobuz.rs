@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const API_BASE: &str = "https://www.qobuz.com/api.json/0.2";
 
 pub use stelly_core::qobuz::{
-    own_releases, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults, FORMAT_MP3_320,
+    discography, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults, FORMAT_MP3_320,
 };
 
 /// Requests per second, and how many may be spent at once. One budget for the
@@ -541,32 +541,8 @@ impl QobuzClient {
 
     /// Raw album objects for an artist, paginated through `artist/get`.
     pub async fn artist_albums_raw(&mut self, artist_id: i64, cap: usize) -> Result<Vec<Value>> {
-        Ok(self.artist_albums_inner(artist_id, cap).await?.1)
-    }
-
-    /// An artist's discography, newest first.
-    pub async fn artist_albums(
-        &mut self,
-        artist_id: i64,
-        cap: usize,
-    ) -> Result<(RemoteArtist, Vec<RemoteAlbum>)> {
-        let (artist, raw) = self.artist_albums_inner(artist_id, cap).await?;
-        let mut out = own_releases(artist_id, raw.iter().filter_map(RemoteAlbum::parse).collect());
-        out.sort_by(|a, b| b.year().cmp(&a.year()));
-        Ok((artist, out))
-    }
-
-    async fn artist_albums_inner(
-        &mut self,
-        artist_id: i64,
-        cap: usize,
-    ) -> Result<(RemoteArtist, Vec<Value>)> {
         self.login().await?;
 
-        let mut artist = RemoteArtist {
-            id: artist_id,
-            ..Default::default()
-        };
         let mut out: Vec<Value> = Vec::new();
         let mut offset = 0usize;
 
@@ -578,12 +554,6 @@ impl QobuzClient {
                 ("offset".to_string(), offset.to_string()),
             ]);
             let data = self.request("artist/get", &params, None).await?;
-
-            if artist.name.is_empty() {
-                if let Some(parsed) = RemoteArtist::parse(&data) {
-                    artist = parsed;
-                }
-            }
 
             let block = data.get("albums").cloned().unwrap_or(Value::Null);
             let items = block
@@ -601,7 +571,62 @@ impl QobuzClient {
             }
         }
 
-        Ok((artist, out))
+        Ok(out)
+    }
+
+    /// An artist's discography, newest first, each album marked with what
+    /// sort of release it is and how they are credited on it.
+    pub async fn artist_albums(&mut self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
+        // `artist/get`'s listing is the same albums without a release type,
+        // so the page still loads, ungrouped, if the web player's endpoint
+        // ever goes away.
+        let raw = match self.artist_releases_raw(artist_id, cap).await {
+            Ok(raw) => raw,
+            Err(err) => {
+                eprintln!("artist/getReleasesList for {artist_id} failed, using artist/get: {err:#}");
+                self.artist_albums_raw(artist_id, cap).await?
+            }
+        };
+        let mut out = discography(artist_id, &raw);
+        out.sort_by(|a, b| b.year().cmp(&a.year()));
+        Ok(out)
+    }
+
+    /// Raw release objects for an artist, through `artist/getReleasesList`,
+    /// what the web player builds its discography from. Unlike `artist/get`
+    /// it reports `release_type`, which is what tells an EP from an album.
+    async fn artist_releases_raw(&mut self, artist_id: i64, cap: usize) -> Result<Vec<Value>> {
+        self.login().await?;
+
+        let mut out: Vec<Value> = Vec::new();
+        while out.len() < cap {
+            let params = BTreeMap::from([
+                ("artist_id".to_string(), artist_id.to_string()),
+                ("release_type".to_string(), "all".to_string()),
+                ("sort".to_string(), "release_date".to_string()),
+                // Each item carries the start of its tracklist; one is the least
+                // it accepts.
+                ("track_size".to_string(), "1".to_string()),
+                ("limit".to_string(), 100.min(cap - out.len()).to_string()),
+                ("offset".to_string(), out.len().to_string()),
+            ]);
+            let data = self.request("artist/getReleasesList", &params, None).await?;
+
+            let items = data
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let more = data.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let received = items.len();
+            out.extend(items);
+            if received == 0 || !more {
+                break;
+            }
+        }
+
+        Ok(out)
     }
 
     /// Artists Qobuz considers close to this one. The same endpoint the
