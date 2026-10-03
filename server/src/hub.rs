@@ -12,6 +12,7 @@ use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
 use crate::space::SpaceService;
+use crate::likes::{self, Likers};
 use crate::{crawl, db};
 use anyhow::{Context, Result};
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
@@ -160,28 +161,48 @@ impl Hub {
             .await
     }
 
+    /// The account's favourites, each with who in the family liked it. The
+    /// names are put on after the cache, so a like shows on the next read.
     pub async fn favourite_tracks(&self, cap: usize) -> Result<Vec<RemoteTrack>> {
-        self.account
+        let mut tracks = self
+            .account
             .get_or(format!("favourite_tracks:{cap}"), async {
                 self.session().await?.favorite_tracks(cap).await
             })
-            .await
+            .await?;
+        let likers = Likers::load(&self.db_path)?;
+        for track in &mut tracks {
+            track.liked_by = likers.of("track", &track.id.to_string(), track.liked_at);
+        }
+        Ok(tracks)
     }
 
     pub async fn favourite_albums(&self, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.account
+        let mut albums = self
+            .account
             .get_or(format!("favourite_albums:{cap}"), async {
                 self.session().await?.favorite_albums(cap).await
             })
-            .await
+            .await?;
+        let likers = Likers::load(&self.db_path)?;
+        for album in &mut albums {
+            album.liked_by = likers.of("album", &album.id, album.liked_at);
+        }
+        Ok(albums)
     }
 
     pub async fn favourite_artists(&self, cap: usize) -> Result<Vec<RemoteArtist>> {
-        self.account
+        let mut artists = self
+            .account
             .get_or(format!("favourite_artists:{cap}"), async {
                 self.session().await?.favorite_artists(cap).await
             })
-            .await
+            .await?;
+        let likers = Likers::load(&self.db_path)?;
+        for artist in &mut artists {
+            artist.liked_by = likers.of("artist", &artist.id.to_string(), artist.liked_at);
+        }
+        Ok(artists)
     }
 
     pub async fn playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
@@ -240,24 +261,27 @@ impl Hub {
         self.qobuz()?.lock().await.file_url(track_id, format_id).await
     }
 
-    pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {
-        let id = self.session().await?.export_playlist(name, track_ids).await?;
+    /// Under the name of whoever made it, so the account's playlist list
+    /// stays readable with the whole family writing to it.
+    pub async fn export_playlist(&self, user: &str, name: &str, track_ids: &[i64]) -> Result<i64> {
+        let name = format!("{user} · {name}");
+        let id = self.session().await?.export_playlist(&name, track_ids).await?;
         self.account.clear();
         Ok(id)
     }
 
     // ------------------------------------------------------- favourites
 
-    pub async fn favorite_add(&self, kind: &str, id: &str) -> Result<()> {
+    pub async fn favorite_add(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
         self.session().await?.favorite_add(kind, id).await?;
         self.account.clear();
-        Ok(())
+        likes::record(&self.db_path, kind, id, user_id)
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str) -> Result<()> {
         self.session().await?.favorite_remove(kind, id).await?;
         self.account.clear();
-        Ok(())
+        likes::forget(&self.db_path, kind, id)
     }
 
     // --------------------------------------------------------- text steering

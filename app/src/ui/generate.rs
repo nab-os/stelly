@@ -418,6 +418,7 @@ pub(crate) fn as_remote(meta: &TrackMeta) -> RemoteTrack {
         released: None,
         performers: None,
         liked_at: None,
+        liked_by: None,
     }
 }
 

@@ -269,6 +269,7 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
         Command::Unblock(args) => unblock_command(args, paths),
         Command::Blocked(_) => blocked(paths),
         Command::Serve(_)
+        | Command::User(_)
         | Command::Pair(_)
         | Command::Devices(_)
         | Command::Revoke(_) => unreachable!("main runs the serving commands"),
