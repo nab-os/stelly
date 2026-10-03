@@ -1,0 +1,103 @@
+name: docker (dev)
+
+# Publishes the server image under a moving `dev` or `nightly` tag, for trying
+# a branch on a real host before it is released. Only the image: the desktop
+# and Android legs in build.yml have nothing to do with it.
+#
+# Three ways in, all ending at the same tag name:
+#   - push to a branch called `dev` or `nightly`
+#       git push -f origin HEAD:dev
+#   - move a git tag called `dev` or `nightly`
+#       git tag -f nightly && git push -f origin nightly
+#   - Actions > docker (dev) > Run workflow, pick any branch and a tag
+#       gh workflow run docker-dev.yml --ref my-branch -f tag=dev
+#
+# `latest` and the version tags are never touched here, those stay with the
+# `v*` release in build.yml.
+
+on:
+  push:
+    branches: [dev, nightly]
+    tags: [dev, nightly]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to publish
+        type: choice
+        options: [dev, nightly]
+        default: dev
+
+permissions:
+  contents: read
+
+# Two pushes to `dev` in a row should end with the second one published, not
+# whichever build happened to finish last.
+concurrency:
+  group: docker-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: docker (server, ${{ inputs.tag || github.ref_name }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: false
+      TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Still worth the metadata step for the OCI labels: the revision label
+      # is the only way to tell which commit a pulled `:dev` was built from.
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: |
+            docker.io/stellymusic/stelly
+            ghcr.io/${{ github.repository_owner }}/stelly-server
+          tags: type=raw,value=${{ env.TAG }}
+          flavor: latest=false
+
+      # Built and loaded first so the smoke test runs before anything is
+      # pushed; the push step after it is a cache hit.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: server
+          platforms: linux/amd64
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true
+
+      - name: Smoke test
+        run: |
+          IMAGE=$(head -1 <<< "$DOCKER_METADATA_OUTPUT_TAGS")
+          echo "testing $IMAGE"
+          docker run --rm "$IMAGE" devices
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: server
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

@@ -326,6 +326,12 @@ The image is built on every push so a broken `Dockerfile` fails next to the
 `DOCKERHUB_TOKEN` as repository secrets; the GHCR half uses `GITHUB_TOKEN` and
 needs nothing.
 
+To try a branch on a real host before a release, `docker-dev.yml` publishes
+just the server image as `:dev` or `:nightly`: push to a branch or move a tag
+with that name (`git push -f origin HEAD:dev`), or run it by hand on any branch
+with `gh workflow run docker-dev.yml --ref <branch> -f tag=nightly`. It never
+moves `:latest` or a version tag.
+
 The Android job signs when it can read the keystore secrets and falls back to
 an unsigned `…_arm64-unsigned.apk` when it cannot, rather than being skipped.
 That fallback is there for pull requests from forks, which structurally cannot
