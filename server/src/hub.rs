@@ -12,7 +12,7 @@ use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
 use crate::space::SpaceService;
-use crate::likes::{self, Likers};
+use crate::likes;
 use crate::{crawl, db};
 use anyhow::{Context, Result};
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
@@ -21,8 +21,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use stelly_core::api::{BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN};
+use stelly_core::api::{
+    BlockedArtist, Corpus, CrawlStatus, Imported, LogSlice, PipelineStatus, Stage, Target, FULL_RUN,
+};
 use stelly_core::logbuffer::LogBuffer;
+
+/// More than any account's favourites; Qobuz pages at 100, so this is the
+/// ceiling on the import's requests too.
+const IMPORT_CAP: usize = 10_000;
 
 pub struct Hub {
     paths: Paths,
@@ -36,8 +42,8 @@ pub struct Hub {
     catalogue: Cache,
     /// Short, since the same words find new releases.
     searches: Cache,
-    /// Favourites and playlists, which the account can change from any Qobuz
-    /// client. Cleared on our own writes, and short for everyone else's.
+    /// Playlists, which the account can change from any Qobuz client.
+    /// Cleared on our own writes, and short for everyone else's.
     account: Cache,
     /// Loaded on first use and kept. `None` inside means the tower has not
     /// been exported, which is not an error, the UI hides steering.
@@ -161,48 +167,39 @@ impl Hub {
             .await
     }
 
-    /// The account's favourites, each with who in the family liked it. The
-    /// names are put on after the cache, so a like shows on the next read.
-    pub async fn favourite_tracks(&self, cap: usize) -> Result<Vec<RemoteTrack>> {
-        let mut tracks = self
-            .account
-            .get_or(format!("favourite_tracks:{cap}"), async {
-                self.session().await?.favorite_tracks(cap).await
+    /// One person's likes, from the database alone. Named favourites on the
+    /// wire, which is what they were when they were Qobuz's.
+    pub async fn favourite_tracks(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
+        Ok(likes::list(&self.db_path, user_id, "track", cap)?
+            .into_iter()
+            .filter_map(|(item, liked_at)| {
+                let mut track = RemoteTrack::parse(&item, None)?;
+                track.liked_at = Some(liked_at);
+                Some(track)
             })
-            .await?;
-        let likers = Likers::load(&self.db_path)?;
-        for track in &mut tracks {
-            track.liked_by = likers.of("track", &track.id.to_string(), track.liked_at);
-        }
-        Ok(tracks)
+            .collect())
     }
 
-    pub async fn favourite_albums(&self, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        let mut albums = self
-            .account
-            .get_or(format!("favourite_albums:{cap}"), async {
-                self.session().await?.favorite_albums(cap).await
+    pub async fn favourite_albums(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
+        Ok(likes::list(&self.db_path, user_id, "album", cap)?
+            .into_iter()
+            .filter_map(|(item, liked_at)| {
+                let mut album = RemoteAlbum::parse(&item)?;
+                album.liked_at = Some(liked_at);
+                Some(album)
             })
-            .await?;
-        let likers = Likers::load(&self.db_path)?;
-        for album in &mut albums {
-            album.liked_by = likers.of("album", &album.id, album.liked_at);
-        }
-        Ok(albums)
+            .collect())
     }
 
-    pub async fn favourite_artists(&self, cap: usize) -> Result<Vec<RemoteArtist>> {
-        let mut artists = self
-            .account
-            .get_or(format!("favourite_artists:{cap}"), async {
-                self.session().await?.favorite_artists(cap).await
+    pub async fn favourite_artists(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteArtist>> {
+        Ok(likes::list(&self.db_path, user_id, "artist", cap)?
+            .into_iter()
+            .filter_map(|(item, liked_at)| {
+                let mut artist = RemoteArtist::parse(&item)?;
+                artist.liked_at = Some(liked_at);
+                Some(artist)
             })
-            .await?;
-        let likers = Likers::load(&self.db_path)?;
-        for artist in &mut artists {
-            artist.liked_by = likers.of("artist", &artist.id.to_string(), artist.liked_at);
-        }
-        Ok(artists)
+            .collect())
     }
 
     pub async fn playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
@@ -270,18 +267,64 @@ impl Hub {
         Ok(id)
     }
 
-    // ------------------------------------------------------- favourites
+    // ------------------------------------------------------------ likes
 
+    /// Fetch the item once, so the like can be listed and crawled without
+    /// asking Qobuz again. An album's tracklist is left out: the crawl
+    /// fetches it when it expands the album.
     pub async fn favorite_add(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
-        self.session().await?.favorite_add(kind, id).await?;
-        self.account.clear();
-        likes::record(&self.db_path, kind, id, user_id)
+        let item = match kind {
+            "track" => {
+                let track_id = id.parse().with_context(|| format!("“{id}” is not a track id"))?;
+                self.session().await?.track_raw(track_id).await?
+            }
+            "album" => {
+                let mut album = self.session().await?.album_raw(id).await?;
+                if let Some(object) = album.as_object_mut() {
+                    object.remove("tracks");
+                }
+                album
+            }
+            "artist" => {
+                let artist_id = id.parse().with_context(|| format!("“{id}” is not an artist id"))?;
+                self.session().await?.artist_raw(artist_id).await?
+            }
+            other => anyhow::bail!("unknown kind of like {other:?}"),
+        };
+        likes::record(&self.db_path, user_id, kind, id, &item, likes::now())?;
+        Ok(())
     }
 
-    pub async fn favorite_remove(&self, kind: &str, id: &str) -> Result<()> {
-        self.session().await?.favorite_remove(kind, id).await?;
-        self.account.clear();
-        likes::forget(&self.db_path, kind, id)
+    pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
+        likes::forget(&self.db_path, user_id, kind, id)
+    }
+
+    /// Copy the Qobuz account's favourites into one person's likes, keeping
+    /// when each was favourited. Run again, it only adds what is new there;
+    /// nothing is ever written back.
+    pub async fn import_favourites(&self, user_id: i64) -> Result<Imported> {
+        let mut imported = Imported::default();
+        for (plural, kind) in [("tracks", "track"), ("albums", "album"), ("artists", "artist")] {
+            let items = self.session().await?.favorites_raw(plural, IMPORT_CAP).await?;
+            for item in items {
+                let Some(id) = item.get("id").and_then(|id| match id {
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let liked_at = item.get("favorited_at").and_then(|at| at.as_i64()).unwrap_or_else(likes::now);
+                if likes::record(&self.db_path, user_id, kind, &id, &item, liked_at)? {
+                    match kind {
+                        "track" => imported.tracks += 1,
+                        "album" => imported.albums += 1,
+                        _ => imported.artists += 1,
+                    }
+                }
+            }
+        }
+        Ok(imported)
     }
 
     // --------------------------------------------------------- text steering
@@ -663,6 +706,14 @@ async fn crawl_loop(
     // This thread's own connection and client, but not its own budget, both
     // halves talk to one account. See `qobuz::RateLimit`.
     let (mut conn, mut client) = worker_parts(env_dir, db_path, limit)?;
+
+    // From the database alone, so likes made since the last crawl are in
+    // the frontier before it carries on.
+    let seeded = crawl::seed(&mut conn)?;
+    job.status.lock().unwrap().last = Some(format!(
+        "seeded {} tracks, {} albums, {} artists from the family's likes",
+        seeded.tracks_added, seeded.albums_expanded, seeded.artists_expanded
+    ));
 
     // No budget: the frontier and the stop button are the limits.
     let max_tracks = i64::MAX;

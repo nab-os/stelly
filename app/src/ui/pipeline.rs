@@ -343,10 +343,85 @@ pub fn PipelineLog() -> Element {
     }
 }
 
+/// Everyone in the family, as a `pipeline` device sees them. Read by the
+/// people row and the pairing form, so someone added in one shows in the
+/// other.
+#[derive(Clone, Copy)]
+pub struct Family(pub Signal<Vec<User>>);
+
+/// The people sharing this server, and a way to add one. `pipeline` only, the
+/// same trust as pairing them a device, which is the next thing to do.
+#[component]
+pub fn People() -> Element {
+    let me = use_context::<super::Me>().0;
+    let mut people = use_context::<Family>().0;
+    let mut name = use_signal(String::new);
+    let mut status = use_signal(|| None::<String>);
+
+    use_future(move || async move {
+        if let Ok(found) = backend().users().await {
+            people.set(found);
+        }
+    });
+
+    let pipeline = me.read().as_ref().is_some_and(|device| device.scope == Scope::Pipeline);
+    if !pipeline {
+        return rsx! {};
+    }
+
+    let add = move |_| {
+        let wanted = name.peek().trim().to_string();
+        spawn(async move {
+            match backend().add_user(&wanted).await {
+                Ok(user) => {
+                    status.set(Some(format!("Added {}. Pair them a device below.", user.name)));
+                    name.set(String::new());
+                    if let Ok(found) = backend().users().await {
+                        people.set(found);
+                    }
+                }
+                Err(err) => status.set(Some(format!("{err:#}"))),
+            }
+        });
+    };
+
+    rsx! {
+        section { class: "panel setting",
+            h2 { "People" }
+            p { class: "muted",
+                "Each person has their own devices, queue and likes. The Qobuz account and the space are everyone's."
+            }
+            div { class: "field",
+                input {
+                    class: "search",
+                    placeholder: "name, e.g. sam",
+                    value: "{name}",
+                    oninput: move |event| name.set(event.value()),
+                }
+                button {
+                    class: "primary",
+                    disabled: name.read().trim().is_empty(),
+                    onclick: add,
+                    "add"
+                }
+            }
+            if let Some(message) = status.read().clone() {
+                p { class: "muted", "{message}" }
+            }
+            ul { class: "list",
+                for user in people.read().iter() {
+                    li { key: "{user.id}", class: "row",
+                        span { class: "title", "{user.name}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Paired devices, and a way to add or revoke one. Pairing needs the
-/// `pipeline` scope, a `play` phone cannot mint itself a promotion, and it
-/// is also how someone new joins the family. A `play` device sees and can
-/// revoke its own user's devices only.
+/// `pipeline` scope, a `play` phone cannot mint itself a promotion. A `play`
+/// device sees and can revoke its own user's devices only.
 #[component]
 pub fn Devices() -> Element {
     let pipeline = use_context::<Pipeline>();
@@ -354,7 +429,7 @@ pub fn Devices() -> Element {
     let mut name = use_signal(String::new);
     let mut scope = use_signal(|| Scope::Play);
     let mut person = use_signal(String::new);
-    let mut people = use_signal(Vec::<User>::new);
+    let people = use_context::<Family>().0;
 
     let devices = pipeline.devices.read().clone();
     // Unknown until the server answers, and then for good on one older than
@@ -366,9 +441,6 @@ pub fn Devices() -> Element {
         let mut pipeline = pipeline;
         if let Ok(found) = backend().devices().await {
             pipeline.devices.set(found);
-        }
-        if let Ok(found) = backend().users().await {
-            people.set(found);
         }
     });
 
@@ -387,12 +459,6 @@ pub fn Devices() -> Element {
             p { class: "muted",
                 "Each device gets its own token, so one phone can be revoked without re-pairing the rest. The token is shown once."
             }
-            if pairs && family {
-                p { class: "muted",
-                    "Pair for a new name to add someone to the family. They get their own queue; the favourites and the space are everyone's."
-                }
-            }
-
             if pairs {
                 div { class: "field",
                     input {
@@ -401,17 +467,14 @@ pub fn Devices() -> Element {
                         value: "{name}",
                         oninput: move |event| name.set(event.value()),
                     }
-                    if family {
-                        input {
+                    if people.read().len() > 1 {
+                        select {
                             class: "search",
-                            placeholder: "whose, e.g. sam (default: yours)",
-                            list: "family-members",
                             value: "{person}",
-                            oninput: move |event| person.set(event.value()),
-                        }
-                        datalist { id: "family-members",
+                            onchange: move |event| person.set(event.value()),
+                            option { value: "", "yours" }
                             for user in people.read().iter() {
-                                option { key: "{user.id}", value: "{user.name}" }
+                                option { key: "{user.id}", value: "{user.name}", "{user.name}’s" }
                             }
                         }
                     }
@@ -442,9 +505,6 @@ pub fn Devices() -> Element {
                                         person.set(String::new());
                                         if let Ok(found) = backend().devices().await {
                                             pipeline.devices.set(found);
-                                        }
-                                        if let Ok(found) = backend().users().await {
-                                            people.set(found);
                                         }
                                     }
                                     Err(err) => pipeline.error.set(Some(format!("{err:#}"))),

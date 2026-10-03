@@ -437,77 +437,13 @@ impl QobuzClient {
     }
 
     /// Raw favourites, exactly as Qobuz returned them. `kind` is 'tracks',
-    /// 'albums' or 'artists'. The crawler needs the untouched objects for
-    /// `qobuz_json`; the typed helpers below are the same call, parsed.
+    /// 'albums' or 'artists'. The likes import keeps the untouched objects,
+    /// which the crawl later stores as `qobuz_json`.
     pub async fn favorites_raw(&mut self, kind: &str, cap: usize) -> Result<Vec<Value>> {
         self.login().await?;
         let params = BTreeMap::from([("type".to_string(), kind.to_string())]);
         self.paginate("favorite/getUserFavorites", &params, kind, cap)
             .await
-    }
-
-    /// The signed-in user's favourited tracks.
-    pub async fn favorite_tracks(&mut self, cap: usize) -> Result<Vec<RemoteTrack>> {
-        Ok(self
-            .favorites_raw("tracks", cap)
-            .await?
-            .iter()
-            .filter_map(|v| RemoteTrack::parse(v, None))
-            .collect())
-    }
-
-    pub async fn favorite_albums(&mut self, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        Ok(self
-            .favorites_raw("albums", cap)
-            .await?
-            .iter()
-            .filter_map(RemoteAlbum::parse)
-            .collect())
-    }
-
-    pub async fn favorite_artists(&mut self, cap: usize) -> Result<Vec<RemoteArtist>> {
-        Ok(self
-            .favorites_raw("artists", cap)
-            .await?
-            .iter()
-            .filter_map(RemoteArtist::parse)
-            .collect())
-    }
-
-    /// Add or remove a track, album or artist from the account's Qobuz
-    /// favourites. `kind` is "track", "album" or "artist", singular,
-    /// matching the app's `request_analysis` convention, unlike
-    /// `favorites_raw`'s plural "tracks"/"albums"/"artists".
-    ///
-    /// `favorite/create` and `favorite/delete` are not exercised anywhere
-    /// else in this codebase, unlike every other endpoint here. They are the
-    /// standard paired Qobuz calls, every third-party client that reads
-    /// `favorite/getUserFavorites` writes through these the same way, but
-    /// that is inference from the read side and from how this API's other
-    /// pairs are shaped, not something confirmed against a live account.
-    async fn favorite_write(&mut self, endpoint: &str, kind: &str, id: &str) -> Result<()> {
-        self.login().await?;
-        let param = match kind {
-            "track" => "track_ids",
-            "album" => "album_ids",
-            "artist" => "artist_ids",
-            other => bail!("unknown favourite kind {other:?}"),
-        };
-        self.request(
-            endpoint,
-            &BTreeMap::from([(param.to_string(), id.to_string())]),
-            None,
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn favorite_add(&mut self, kind: &str, id: &str) -> Result<()> {
-        self.favorite_write("favorite/create", kind, id).await
-    }
-
-    pub async fn favorite_remove(&mut self, kind: &str, id: &str) -> Result<()> {
-        self.favorite_write("favorite/delete", kind, id).await
     }
 
     pub async fn user_playlists(&mut self, cap: usize) -> Result<Vec<RemotePlaylist>> {
@@ -593,11 +529,15 @@ impl QobuzClient {
 
     /// One artist on its own: name, portrait and biography, no discography.
     pub async fn artist(&mut self, artist_id: i64) -> Result<RemoteArtist> {
-        self.login().await?;
-
-        let params = BTreeMap::from([("artist_id".to_string(), artist_id.to_string())]);
-        let data = self.request("artist/get", &params, None).await?;
+        let data = self.artist_raw(artist_id).await?;
         RemoteArtist::parse(&data).with_context(|| format!("artist {artist_id} has no id"))
+    }
+
+    /// The whole `artist/get` payload.
+    pub async fn artist_raw(&mut self, artist_id: i64) -> Result<Value> {
+        self.login().await?;
+        let params = BTreeMap::from([("artist_id".to_string(), artist_id.to_string())]);
+        self.request("artist/get", &params, None).await
     }
 
     /// Raw album objects for an artist, paginated through `artist/get`.

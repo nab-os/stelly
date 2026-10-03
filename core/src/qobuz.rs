@@ -51,14 +51,10 @@ pub struct RemoteTrack {
     /// failure mode if the assumption is wrong.
     #[serde(default)]
     pub performers: Option<String>,
-    /// When the account favourited it, in Unix seconds. Only a favourites
-    /// listing has one; everywhere else it is `None`.
+    /// When it was liked, in Unix seconds. Only a likes listing has one;
+    /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
-    /// Which of the family liked it, when it was liked through Stelly. Filled
-    /// in by the server, Qobuz has no idea.
-    #[serde(default)]
-    pub liked_by: Option<String>,
 }
 
 impl RemoteTrack {
@@ -99,14 +95,10 @@ pub struct RemoteAlbum {
     /// crawler was written; `RemoteAlbum` itself never did.
     #[serde(default)]
     pub label: Option<String>,
-    /// When the account favourited it, in Unix seconds. Only a favourites
-    /// listing has one; everywhere else it is `None`.
+    /// When it was liked, in Unix seconds. Only a likes listing has one;
+    /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
-    /// Which of the family liked it, when it was liked through Stelly. Filled
-    /// in by the server, Qobuz has no idea.
-    #[serde(default)]
-    pub liked_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -116,14 +108,10 @@ pub struct RemoteArtist {
     pub albums_count: Option<i64>,
     #[serde(default)]
     pub image: Option<String>,
-    /// When the account favourited it, in Unix seconds. Only a favourites
-    /// listing has one; everywhere else it is `None`.
+    /// When it was liked, in Unix seconds. Only a likes listing has one;
+    /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
-    /// Which of the family liked it, when it was liked through Stelly. Filled
-    /// in by the server, Qobuz has no idea.
-    #[serde(default)]
-    pub liked_by: Option<String>,
     /// Qobuz's biography, as plain text. Only `artist/get` sends one, so only
     /// the artist page ever has it.
     #[serde(default)]
@@ -294,7 +282,6 @@ impl RemoteTrack {
             // comment on `RemoteTrack`.
             performers: text(value, "performers"),
             liked_at: as_i64(value, "favorited_at"),
-            liked_by: None,
         })
     }
 
@@ -335,7 +322,6 @@ impl RemoteAlbum {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             liked_at: as_i64(value, "favorited_at"),
-            liked_by: None,
         })
     }
 
@@ -357,7 +343,6 @@ impl RemoteArtist {
             albums_count: as_i64(value, "albums_count"),
             image: image(value),
             liked_at: as_i64(value, "favorited_at"),
-            liked_by: None,
             biography: value
                 .get("biography")
                 .and_then(|bio| text(bio, "content"))

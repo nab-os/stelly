@@ -24,7 +24,7 @@ pub use crawler::Crawler;
 pub use generate::Generator;
 pub use library::{open_initial, Library, MainScreen, View};
 pub use menu::{menu_button, ContextMenu, ContextMenuView, MenuState, MenuTarget};
-pub use pipeline::Pipeline;
+pub use pipeline::{Family, Pipeline};
 pub use player::{use_session, use_transport, Player, PlayerBar};
 pub use queue::QueueView;
 pub use release::{ReleaseNotice, Releases};

@@ -344,23 +344,13 @@ pub struct Library {
 /// few pages; a shelf can hold hundreds of rows, so not the whole history.
 const KEPT: usize = 8;
 
-/// The signed-in account's favourites, by id, fetched once and cached
-/// rather than asked per row: Qobuz has no "is this one favourited" lookup,
-/// only "list them all", so checking membership after one fetch is the whole
-/// of what is affordable.
+/// This user's likes, by id, fetched once and cached rather than asked per
+/// row: the server lists them, it has no "is this one liked" lookup.
 #[derive(Clone, Default)]
 pub(crate) struct Liked {
     pub(crate) tracks: std::collections::HashSet<i64>,
     pub(crate) albums: std::collections::HashSet<String>,
     pub(crate) artists: std::collections::HashSet<i64>,
-    /// Who in the family liked each, by "kind:id", where the server knows.
-    by: std::collections::HashMap<String, String>,
-}
-
-impl Liked {
-    pub(crate) fn by(&self, kind: &str, id: &str) -> Option<String> {
-        self.by.get(&format!("{kind}:{id}")).cloned()
-    }
 }
 
 impl Library {
@@ -434,20 +424,10 @@ impl Library {
                 backend().favourite_albums(LIST_CAP),
                 backend().favourite_artists(LIST_CAP),
             );
-            let (tracks, albums, artists) =
-                (tracks.unwrap_or_default(), albums.unwrap_or_default(), artists.unwrap_or_default());
-            let by = tracks
-                .iter()
-                .map(|t| (format!("track:{}", t.id), t.liked_by.clone()))
-                .chain(albums.iter().map(|a| (format!("album:{}", a.id), a.liked_by.clone())))
-                .chain(artists.iter().map(|a| (format!("artist:{}", a.id), a.liked_by.clone())))
-                .filter_map(|(key, name)| Some((key, name?)))
-                .collect();
             liked.set(Some(Liked {
-                tracks: tracks.iter().map(|t| t.id).collect(),
-                albums: albums.iter().map(|a| a.id.clone()).collect(),
-                artists: artists.iter().map(|a| a.id).collect(),
-                by,
+                tracks: tracks.unwrap_or_default().iter().map(|t| t.id).collect(),
+                albums: albums.unwrap_or_default().iter().map(|a| a.id.clone()).collect(),
+                artists: artists.unwrap_or_default().iter().map(|a| a.id).collect(),
             }));
         });
     }
@@ -477,20 +457,10 @@ impl Library {
     /// before the cache has ever been loaded: there is no set to flip a
     /// member of yet, and by the time one is loaded it will ask Qobuz fresh
     /// rather than replay this.
-    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool, by: Option<String>) {
+    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool) {
         let mut signal = self.liked;
         let mut current = signal.write();
         let Some(current) = current.as_mut() else { return };
-        let key = format!("{kind}:{id}");
-        match by.filter(|_| liked) {
-            // The first liker keeps it, as on the server.
-            Some(name) => {
-                current.by.entry(key).or_insert(name);
-            }
-            None => {
-                current.by.remove(&key);
-            }
-        }
         match kind {
             "track" => {
                 if let Ok(track_id) = id.parse::<i64>() {
@@ -518,6 +488,18 @@ impl Library {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// After an import: ask for the likes again, and redraw them if they are
+    /// what is on screen.
+    pub(crate) fn likes_changed(self) {
+        let mut liked = self.liked;
+        liked.set(None);
+        self.ensure_liked_loaded();
+        let view = self.view.peek().clone();
+        if matches!(view, View::Favourites { .. }) {
+            self.show(view);
         }
     }
 
@@ -1309,6 +1291,8 @@ fn BrowseScreen() -> Element {
                 }
                 if empty_search {
                     p { class: "muted", "Type to search." }
+                } else if nothing_visible && matches!(view, View::Favourites { scope: Scope::Everything }) {
+                    p { class: "muted", "No likes yet. Heart anything, or import the Qobuz favourites from settings." }
                 } else if nothing_visible {
                     p { class: "muted", "nothing here" }
                 }

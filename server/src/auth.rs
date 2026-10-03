@@ -3,7 +3,7 @@
 //! A family: a few people sharing the one Qobuz account, each with their own
 //! devices. Per-device tokens rather than passwords, a password could not be
 //! revoked one phone at a time. A user is little more than a name the devices
-//! hang off, so each person gets their own play session.
+//! hang off, so each person gets their own play session and likes.
 //!
 //! `play` is every device; `pipeline` is hours of CPU, the shared rate limit,
 //! the hidden artists and a `--purge` that deletes rows, so it is whoever looks
@@ -170,7 +170,7 @@ impl AuthStore {
         }
 
         // Devices from before there were users all belonged to the one there
-        // was, and so does everything already in the favourites.
+        // was.
         let orphans: i64 = devices::table
             .filter(devices::user_id.is_null())
             .count()
@@ -222,17 +222,14 @@ impl AuthStore {
             .ok_or_else(|| anyhow::anyhow!("no user called “{name}”; see `stelly-server user list`"))
     }
 
-    /// Who a new device goes to. Pairing for someone new is how they join, so
-    /// a name nobody has yet is created. Without one, the only user there is,
-    /// or the first, on a server that has none.
+    /// Who a new device goes to: someone already added, so a typo is
+    /// refused rather than quietly starting a new person. Without a name, the
+    /// only user there is, or the first, on a server that has none.
     pub fn user_for_pairing(&self, name: Option<&str>) -> Result<User> {
-        let conn = &mut self.open()?;
         if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
-            return match self.find_user(conn, name)? {
-                Some(user) => Ok(user),
-                None => insert_user(conn, name),
-            };
+            return self.user(name);
         }
+        let conn = &mut self.open()?;
         let mut everyone = users::table
             .order(users::id)
             .select(UserRow::as_select())

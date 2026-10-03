@@ -416,13 +416,21 @@ pub struct Device {
     pub user: String,
 }
 
-/// One member of the family. Each has their own devices and play session;
-/// the Qobuz account, its favourites and the space are everyone's.
+/// One member of the family. Each has their own devices, play session and
+/// likes; the Qobuz account and the space are everyone's.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
     pub name: String,
     pub created_at: String,
+}
+
+/// What an import of the Qobuz favourites added to someone's likes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Imported {
+    pub tracks: usize,
+    pub albums: usize,
+    pub artists: usize,
 }
 
 /// The one time a token is ever transmitted.
