@@ -266,9 +266,8 @@ browsing, its playlists, and the space, which the crawl grows from the whole
 family's likes. Playlists exported from the app are named after whoever
 exported them.
 
-Likes are kept by Stelly and never written to Qobuz. **Import Qobuz
-favourites** in settings copies the account's favourites into your likes,
-with the dates they were favourited; run it again later to pick up new ones.
+Likes are kept by Stelly and never written to Qobuz, and start empty: the
+account's own favourites are not brought in.
 
 ```sh
 stelly-server user add sam
@@ -281,8 +280,7 @@ stelly-server user remove samuel              # once their devices are revoked
 A `pipeline` device can do the same from the app's settings: add someone
 under **People**, then pair them a device. A `play` device sees and can revoke
 only its own person's devices. A server from before users puts the devices it
-already has under `owner`; rename that to whoever it is, and import the
-favourites, since the likes start empty.
+already has under `owner`; rename that to whoever it is.
 
 This speaks plain HTTP and binds to loopback. Anything beyond loopback belongs
 behind WireGuard/Tailscale or a TLS proxy.
