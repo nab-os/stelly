@@ -359,6 +359,7 @@ jobs:
             --package-types apk \
             --cargo-args="--locked" \
             --out-dir "$GITHUB_WORKSPACE/staging"
+          android/icons.sh "$GITHUB_WORKSPACE/staging"
 
       - name: Sign the APK
         if: steps.signing.outputs.signed == 'true'

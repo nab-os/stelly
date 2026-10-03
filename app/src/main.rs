@@ -31,17 +31,25 @@ fn main() {
     // Three columns plus a map need room; the default window collapses them.
     // STELLY_WINDOW=WxH overrides it, mostly to check the responsive layout
     // at phone width without a phone.
+    //
+    // The icon is compiled in: without one dioxus-desktop puts its own logo
+    // on the window, and an AppImage or the tarball has no installed
+    // .desktop file for the desktop to find ours through.
     #[cfg(not(feature = "mobile"))]
     {
         let (width, height) = window_size();
+        let mut config = dioxus::desktop::Config::new().with_window(
+            dioxus::desktop::WindowBuilder::new()
+                .with_title("Stelly")
+                .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),
+        );
+        if let Ok(icon) =
+            dioxus::desktop::icon_from_memory(include_bytes!("../assets/icons/256x256.png"))
+        {
+            config = config.with_icon(icon);
+        }
         dioxus::LaunchBuilder::desktop()
-            .with_cfg(
-                dioxus::desktop::Config::new().with_window(
-                    dioxus::desktop::WindowBuilder::new()
-                        .with_title("Stelly")
-                        .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),
-                ),
-            )
+            .with_cfg(config)
             .launch(stelly::app::App);
     }
 }
