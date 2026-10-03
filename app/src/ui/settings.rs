@@ -2,7 +2,8 @@
 //! to, the version it runs, how it plays, which devices may talk to that server, who is hidden,
 //! and the pipeline that builds the space, with its output last.
 
-use super::pipeline::{Devices, PipelineControls, PipelineLog};
+use super::library::Library;
+use super::pipeline::{Devices, People, PipelineControls, PipelineLog};
 use super::player::{quality_label, Player};
 use super::prefs;
 use super::release::ReleaseRow;
@@ -18,6 +19,8 @@ pub fn SettingsScreen() -> Element {
             ServerRow {}
             ReleaseRow {}
             PlaybackRow {}
+            LikesRow {}
+            People {}
             Devices {}
             HiddenArtists {}
             PipelineControls {}
@@ -78,9 +81,16 @@ fn ServerRow() -> Element {
         Err(err) => status.set(Some(format!("could not clear the pairing: {err:#}"))),
     };
 
+    let me = use_context::<super::Me>().0;
+
     rsx! {
         section { class: "panel setting",
             h2 { "Server" }
+            if let Some(device) = me.read().as_ref().filter(|device| !device.user.is_empty()) {
+                p { class: "muted",
+                    "This device is “{device.name}”, {device.user}’s, paired for {device.scope.as_str()}."
+                }
+            }
             div { class: "setting-fields",
                 input {
                     class: "search",
@@ -97,6 +107,49 @@ fn ServerRow() -> Element {
                 }
                 button { class: "primary", onclick: save, "Save" }
                 button { onclick: forget, "Forget" }
+            }
+            if let Some(message) = status.read().clone() {
+                p { class: "muted", "{message}" }
+            }
+        }
+    }
+}
+
+/// Likes are this person's, kept on the server; the Qobuz account's
+/// favourites only come in when asked, and nothing goes back.
+#[component]
+fn LikesRow() -> Element {
+    let library = use_context::<Library>();
+    let mut status = use_signal(|| None::<String>);
+    let mut busy = use_signal(|| false);
+
+    let import = move |_| {
+        busy.set(true);
+        status.set(Some("importing…".into()));
+        spawn(async move {
+            match crate::backend::backend().import_favourites().await {
+                Ok(imported) => {
+                    status.set(Some(format!(
+                        "Imported {} tracks, {} albums and {} artists.",
+                        imported.tracks, imported.albums, imported.artists
+                    )));
+                    library.likes_changed();
+                }
+                Err(err) => status.set(Some(format!("{err:#}"))),
+            }
+            busy.set(false);
+        });
+    };
+
+    rsx! {
+        section { class: "panel setting",
+            h2 { "Likes" }
+            p { class: "muted",
+                "Yours alone: nobody else in the family sees them, and Qobuz is never told. The crawl grows the space from everyone's."
+            }
+            div { class: "setting-fields",
+                button { disabled: busy(), onclick: import, "Import Qobuz favourites" }
+                span { class: "muted", "copies them in, run again for new ones" }
             }
             if let Some(message) = status.read().clone() {
                 p { class: "muted", "{message}" }
@@ -158,8 +211,12 @@ fn HiddenArtists() -> Element {
                     }
                 }
             }
-            if hidden.is_empty() {
+            if hidden.is_empty() && *blocklist.editable.read() {
                 p { class: "muted", "Nobody. Hide an artist from their page or any row's menu." }
+            } else if hidden.is_empty() {
+                p { class: "muted", "Nobody." }
+            } else if !*blocklist.editable.read() {
+                p { class: "muted", "Hidden from the whole family's space. Only a pipeline device can change this." }
             }
             if open() {
                 ul { class: "list hidden-artists",
@@ -169,10 +226,12 @@ fn HiddenArtists() -> Element {
                             if let Some(reason) = entry.reason.clone() {
                                 span { class: "muted", "{reason}" }
                             }
-                            button {
-                                class: "chip",
-                                onclick: move |_| blocklist.unblock.call(entry.artist_id),
-                                "unhide"
+                            if *blocklist.editable.read() {
+                                button {
+                                    class: "chip",
+                                    onclick: move |_| blocklist.unblock.call(entry.artist_id),
+                                    "unhide"
+                                }
                             }
                         }
                     }

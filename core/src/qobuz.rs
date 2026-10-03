@@ -51,8 +51,8 @@ pub struct RemoteTrack {
     /// failure mode if the assumption is wrong.
     #[serde(default)]
     pub performers: Option<String>,
-    /// When the account favourited it, in Unix seconds. Only a favourites
-    /// listing has one; everywhere else it is `None`.
+    /// When it was liked, in Unix seconds. Only a likes listing has one;
+    /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
 }
@@ -95,8 +95,8 @@ pub struct RemoteAlbum {
     /// crawler was written; `RemoteAlbum` itself never did.
     #[serde(default)]
     pub label: Option<String>,
-    /// When the account favourited it, in Unix seconds. Only a favourites
-    /// listing has one; everywhere else it is `None`.
+    /// When it was liked, in Unix seconds. Only a likes listing has one;
+    /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
 }
@@ -108,8 +108,8 @@ pub struct RemoteArtist {
     pub albums_count: Option<i64>,
     #[serde(default)]
     pub image: Option<String>,
-    /// When the account favourited it, in Unix seconds. Only a favourites
-    /// listing has one; everywhere else it is `None`.
+    /// When it was liked, in Unix seconds. Only a likes listing has one;
+    /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
     /// Qobuz's biography, as plain text. Only `artist/get` sends one, so only

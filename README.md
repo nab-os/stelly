@@ -10,7 +10,7 @@ half of every vector is computed from the audio itself.
 
 ![Favourites in the Stelly desktop app](docs/favourites.png)
 
-Your favourites in the main area, the generate panel always on the right, and
+Your likes in the main area, the generate panel always on the right, and
 the player along the bottom. The two round buttons open search and the map.
 
 ![The map of the space](docs/map.png)
@@ -31,10 +31,10 @@ Two programs, one of each side of a socket.
   stelly-server                                stelly-app (desktop, Android)
   ─────────────                                ─────────────────────────────
   Qobuz credentials, ONE 2/s rate limit        neighbours · radio · path · drift
-  crawl       favourites → similar artists       → asked of the server
+  crawl       likes → similar artists            → asked of the server
   analyse     middle 90s of each track         map, library, playback
                 → CLAP (ONNX) + descriptors    caches the index, the map and
-  build-space features → space.bin/json          the favourites, opens on them
+  build-space features → space.bin/json          the likes, opens on them
   layout      UMAP → map coordinates                     │
   space       loaded once, navigated per request         │
   embed       CLAP text tower                  plays the signed stream URL
@@ -53,7 +53,7 @@ walk, so a phone downloads nothing before it can generate, and opens straight
 onto the app. A walk is a few milliseconds on the server, one round trip for
 the client, with the weight sliders sent along with it. What a client keeps is
 small and only a head start: the space's index, the map's points and the
-favourites, shown from the disk while the server is asked again.
+likes, shown from the disk while the server is asked again.
 
 Design notes, measurements and the space layout are in
 [docs/design.md](docs/design.md).
@@ -116,7 +116,7 @@ Every stage is a subcommand of the server, and also a button in the app's
 ```sh
 cd server
 cargo run --release -- whoami                   # verify credentials
-cargo run --release -- crawl --max-tracks 2000  # favourites, then similar artists
+cargo run --release -- crawl --max-tracks 2000  # likes, then similar artists
 cargo run --release -- analyse                  # fetch excerpts, extract features
 cargo run --release -- build-space              # assemble vectors
 cargo run --release -- layout                   # UMAP projection for the map
@@ -140,11 +140,13 @@ and rebuild, no re-analysis.
 
 ### Crawling
 
-Seeds from your favourites, then expands outward through
-`artist/getSimilarArtists`.
+Seeds from everyone's likes, then expands outward through
+`artist/getSimilarArtists`. The likes keep the Qobuz objects they were made
+from, so seeding costs no requests; the app's crawl button seeds too, so a
+like made since the last crawl is in it.
 
 ```sh
-stelly-server crawl --max-tracks 5000   # favourites, then similar
+stelly-server crawl --max-tracks 5000   # likes, then similar
 stelly-server crawl --no-seed           # resume the frontier only
 stelly-server crawl --artist 43840      # one discography, queued
 stelly-server crawl --album 0634904077969
@@ -221,8 +223,9 @@ stelly-server blocked                   # list
 stelly-server unblock 224109
 ```
 
-Or click **hide** on any artist or track in the app. The **Hidden** panel at the
-bottom of the Qobuz column lists them with a way back.
+Or click **hide** on any artist or track in the app, from a `pipeline` device:
+the space is the whole family's, so a `play` device sees the list but cannot
+change it. The **Hidden artists** row in settings lists them with a way back.
 
 Hiding filters rather than deletes, which is what lets a block take effect
 immediately and be undone. `block --purge` deletes the tracks, features and
@@ -236,11 +239,11 @@ refuses to act rather than guessing.
 
 Two scopes, both authenticated: `play` is browsing, navigating and minting a stream
 URL, and **Add to space**, which is bounded; `pipeline` is crawling and
-analysing the whole backlog. Each device gets its own token, stored
+analysing the whole backlog, and hiding artists. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
 
-The devices share one queue. The speaker button in the player bar lists the
-ones connected, under the name they were paired with, and picks which one
+A person's devices share one queue. The speaker button in the player bar lists
+the ones connected, under the name they were paired with, and picks which one
 plays; the others become remotes for it.
 
 ```sh
@@ -248,6 +251,38 @@ stelly-server pair --name phone --scope play
 stelly-server devices
 stelly-server revoke 3
 ```
+
+### A family
+
+One server is sized for a family: a few people who trust each other, sharing
+the one Qobuz account. It is not meant to be a public server, and nothing in
+it tries to be.
+
+Each person has their own devices, their own queue and their own likes. The
+speaker in the living room only answers to the queue it was picked from, and
+nobody sees anyone else's likes. What is shared is the Qobuz account and its
+2 requests a second, which means one person's crawl slows everyone's
+browsing, its playlists, and the space, which the crawl grows from the whole
+family's likes. Playlists exported from the app are named after whoever
+exported them.
+
+Likes are kept by Stelly and never written to Qobuz. **Import Qobuz
+favourites** in settings copies the account's favourites into your likes,
+with the dates they were favourited; run it again later to pick up new ones.
+
+```sh
+stelly-server user add sam
+stelly-server pair --name phone --user sam
+stelly-server user list
+stelly-server user rename sam samuel
+stelly-server user remove samuel              # once their devices are revoked
+```
+
+A `pipeline` device can do the same from the app's settings: add someone
+under **People**, then pair them a device. A `play` device sees and can revoke
+only its own person's devices. A server from before users puts the devices it
+already has under `owner`; rename that to whoever it is, and import the
+favourites, since the likes start empty.
 
 This speaks plain HTTP and binds to loopback. Anything beyond loopback belongs
 behind WireGuard/Tailscale or a TLS proxy.

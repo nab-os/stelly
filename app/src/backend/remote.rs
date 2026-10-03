@@ -7,7 +7,7 @@
 use crate::api::{
     ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest,
     PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage,
-    Step, Target, TrackMeta, TracksRequest,
+    Step, Target, TrackMeta, TracksRequest, User, Imported,
 };
 use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -58,12 +58,23 @@ impl Remote {
         }
     }
 
+    /// Names this pairing without saying anything about the token, for
+    /// keeping what one pairing cached apart from another's. Only has to be
+    /// stable for as long as the cache is, a toolchain changing it costs one
+    /// cold start.
+    pub fn cache_key(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&self.base, &self.token).hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
     }
 
     /// Turn a non-2xx into the message the server would have logged.
-    /// Deliberately not sanitised, single-user system on a private network.
+    /// Deliberately not sanitised, a family's server on a private network.
     async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
         if response.status().is_success() {
             return Ok(response);
@@ -265,6 +276,11 @@ impl Remote {
             .await?;
         Self::check(response).await?;
         Ok(())
+    }
+
+    /// Copy the Qobuz account's favourites into this user's likes.
+    pub async fn import_favourites(&self) -> Result<Imported> {
+        self.post("/api/favourites/import", &serde_json::json!({})).await
     }
 
     pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {
@@ -497,13 +513,29 @@ impl Remote {
         self.get("/api/devices").await
     }
 
-    pub async fn pair_device(&self, name: &str, scope: Scope) -> Result<PairingGrant> {
+    /// For `user`, by name, or for this device's own user.
+    pub async fn pair_device(&self, name: &str, scope: Scope, user: Option<&str>) -> Result<PairingGrant> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
             name: &'a str,
             scope: Scope,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            user: Option<&'a str>,
         }
-        self.post("/api/devices", &Body { name, scope }).await
+        self.post("/api/devices", &Body { name, scope, user }).await
+    }
+
+    /// This device, whose it is and what it may do.
+    pub async fn me(&self) -> Result<Device> {
+        self.get("/api/me").await
+    }
+
+    pub async fn users(&self) -> Result<Vec<User>> {
+        self.get("/api/users").await
+    }
+
+    pub async fn add_user(&self, name: &str) -> Result<User> {
+        self.post("/api/users", &serde_json::json!({ "name": name })).await
     }
 
     pub async fn revoke_device(&self, device_id: i64) -> Result<()> {
