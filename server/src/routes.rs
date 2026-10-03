@@ -670,11 +670,21 @@ struct PairBody {
     user: Option<String>,
 }
 
+/// `play` may pair its own user's next device, for `play` only: setting up a
+/// new phone should not need whoever has the admin device to hand either.
 async fn pair_device(
     State(state): State<AppState>,
-    AdminAuth(device): AdminAuth,
+    PlayAuth(device): PlayAuth,
     Json(body): Json<PairBody>,
 ) -> Reply<PairingGrant> {
+    if device.scope == Scope::Play {
+        if body.scope != Scope::Play {
+            return Err(Failure::forbidden("only an admin device can pair an admin one"));
+        }
+        if body.user.as_deref().is_some_and(|user| user != device.user) {
+            return Err(Failure::forbidden("only an admin device can pair someone else's"));
+        }
+    }
     let user = state
         .auth
         .user_for_pairing(Some(body.user.as_deref().unwrap_or(&device.user)))?;
