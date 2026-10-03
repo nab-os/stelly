@@ -1,5 +1,5 @@
 [package]
-name = "stelly-app"
+name = "stelly"
 version.workspace = true
 edition.workspace = true
 
@@ -13,7 +13,7 @@ crate-type = ["lib", "cdylib"]
 # Also the Android entry point: dioxus' `start_app` trampoline dlsym's `main`,
 # so the APK's shared library is this target built with `--features mobile`.
 [[bin]]
-name = "stelly-app"
+name = "stelly"
 path = "src/main.rs"
 required-features = ["gui"]
 
