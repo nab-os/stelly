@@ -147,7 +147,7 @@ jobs:
           T=$(mktemp -d)
 
           mkdir -p "$T/stelly-$V"
-          cp target/dx/stelly-app/release/linux/app/stelly-app "$T/stelly-$V/"
+          cp target/dx/stelly/release/linux/app/stelly "$T/stelly-$V/"
           cp README.md "$T/stelly-$V/"
           cp -r app/assets/icons "$T/stelly-$V/icons"
           tar -C "$T" -czf "dist/stelly_${V}_${S}.tar.gz" "stelly-$V"

@@ -39,7 +39,7 @@ pub enum Install {
 
 impl Install {
     /// Worked out once, on the first release check: once a .deb has replaced
-    /// the binary, `current_exe` on Linux reads `/usr/bin/stelly-app (deleted)`.
+    /// the binary, `current_exe` on Linux reads `/usr/bin/stelly (deleted)`.
     pub fn current() -> &'static Install {
         static CURRENT: OnceLock<Install> = OnceLock::new();
         CURRENT.get_or_init(detect)
@@ -250,7 +250,7 @@ fn apply(install: &Install, file: &Path, dir: &Path) -> Result<Done> {
             // Copied in beside the old binary first, so the swap itself is a
             // rename and the data directory can sit on another file system.
             let staged = with_suffix(exe, ".new");
-            std::fs::copy(unpacked.join("stelly-app"), &staged)?;
+            std::fs::copy(unpacked.join("stelly"), &staged)?;
             set_executable(&staged)?;
             std::fs::rename(&staged, exe).with_context(|| format!("could not replace {}", exe.display()))?;
             restart(exe)
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn an_appimage_keeps_the_build_it_came_as() {
         let install = linux(
-            PathBuf::from("/tmp/.mount_stellyXYZ/usr/bin/stelly-app"),
+            PathBuf::from("/tmp/.mount_stellyXYZ/usr/bin/stelly"),
             Some(PathBuf::from("/home/me/Apps/stelly_0.16.2_ubuntu-24.04.AppImage")),
             UBUNTU_2604,
         );
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn under_usr_is_the_deb() {
-        let install = linux(PathBuf::from("/usr/bin/stelly-app"), None, UBUNTU_2604);
+        let install = linux(PathBuf::from("/usr/bin/stelly"), None, UBUNTU_2604);
         assert!(matches!(install, Install::Deb { ubuntu: "26.04", .. }));
     }
 
@@ -411,7 +411,7 @@ mod tests {
     fn a_writable_directory_is_the_tarball() {
         let dir = std::env::temp_dir().join(format!("stelly-update-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let install = linux(dir.join("stelly-app"), None, FEDORA);
+        let install = linux(dir.join("stelly"), None, FEDORA);
         assert!(matches!(install, Install::Tarball { ubuntu: "24.04", .. }));
         std::fs::remove_dir_all(&dir).unwrap();
     }

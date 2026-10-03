@@ -237,7 +237,7 @@ mod tests {
     fn the_server_package_does_not_stand_in_for_the_app() {
         let latest = release("v0.12.0", &["stelly-server_0.12.0_amd64.ubuntu-24.04.deb"]);
         let deb = Install::Deb {
-            exe: PathBuf::from("/usr/bin/stelly-app"),
+            exe: PathBuf::from("/usr/bin/stelly"),
             ubuntu: "24.04",
         };
         assert_eq!(announce("0.11.0", &latest, &deb), None);
@@ -258,7 +258,7 @@ mod tests {
         let name = |install: Install| announce("0.11.0", &latest, &install).unwrap().file.unwrap().name;
 
         let deb = Install::Deb {
-            exe: PathBuf::from("/usr/bin/stelly-app"),
+            exe: PathBuf::from("/usr/bin/stelly"),
             ubuntu: "26.04",
         };
         assert_eq!(name(deb), "stelly_0.12.0_amd64.ubuntu-26.04.deb");
@@ -268,7 +268,7 @@ mod tests {
         };
         assert_eq!(name(appimage), "stelly_0.12.0_ubuntu-24.04.AppImage");
         let tarball = Install::Tarball {
-            exe: PathBuf::from("/opt/stelly/stelly-app"),
+            exe: PathBuf::from("/opt/stelly/stelly"),
             ubuntu: "26.04",
         };
         assert_eq!(name(tarball), "stelly_0.12.0_ubuntu-26.04.tar.gz");
@@ -305,7 +305,7 @@ mod tests {
         }"#;
         let latest: Latest = serde_json::from_str(body).unwrap();
         let nsis = Install::Nsis {
-            exe: PathBuf::from(r"C:\Users\me\AppData\Local\Programs\stelly\stelly-app.exe"),
+            exe: PathBuf::from(r"C:\Users\me\AppData\Local\Programs\stelly\stelly.exe"),
         };
         let file = announce("0.11.0", &latest, &nsis).unwrap().file.unwrap();
         assert_eq!(file.size, 4096);

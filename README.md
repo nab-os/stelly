@@ -28,7 +28,7 @@ area, from its own floating button.
 Two programs, one of each side of a socket.
 
 ```
-  stelly-server                                stelly-app (desktop, Android)
+  stelly-server                                stelly (desktop, Android)
   ─────────────                                ─────────────────────────────
   Qobuz credentials, ONE 2/s rate limit        neighbours · radio · path · drift
   crawl       likes → similar artists            → asked of the server
@@ -328,7 +328,7 @@ cd app
 dx build --release --platform android --target aarch64-linux-android \
    --no-default-features --features mobile
 
-adb install -r ../target/dx/stelly-app/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+adb install -r ../target/dx/stelly/release/android/app/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 `--target` matters: without it `dx` builds x86_64 for an emulator, which will
