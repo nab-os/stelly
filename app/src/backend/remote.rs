@@ -173,14 +173,10 @@ impl Remote {
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        let albums: Vec<RemoteAlbum> = self
-            .get(&format!("/api/artists/{artist_id}/albums?cap={cap}"))
-            .await?;
-        // Filtered here as well as in `QobuzClient::artist_albums`: the
-        // server and this app are deployed separately, and a server built
-        // before that filter still sends every album the artist is merely
-        // credited on. Idempotent against one that already filters.
-        Ok(crate::qobuz::own_releases(artist_id, albums))
+        // Every album that credits them, each marked with how; the artist
+        // page sorts them into sections. A server from before the marks sends
+        // none, which `RemoteAlbum::credit_on` covers.
+        self.get(&format!("/api/artists/{artist_id}/albums?cap={cap}")).await
     }
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
