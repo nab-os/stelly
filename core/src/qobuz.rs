@@ -99,6 +99,57 @@ pub struct RemoteAlbum {
     /// everywhere else it is `None`.
     #[serde(default)]
     pub liked_at: Option<i64>,
+    /// Album, EP, single... Only the discography listing reports it, so
+    /// everywhere else it is `None`.
+    #[serde(default)]
+    pub kind: Option<ReleaseKind>,
+    /// How the artist whose discography this came from is credited on it.
+    /// Only a discography has one; see `discography`.
+    #[serde(default)]
+    pub credit: Option<Credit>,
+}
+
+/// What sort of release an album is, as the artist page groups them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseKind {
+    Album,
+    Ep,
+    Single,
+    Live,
+    Compilation,
+}
+
+impl ReleaseKind {
+    /// From `release_type`, which `artist/getReleasesList` and `album/get`
+    /// fill in and `artist/get`'s album listing does not. A live album is an
+    /// `album` tagged `live`; a live single stays a single.
+    fn parse(value: &Value) -> Option<Self> {
+        let live = value
+            .get("release_tags")
+            .and_then(|tags| tags.as_array())
+            .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("live")));
+        match text(value, "release_type")?.as_str() {
+            "album" | "boxset" if live => Some(Self::Live),
+            "album" | "boxset" => Some(Self::Album),
+            "epmini" => Some(Self::Ep),
+            "single" => Some(Self::Single),
+            "bestof" | "compilation" => Some(Self::Compilation),
+            _ => None,
+        }
+    }
+}
+
+/// How an artist is credited on a release in their discography.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Credit {
+    /// Theirs, alone or as one of several main artists.
+    Main,
+    /// Someone else's, with them featured.
+    Featured,
+    /// Credited some other way: remixer, or composer of a song covered on it.
+    Appears,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -306,9 +357,14 @@ impl RemoteAlbum {
         Some(Self {
             id,
             title: text(value, "title").unwrap_or_else(|| "Unknown Album".into()),
-            artist: text(&artist, "name").unwrap_or_else(|| "Unknown Artist".into()),
+            // `artist/getReleasesList` nests the name as `{"display": ...}`.
+            artist: text(&artist, "name")
+                .or_else(|| artist.get("name").and_then(|name| text(name, "display")))
+                .unwrap_or_else(|| "Unknown Artist".into()),
             artist_id: as_i64(&artist, "id"),
-            released: text(value, "release_date_original").or_else(|| text(value, "released_at")),
+            released: text(value, "release_date_original")
+                .or_else(|| text(value, "released_at"))
+                .or_else(|| value.get("dates").and_then(|dates| text(dates, "original"))),
             genre: value
                 .get("genre")
                 .and_then(|g| g.get("name"))
@@ -322,6 +378,18 @@ impl RemoteAlbum {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             liked_at: as_i64(value, "favorited_at"),
+            kind: ReleaseKind::parse(value),
+            credit: None,
+        })
+    }
+
+    /// How `artist_id` is credited on this album. A server from before
+    /// `credit` existed sent only the artist's own releases, so an album
+    /// without one is theirs unless it names someone else as its artist.
+    pub fn credit_on(&self, artist_id: i64) -> Credit {
+        self.credit.unwrap_or(match self.artist_id {
+            Some(id) if id != artist_id => Credit::Appears,
+            _ => Credit::Main,
         })
     }
 
@@ -412,51 +480,131 @@ pub struct SearchResults {
     pub artists: Vec<RemoteArtist>,
 }
 
-/// Keep only the albums whose main artist is `artist_id`.
+/// An artist's discography, each album marked with how they are on it.
 ///
-/// `artist/get?extra=albums` is every album the artist is *credited* on, and
-/// covers credit the original composer, so a much-covered band's
-/// "discography" comes back mostly other people's albums. Measured on Rage
-/// Against The Machine: 42 returned, 13 theirs, the rest cover albums named
-/// after their songs. An album whose artist Qobuz did not report is kept:
+/// Qobuz lists every album the artist is *credited* on, and covers credit the
+/// original composer, so a much-covered band's discography comes back mostly
+/// other people's albums. Measured on Rage Against The Machine: 42 returned,
+/// 13 theirs, the rest cover albums named after their songs. Those are kept
+/// but marked, so the page can put them below the band's own.
+///
+/// `artists` carries each credited artist's roles; a cover album usually
+/// leaves the composer out of it entirely, which is still `Appears`. A
+/// collaboration lists every headliner as a main artist, so it is theirs too,
+/// except under "Various Artists": a label compilation tags everyone on it
+/// that way. An album that reports no artist at all is kept as theirs:
 /// nothing says it is someone else's.
-///
-/// Typed results only, the server's `artist_albums_raw` stays unfiltered
-/// for the crawler, where an album credited to the artist is still somewhere
-/// worth expanding the frontier to.
-pub fn own_releases(artist_id: i64, albums: Vec<RemoteAlbum>) -> Vec<RemoteAlbum> {
-    albums
-        .into_iter()
-        .filter(|album| album.artist_id.is_none_or(|id| id == artist_id))
+pub fn discography(artist_id: i64, raw: &[Value]) -> Vec<RemoteAlbum> {
+    raw.iter()
+        .filter_map(|value| {
+            let mut album = RemoteAlbum::parse(value)?;
+            album.credit = Some(credit(value, artist_id, &album));
+            Some(album)
+        })
         .collect()
+}
+
+fn credit(value: &Value, artist_id: i64, album: &RemoteAlbum) -> Credit {
+    if album.artist_id.is_none_or(|id| id == artist_id) {
+        return Credit::Main;
+    }
+    if album.artist.eq_ignore_ascii_case("various artists") {
+        return Credit::Appears;
+    }
+    let roles: Vec<&str> = value
+        .get("artists")
+        .and_then(|artists| artists.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|artist| as_i64(artist, "id") == Some(artist_id))
+        .filter_map(|artist| artist.get("roles")?.as_array())
+        .flatten()
+        .filter_map(|role| role.as_str())
+        .collect();
+    if roles.contains(&"main-artist") {
+        Credit::Main
+    } else if roles.contains(&"featured-artist") {
+        Credit::Featured
+    } else {
+        Credit::Appears
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn album(title: &str, artist_id: Option<i64>) -> RemoteAlbum {
-        RemoteAlbum {
-            title: title.into(),
-            artist_id,
-            ..Default::default()
-        }
+    /// The shapes `artist/getReleasesList` sends, trimmed to what matters.
+    fn releases() -> Vec<Value> {
+        let json = serde_json::json!([
+            {"id": "a", "title": "Evil Empire", "release_type": "album",
+             "artist": {"id": 155699, "name": {"display": "Rage Against The Machine"}},
+             "artists": [{"id": 155699, "roles": ["main-artist"]}],
+             "dates": {"original": "1996-04-16"}},
+            {"id": "b", "title": "Live at the Grand Olympic Auditorium",
+             "release_type": "album", "release_tags": ["live"],
+             "artist": {"id": 155699}},
+            {"id": "c", "title": "Bulls On Parade", "release_type": "single",
+             "artist": {"id": 155699}},
+            {"id": "d", "title": "Collab", "release_type": "epmini",
+             "artist": {"id": 7},
+             "artists": [{"id": 7, "roles": ["main-artist"]},
+                         {"id": 155699, "roles": ["main-artist"]}]},
+            {"id": "e", "title": "Someone's Single", "release_type": "single",
+             "artist": {"id": 8},
+             "artists": [{"id": 8, "roles": ["main-artist"]},
+                         {"id": 155699, "roles": ["featured-artist"]}]},
+            // A cover: the band is credited as composer, which leaves them
+            // out of `artists` altogether.
+            {"id": "f", "title": "Killing in the Name", "release_type": "bestof",
+             "artist": {"id": 42}, "artists": [{"id": 42, "roles": ["main-artist"]}]},
+            {"id": "g", "title": "Untagged"},
+            {"id": "h", "title": "Label Sampler", "release_type": "album",
+             "artist": {"id": 145383, "name": {"display": "Various Artists"}},
+             "artists": [{"id": 155699, "roles": ["main-artist"]}]},
+        ]);
+        json.as_array().unwrap().clone()
     }
 
-    /// The case that motivated `own_releases`: a cover album credits the
-    /// original band, so `artist/get` lists it under them.
+    /// The case that motivated `credit`: a cover album credits the original
+    /// band, so Qobuz lists it under them.
     #[test]
-    fn discography_drops_albums_by_other_artists() {
-        let kept = own_releases(
-            155699,
-            vec![
-                album("Evil Empire", Some(155699)),
-                album("Killing in the Name", Some(42)),
-                album("Untagged", None),
-            ],
+    fn discography_marks_how_the_artist_is_credited() {
+        let albums = discography(155699, &releases());
+        let credits: Vec<_> = albums.iter().map(|a| a.credit.unwrap()).collect();
+        use Credit::*;
+        assert_eq!(credits, [Main, Main, Main, Main, Featured, Appears, Main, Appears]);
+    }
+
+    #[test]
+    fn release_kinds_and_the_nested_name_parse() {
+        let albums = discography(155699, &releases());
+        let kinds: Vec<_> = albums.iter().map(|a| a.kind).collect();
+        use ReleaseKind::*;
+        assert_eq!(
+            kinds,
+            [
+                Some(Album),
+                Some(Live),
+                Some(Single),
+                Some(Ep),
+                Some(Single),
+                Some(Compilation),
+                None,
+                Some(Album),
+            ]
         );
-        let titles: Vec<_> = kept.iter().map(|a| a.title.as_str()).collect();
-        assert_eq!(titles, ["Evil Empire", "Untagged"]);
+        assert_eq!(albums[0].artist, "Rage Against The Machine");
+        assert_eq!(albums[0].year(), "1996");
+    }
+
+    /// An album from a server that predates `credit`.
+    #[test]
+    fn credit_falls_back_to_the_album_artist() {
+        let album = |artist_id| RemoteAlbum { artist_id, ..Default::default() };
+        assert_eq!(album(Some(1)).credit_on(1), Credit::Main);
+        assert_eq!(album(None).credit_on(1), Credit::Main);
+        assert_eq!(album(Some(2)).credit_on(1), Credit::Appears);
     }
 
     fn track(id: i64, isrc: Option<&str>) -> RemoteTrack {

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
-use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
+use crate::qobuz::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::prelude::*;
 
 /// Add to or remove from this user's likes, which the server keeps and Qobuz
@@ -521,8 +521,44 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
 
 // ------------------------------------------------------------------- artist
 
+/// The headings an artist's discography is split under, in page order.
+const SECTIONS: [&str; 7] =
+    ["Albums", "EPs", "Singles", "Live", "Compilations", "Featured on", "Appears on"];
+
+/// Which of `SECTIONS` an album goes under. Their own releases by format,
+/// anyone else's by how they are on it. An album of theirs whose format the
+/// server did not say, an older server's, counts as an album.
+fn section(album: &RemoteAlbum, artist_id: i64) -> usize {
+    match album.credit_on(artist_id) {
+        Credit::Featured => 5,
+        Credit::Appears => 6,
+        Credit::Main => match album.kind {
+            Some(ReleaseKind::Album) | None => 0,
+            Some(ReleaseKind::Ep) => 1,
+            Some(ReleaseKind::Single) => 2,
+            Some(ReleaseKind::Live) => 3,
+            Some(ReleaseKind::Compilation) => 4,
+        },
+    }
+}
+
+/// The discography sorted under `SECTIONS`, empty ones dropped. Each album
+/// keeps its index into `visible_albums`, which is how its menu finds it.
+fn sections(albums: Vec<RemoteAlbum>, artist_id: i64) -> Vec<(&'static str, Vec<(usize, RemoteAlbum)>)> {
+    let mut grouped: [Vec<(usize, RemoteAlbum)>; 7] = Default::default();
+    for (index, album) in albums.into_iter().enumerate() {
+        grouped[section(&album, artist_id)].push((index, album));
+    }
+    SECTIONS
+        .into_iter()
+        .zip(grouped)
+        .filter(|(_, albums)| !albums.is_empty())
+        .collect()
+}
+
 /// An artist: portrait, a biography folded to a few lines, then the
-/// discography as a grid or a list, then who Qobuz thinks is close.
+/// discography as a grid or a list, split into albums, EPs, singles and the
+/// rest, then who Qobuz thinks is close.
 #[component]
 pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let library = use_context::<Library>();
@@ -552,18 +588,24 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let albums_count = fetched.as_ref().and_then(|a| a.albums_count).or(artist.albums_count);
 
     let shelf = library.shelf.read().clone();
-    let albums = shelf.visible_albums(&blocklist);
+    let sections = sections(shelf.visible_albums(&blocklist), artist.id);
     let has_similar = !shelf.visible_artists(&blocklist, true).is_empty();
     let loading = *library.loading.read();
     let grid = library.layout() == TracksView::Grid;
-    // Over the discography the page lists, which is what adding them takes.
+    // Over their own releases, which is what adding them takes; the albums
+    // they are only featured or credited on are other artists' to add.
     let held = {
         let reach = reach.read();
-        if loading || shelf.albums.is_empty() {
+        let own: Vec<&RemoteAlbum> = shelf
+            .albums
+            .iter()
+            .filter(|album| album.credit_on(artist.id) == Credit::Main)
+            .collect();
+        if loading || own.is_empty() {
             if reach.1.contains(&artist.id) { Held::Some } else { Held::None }
         } else {
-            let count = shelf.albums.iter().filter(|album| reach.0.contains(&album.id)).count();
-            Held::of(count, shelf.albums.len())
+            let count = own.iter().filter(|album| reach.0.contains(&album.id)).count();
+            Held::of(count, own.len())
         }
     };
 
@@ -632,52 +674,64 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
 
             div { class: "rule" }
 
-            div { class: "shelf-head",
-                "Albums"
-                span { class: "spacer" }
-                ViewToggle {}
+            // The view toggle rides on the first heading, whichever that is.
+            if loading || library.error.read().is_some() || sections.is_empty() {
+                div { class: "shelf-head",
+                    "Albums"
+                    span { class: "spacer" }
+                    ViewToggle {}
+                }
             }
 
             if loading {
                 p { class: "muted", "loading…" }
             } else if let Some(message) = library.error.read().clone() {
                 p { class: "muted error", "{message}" }
-            } else if albums.is_empty() {
+            } else if sections.is_empty() {
                 p { class: "muted", "nothing here" }
             } else {
-                ul { class: if grid { "tiles" } else { "list" },
-                    for (index, album) in albums.into_iter().enumerate() {
-                        li {
-                            key: "{index}-{album.id}",
-                            class: if grid { "tile" } else { "row" },
-                            onclick: {
-                                let album = album.clone();
-                                move |_| library.go(View::Album(album.clone()))
-                            },
-                            "data-menu": MenuTarget::ShelfAlbum(index).tag(),
-                            oncontextmenu: move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
-                            },
-                            Cover {
-                                url: album.image.clone(),
-                                class: if grid { String::new() } else { "thumb".to_string() },
-                            }
-                            if grid {
-                                {space_mark(reach.read().0.contains(&album.id))}
-                                span { class: "title", "{album.title}" }
-                                span { class: "artist", "{album.year()}" }
-                            } else {
-                                span { class: "title", "{album.title}" }
-                                if reach.read().0.contains(&album.id) {
-                                    span { class: "in-space-dot", title: "in your space", "•" }
+                for (position, (heading, albums)) in sections.into_iter().enumerate() {
+                    div { class: "shelf-head", key: "{heading}",
+                        "{heading}"
+                        if position == 0 {
+                            span { class: "spacer" }
+                            ViewToggle {}
+                        }
+                    }
+                    ul { class: if grid { "tiles" } else { "list" },
+                        for (index, album) in albums {
+                            li {
+                                key: "{index}-{album.id}",
+                                class: if grid { "tile" } else { "row" },
+                                onclick: {
+                                    let album = album.clone();
+                                    move |_| library.go(View::Album(album.clone()))
+                                },
+                                "data-menu": MenuTarget::ShelfAlbum(index).tag(),
+                                oncontextmenu: move |event: Event<MouseData>| {
+                                    event.prevent_default();
+                                    open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
+                                },
+                                Cover {
+                                    url: album.image.clone(),
+                                    class: if grid { String::new() } else { "thumb".to_string() },
                                 }
-                                if let Some(count) = album.tracks_count {
-                                    span { class: "muted", "{count} tracks" }
+                                if grid {
+                                    {space_mark(reach.read().0.contains(&album.id))}
+                                    span { class: "title", "{album.title}" }
+                                    span { class: "artist", "{album.year()}" }
+                                } else {
+                                    span { class: "title", "{album.title}" }
+                                    if reach.read().0.contains(&album.id) {
+                                        span { class: "in-space-dot", title: "in your space", "•" }
+                                    }
+                                    if let Some(count) = album.tracks_count {
+                                        span { class: "muted", "{count} tracks" }
+                                    }
+                                    span { class: "muted", "{album.year()}" }
                                 }
-                                span { class: "muted", "{album.year()}" }
+                                {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                             }
-                            {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                         }
                     }
                 }
