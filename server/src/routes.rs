@@ -13,8 +13,9 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use stelly_core::api::{
-    BlockedArtist, Corpus, CrawlStatus, Device, PairingGrant, PipelineStatus, Scope, Stage,
-    SyncFile, SyncManifest, Target,
+    BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest, PairingGrant,
+    PipelineStatus, Recipe, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
+    Target, TrackMeta, TracksRequest,
 };
 use stelly_core::session::{Command, Session, Update};
 use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -71,13 +72,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pipeline/add", post(pipeline_add))
         .route("/api/pipeline/stop", post(pipeline_stop))
         .route("/api/pipeline/log", get(pipeline_log))
-        // ------------------------------------------------------------- sync
-        .route("/api/sync/manifest", get(sync_manifest))
-        // zstd, for whoever asks: the synced files are the only big bodies
-        // here. The CLAP embeddings barely compress, so the catalogue only
-        // loses a third, but that is still ~30MB a sync, and level 3 costs
-        // well under a second.
-        .route("/api/sync/{name}", get(sync_file).layer(CompressionLayer::new()))
+        // ------------------------------------------------------------ space
+        .route("/api/space", get(space_info))
+        // zstd, for whoever asks: the index and the map are the only big
+        // bodies here, the map's labels most of all.
+        .route("/api/space/index", get(space_index).layer(CompressionLayer::new()))
+        .route("/api/space/points", get(space_points).layer(CompressionLayer::new()))
+        .route("/api/space/points/meta", get(space_points_meta).layer(CompressionLayer::new()))
+        .route("/api/space/tracks", post(space_tracks))
+        .route("/api/space/search", get(space_search).layer(CompressionLayer::new()))
+        .route("/api/space/generate", post(space_generate))
+        .route("/api/space/order", post(space_order))
         // ---------------------------------------------------------- devices
         .route("/api/devices", get(devices).post(pair_device))
         .route("/api/devices/{id}", delete(revoke_device))
@@ -528,56 +533,107 @@ async fn pipeline_log(State(state): State<AppState>, _: PlayAuth) -> impl IntoRe
     Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default())
 }
 
-// --------------------------------------------------------------------- sync
+// -------------------------------------------------------------------- space
 
-/// What a client needs to navigate: the vectors, the manifest describing them,
-/// and a catalogue. Not `stelly.db` itself, clients get `catalog.db`, the
-/// slim projection built by `stelly-server sync-catalog`.
-const SYNCED: [&str; 4] = ["space.bin", "space.json", "semantic_pca.bin", "catalog.db"];
-
-async fn sync_manifest(State(state): State<AppState>, _: PlayAuth) -> Reply<SyncManifest> {
-    let mut files = Vec::new();
-
-    for name in SYNCED {
-        let path = state.data_dir.join(name);
-        let Ok(bytes) = tokio::fs::read(&path).await else {
-            // A corpus without a layout has no space.bin yet; that is a state
-            // to report as "nothing to sync", not an error.
-            continue;
-        };
-        files.push(SyncFile {
-            name: name.to_string(),
-            bytes: bytes.len() as u64,
-            digest: stelly_core::api::digest(&bytes),
-        });
-    }
-
-    Ok(Json(SyncManifest {
-        generation: state.hub.pipeline_status().await?.generation,
-        files,
-    }))
+fn not_built() -> Failure {
+    Failure::unavailable("no space has been built yet, run build-space and layout")
 }
 
-async fn sync_file(
-    State(state): State<AppState>,
-    _: PlayAuth,
-    Path(name): Path<String>,
-) -> Result<impl IntoResponse, Failure> {
-    // Allow-list rather than sanitising: the set is fixed and small, so there
-    // is no reason to accept a path at all.
-    if !SYNCED.contains(&name.as_str()) {
-        return Err(Failure::not_found(format!("{name} is not a synced file")));
-    }
-
-    let path = state.data_dir.join(&name);
-    let bytes = tokio::fs::read(&path)
+/// Run something against the loaded space off the async threads: a radio
+/// walk scans the corpus once per step.
+async fn on_space<T: Send + 'static>(
+    state: &AppState,
+    work: impl FnOnce(&crate::space::SpaceService) -> Option<T> + Send + 'static,
+) -> Result<T, Failure> {
+    let space = state.hub.space().clone();
+    tokio::task::spawn_blocking(move || work(&space))
         .await
-        .map_err(|err| Failure::not_found(format!("{}: {err}", path.display())))?;
+        .map_err(|err| Failure::from(anyhow::anyhow!("the worker thread panicked: {err}")))?
+        .ok_or_else(not_built)
+}
 
+async fn space_info(State(state): State<AppState>, _: PlayAuth) -> Reply<SpaceInfo> {
+    let tower = state.hub.can_steer().await.unwrap_or(false);
+    Ok(Json(on_space(&state, move |space| Some(space.info(tower))).await?))
+}
+
+async fn space_index(State(state): State<AppState>, _: PlayAuth) -> Reply<SpaceIndex> {
+    let derived = state.hub.space().derived().ok_or_else(not_built)?;
+    Ok(Json(derived.index.clone()))
+}
+
+async fn space_points(State(state): State<AppState>, _: PlayAuth) -> Result<impl IntoResponse, Failure> {
+    let derived = state.hub.space().derived().ok_or_else(not_built)?;
     Ok((
         [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        bytes,
+        derived.points.clone(),
     ))
+}
+
+async fn space_points_meta(State(state): State<AppState>, _: PlayAuth) -> Result<impl IntoResponse, Failure> {
+    let derived = state.hub.space().derived().ok_or_else(not_built)?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        derived.meta.clone(),
+    ))
+}
+
+async fn space_tracks(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<TracksRequest>,
+) -> Reply<Vec<TrackMeta>> {
+    Ok(Json(on_space(&state, move |space| space.tracks(&body.ids)).await?))
+}
+
+#[derive(Deserialize)]
+struct SpaceSearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    sort: SpaceSort,
+    #[serde(default)]
+    desc: bool,
+    #[serde(default = "default_space_limit")]
+    limit: usize,
+}
+
+fn default_space_limit() -> usize {
+    720
+}
+
+async fn space_search(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Query(query): Query<SpaceSearchQuery>,
+) -> Reply<SpaceSearch> {
+    Ok(Json(
+        on_space(&state, move |space| space.search(&query.q, query.sort, query.desc, query.limit)).await?,
+    ))
+}
+
+async fn space_generate(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<GenerateRequest>,
+) -> Reply<Vec<Step>> {
+    // Embedded here rather than by the client, which saves a phone one round
+    // trip and 512 floats each way.
+    let embedding = match &body.recipe {
+        Recipe::Drift { phrase, .. } | Recipe::Mood { phrase } => Some(state.hub.embed(phrase).await?),
+        _ => None,
+    };
+    Ok(Json(
+        on_space(&state, move |space| space.generate(&body, embedding.as_deref())).await?,
+    ))
+}
+
+async fn space_order(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<OrderRequest>,
+) -> Reply<Vec<i64>> {
+    Ok(Json(on_space(&state, move |space| space.order(&body)).await?))
 }
 
 // ------------------------------------------------------------------ devices

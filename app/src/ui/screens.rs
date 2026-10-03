@@ -212,14 +212,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
 
     // The space's own row: genre, tempo, where the crawl found it, where it
     // sits on the map. None of it travels on a Qobuz track.
-    let meta = {
-        let guard = crate::engine().lock().unwrap();
-        guard
-            .navigator
-            .index_of
-            .get(&track.id)
-            .map(|&row| guard.navigator.catalog.get(row).clone())
-    };
+    let meta = if in_space { super::space_row(track.id) } else { None };
 
     // Looking at a track the space holds makes it the one in hand, for the
     // generate panel and the map, however the page was reached.

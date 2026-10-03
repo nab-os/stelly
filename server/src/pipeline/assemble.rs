@@ -479,8 +479,8 @@ fn build(
     Ok(())
 }
 
-/// Written beside the target and renamed, so a client syncing mid-build
-/// never reads half a file.
+/// Written beside the target and renamed, so the server loading the space
+/// mid-build never reads half a file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let staging = path.with_extension("partial");
     std::fs::write(&staging, bytes).with_context(|| format!("writing {}", staging.display()))?;

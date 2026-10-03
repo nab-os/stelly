@@ -15,7 +15,7 @@ use super::icons;
 use super::library::Library;
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, Player};
-use super::{artist_link, open_track, space_track, Cover, MapView, Selection, Weights};
+use super::{artist_link, open_track, space_row, Cover, MapView, Selection, Space, Weights};
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
 use dioxus::prelude::*;
@@ -30,15 +30,8 @@ async fn export(track_ids: Vec<i64>) -> anyhow::Result<i64> {
 /// holds it.
 fn label_for(id: Option<i64>) -> String {
     let Some(id) = id else { return "-".into() };
-    let guard = crate::engine().lock().unwrap();
-    guard
-        .navigator
-        .index_of
-        .get(&id)
-        .map(|&row| {
-            let track = guard.navigator.catalog.get(row);
-            format!("{} - {}", track.artist, track.title)
-        })
+    space_row(id)
+        .map(|track| format!("{} - {}", track.artist, track.title))
         .unwrap_or_else(|| id.to_string())
 }
 
@@ -55,19 +48,10 @@ pub fn GeneratePanel() -> Element {
     let mode = *generator.mode.read();
     let result = generator.result.read().clone();
     let empty = result.is_empty();
-    let seed = selected().and_then(space_track);
+    let seed = selected().and_then(space_row).map(|meta| as_remote(&meta));
     let has_selection = seed.is_some();
     let from = *generator.from.read();
     let to = *generator.to.read();
-
-    // Asked once: whether the server has a text tower at all, which drift
-    // needs to turn a phrase into somewhere to go.
-    use_future(move || async move {
-        let mut tower = generator.tower;
-        if let Ok(available) = backend().can_steer().await {
-            tower.set(available);
-        }
-    });
 
     // On a phone the panel covers the main area, so anything here that
     // navigates the main area has to get out of the way first.
@@ -407,10 +391,12 @@ fn WeightsDisclosure() -> Element {
     let mut weights = use_context::<Weights>().0;
     let mut expanded = use_signal(|| false);
 
-    let block_names: Vec<String> = engine_block_names();
+    let blocks = use_context::<Space>().info.read().blocks.clone();
+    let defaults: HashMap<String, f32> =
+        blocks.iter().map(|block| (block.name.clone(), block.default_weight)).collect();
+    let block_names: Vec<String> = blocks.into_iter().map(|block| block.name).collect();
 
     let weights_changed = {
-        let defaults = crate::engine().lock().unwrap().space.default_weights();
         let current = weights();
         defaults.iter().any(|(name, default)| {
             current
@@ -434,7 +420,7 @@ fn WeightsDisclosure() -> Element {
 
             if expanded() {
                 p { class: "muted",
-                    "Reshapes distances immediately. Map positions are fixed until the layout step is re-run."
+                    "Reshapes distances from the next result on. Map positions are fixed until the layout step is re-run."
                 }
                 div { class: "actions",
                     span { class: "spacer" }
@@ -443,9 +429,7 @@ fn WeightsDisclosure() -> Element {
                         title: "back to the weights the space was built with",
                         disabled: !weights_changed,
                         onclick: move |_| {
-                            let defaults = crate::engine().lock().unwrap().space.default_weights();
                             weights.set(defaults.clone());
-                            let _ = crate::engine().lock().unwrap().set_weights(&defaults);
                             generator.invalidate();
                         },
                         "reset"
@@ -466,8 +450,7 @@ fn WeightsDisclosure() -> Element {
                                     if let Ok(v) = e.value().parse::<f32>() {
                                         let mut w: HashMap<String, f32> = weights();
                                         w.insert(name.clone(), v);
-                                        weights.set(w.clone());
-                                        let _ = crate::engine().lock().unwrap().set_weights(&w);
+                                        weights.set(w);
                                         generator.invalidate();
                                     }
                                 }
@@ -489,18 +472,6 @@ fn capitalised(word: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
-}
-
-fn engine_block_names() -> Vec<String> {
-    crate::engine()
-        .lock()
-        .unwrap()
-        .space
-        .manifest
-        .blocks
-        .iter()
-        .map(|b| b.name.clone())
-        .collect()
 }
 
 /// A path half-built, on a phone, where the panel that shows it is usually

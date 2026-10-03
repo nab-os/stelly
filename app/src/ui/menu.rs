@@ -14,7 +14,7 @@
 use super::generate::{Generator, Mode, PathEnd};
 use super::library::{add_to_space, Library};
 use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
-use super::{open_remote_track, space_track, Blocklist, LocalIds, MapView, Selection};
+use super::{open_remote_track, space_row, space_track, Blocklist, LocalIds, MapView, Selection};
 use crate::api::Target;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
@@ -616,7 +616,8 @@ fn SpaceTrackItems(track_id: i64) -> Element {
     let menu = use_context::<ContextMenu>().0;
     let map = use_context::<MapView>();
 
-    let Some(track) = space_track(track_id) else {
+    // A point on the map is only an id until its row arrives.
+    let Some(track) = space_row(track_id).map(|meta| super::generate::as_remote(&meta)) else {
         return rsx! {};
     };
 

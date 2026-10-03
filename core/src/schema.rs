@@ -2,9 +2,9 @@
 //! creates the tables, and this is only its shape, so a column added there
 //! needs adding here too, the compiler then finds every query it affects.
 //!
-//! Here rather than in the server so both sides of the catalogue read it
-//! through the same definitions: the server writes `stelly.db`, the client
-//! reads the slim `catalog.db` built from it.
+//! Here rather than in the server so the catalogue is read through the same
+//! definitions it is written with: the server's stages write `stelly.db`,
+//! and `db::Catalog` reads it back when the space is loaded.
 //!
 //! SQLite's INTEGER is 64-bit, so every integer column is `BigInt`.
 

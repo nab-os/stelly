@@ -271,8 +271,7 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
         Command::Serve(_)
         | Command::Pair(_)
         | Command::Devices(_)
-        | Command::Revoke(_)
-        | Command::BuildCatalog(_) => unreachable!("main runs the serving commands"),
+        | Command::Revoke(_) => unreachable!("main runs the serving commands"),
     }
 }
 
