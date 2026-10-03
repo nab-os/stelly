@@ -5,8 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageInstaller
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -14,11 +17,15 @@ import android.graphics.drawable.Icon
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
+import android.widget.Toast
+import java.io.File
 import java.net.URL
 
 typealias BuildConfig = fr.glargh.stelly.BuildConfig
@@ -27,6 +34,7 @@ class MainActivity : WryActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // Before super, which starts the Rust side.
         Playback.context = applicationContext
+        Updater.context = applicationContext
         super.onCreate(savedInstanceState)
     }
 }
@@ -262,5 +270,99 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+}
+
+// Installs a release the Rust side downloaded from GitHub, see
+// src/update/android.rs. A session rather than an ACTION_VIEW intent: that
+// would need a FileProvider, and dx has nowhere to declare its paths.
+object Updater {
+    private const val ACTION = "fr.glargh.stelly.UPDATE_STATUS"
+
+    lateinit var context: Context
+    private var listening = false
+
+    // Called on a Rust thread. Empty once the installer has the APK,
+    // "permission" when the user has been sent to allow installs from Stelly,
+    // and the reason otherwise.
+    @JvmStatic
+    fun install(path: String): String {
+        val packages = context.packageManager
+        if (!packages.canRequestPackageInstalls()) {
+            val settings = Intent(
+                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:${context.packageName}"),
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(settings)
+            return "permission"
+        }
+
+        return try {
+            val apk = File(path)
+            val installer = packages.packageInstaller
+            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+            params.setAppPackageName(context.packageName)
+            // Only skips the prompt once Stelly is its own installer of
+            // record, that is from the second update on.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
+            }
+            val id = installer.createSession(params)
+            installer.openSession(id).use { session ->
+                session.openWrite("stelly.apk", 0, apk.length()).use { out ->
+                    apk.inputStream().use { it.copyTo(out) }
+                    session.fsync(out)
+                }
+                apk.delete()
+                listen()
+                // Mutable, since the installer fills in the status; explicit,
+                // which Android 14 requires of a mutable one.
+                val status = Intent(ACTION).setPackage(context.packageName)
+                val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                } else {
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                }
+                session.commit(PendingIntent.getBroadcast(context, id, status, flags).intentSender)
+            }
+            ""
+        } catch (e: Exception) {
+            e.message ?: e.toString()
+        }
+    }
+
+    // The installer reports back here, first with the confirmation screen to
+    // show, then with how it went. On success Android has already stopped
+    // this process.
+    private fun listen() {
+        if (listening) return
+        listening = true
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+                    PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                        val confirm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(Intent.EXTRA_INTENT)
+                        }
+                        confirm?.let { context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    }
+                    PackageInstaller.STATUS_SUCCESS -> {}
+                    PackageInstaller.STATUS_FAILURE_ABORTED -> {}
+                    else -> {
+                        val reason = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "unknown error"
+                        Toast.makeText(context, "Update failed: $reason", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(ACTION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
     }
 }

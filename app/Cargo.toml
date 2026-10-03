@@ -46,6 +46,8 @@ reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Checks a downloaded release against the digest GitHub publishes for it.
+sha2.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 
 [dependencies.dioxus]
