@@ -31,6 +31,7 @@ fn toggle_like(
     mut status: Signal<Option<String>>,
 ) {
     let want = !currently_liked;
+    let me = try_consume_context::<super::Me>().and_then(|me| me.0.peek().as_ref().map(|device| device.user.clone()));
     spawn(async move {
         let result = if want {
             backend().favorite_add(kind, &id).await
@@ -38,7 +39,7 @@ fn toggle_like(
             backend().favorite_remove(kind, &id).await
         };
         match result {
-            Ok(()) => library.set_liked(kind, &id, want),
+            Ok(()) => library.set_liked(kind, &id, want, me.filter(|name| !name.is_empty())),
             Err(err) => status.set(Some(format!("{err:#}"))),
         }
     });
@@ -208,6 +209,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
 
     library.ensure_liked_loaded();
     let liked = library.liked().tracks.contains(&track.id);
+    let liked_by = library.liked().by("track", &track.id.to_string());
     let in_space = local.0.read().contains(&track.id);
 
     // The space's own row: genre, tempo, where the crawl found it, where it
@@ -317,8 +319,9 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("ISRC", track.isrc.clone().or_else(|| meta.as_ref().and_then(|m| m.isrc.clone())))}
                 {fact("Quality", Some(quality.to_string()))}
                 {fact("Streamable", Some(if track.streamable { "yes" } else { "not here" }.to_string()))}
+                {fact("Liked by", liked_by)}
                 {fact("In your space", Some(if in_space { "yes" } else { "no" }.to_string()))}
-                {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from your likes", m.seed_distance)))}
+                {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from a like", m.seed_distance)))}
                 {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
                 {fact("Qobuz track", Some(track.id.to_string()))}
                 {fact("Qobuz album", track.album_id.clone())}
@@ -333,7 +336,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 }
             }
 
-            if let Some(artist_id) = track.artist_id {
+            if let Some(artist_id) = track.artist_id.filter(|_| *blocklist.editable.read()) {
                 div { class: "page-foot",
                     button {
                         class: "danger",
@@ -369,6 +372,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
 
     library.ensure_liked_loaded();
     let liked = library.liked().albums.contains(&album.id);
+    let liked_by = library.liked().by("album", &album.id);
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
     // `ShelfTrack` indices address the same list.
@@ -405,6 +409,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
         album.label.clone(),
         (count > 0).then(|| format!("{count} tracks")),
         (total > 0).then(|| clock(total)),
+        liked_by.map(|name| format!("liked by {name}")),
     ]
     .into_iter()
     .flatten()
@@ -534,6 +539,7 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
 
     library.ensure_liked_loaded();
     let followed = library.liked().artists.contains(&artist.id);
+    let followed_by = library.liked().by("artist", &artist.id.to_string());
 
     // The portrait and biography, which nothing that links here carries. A
     // server from before that route answers 404; the page just goes without.
@@ -576,6 +582,9 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                     if let Some(count) = albums_count {
                         span { class: "hero-line muted", "{count} albums" }
                     }
+                    if let Some(name) = followed_by {
+                        span { class: "hero-line muted", "followed by {name}" }
+                    }
                     div { class: "hero-actions",
                         button {
                             class: if followed { "icon-btn liked" } else { "icon-btn" },
@@ -592,16 +601,18 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                             "analyse every album of theirs and put them on the map",
                             status,
                         )}
-                        button {
-                            class: "danger",
-                            onclick: {
-                                let (id, name) = (artist.id, artist.name.clone());
-                                move |_| {
-                                    blocklist.block.call((id, name.clone()));
-                                    library.back();
-                                }
-                            },
-                            "Hide"
+                        if *blocklist.editable.read() {
+                            button {
+                                class: "danger",
+                                onclick: {
+                                    let (id, name) = (artist.id, artist.name.clone());
+                                    move |_| {
+                                        blocklist.block.call((id, name.clone()));
+                                        library.back();
+                                    }
+                                },
+                                "Hide"
+                            }
                         }
                     }
                     if let Some(message) = status() {

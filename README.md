@@ -221,8 +221,9 @@ stelly-server blocked                   # list
 stelly-server unblock 224109
 ```
 
-Or click **hide** on any artist or track in the app. The **Hidden** panel at the
-bottom of the Qobuz column lists them with a way back.
+Or click **hide** on any artist or track in the app, from a `pipeline` device:
+the space is the whole family's, so a `play` device sees the list but cannot
+change it. The **Hidden artists** row in settings lists them with a way back.
 
 Hiding filters rather than deletes, which is what lets a block take effect
 immediately and be undone. `block --purge` deletes the tracks, features and
@@ -236,11 +237,11 @@ refuses to act rather than guessing.
 
 Two scopes, both authenticated: `play` is browsing, navigating and minting a stream
 URL, and **Add to space**, which is bounded; `pipeline` is crawling and
-analysing the whole backlog. Each device gets its own token, stored
+analysing the whole backlog, and hiding artists. Each device gets its own token, stored
 only as a SHA-256 hash, so one phone can be revoked without re-pairing the rest.
 
-The devices share one queue. The speaker button in the player bar lists the
-ones connected, under the name they were paired with, and picks which one
+A person's devices share one queue. The speaker button in the player bar lists
+the ones connected, under the name they were paired with, and picks which one
 plays; the others become remotes for it.
 
 ```sh
@@ -248,6 +249,34 @@ stelly-server pair --name phone --scope play
 stelly-server devices
 stelly-server revoke 3
 ```
+
+### A family
+
+One server is sized for a family: a few people who trust each other, sharing
+the one Qobuz account. It is not meant to be a public server, and nothing in
+it tries to be.
+
+Each person has their own devices and their own queue, so the speaker in the
+living room only answers to the queue it was picked from. Everything else is
+shared: the Qobuz account and its 2 requests a second, which means one
+person's crawl slows everyone's browsing, the favourites, the playlists and
+the space. A like is still remembered as whoever made it, and shown on the
+track, album or artist page as "liked by"; what was liked before there were
+users counts as the first user's. Playlists exported from the app are named
+after whoever exported them.
+
+```sh
+stelly-server pair --name desktop --scope pipeline --user sasha
+stelly-server pair --name phone --user sam    # a new name adds that person
+stelly-server user list
+stelly-server user rename sam samuel
+stelly-server user remove samuel              # once their devices are revoked
+```
+
+A server from before users puts the devices it already has under `owner`;
+rename that to whoever it is. A `pipeline` device can also pair for someone
+from the app's settings, and a `play` device sees and can revoke only its own
+person's devices.
 
 This speaks plain HTTP and binds to loopback. Anything beyond loopback belongs
 behind WireGuard/Tailscale or a TLS proxy.
