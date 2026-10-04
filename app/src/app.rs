@@ -8,8 +8,8 @@ use crate::backend::{self, backend};
 use crate::ui::{
     icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
     Library, LocalIds, MainScreen, MapView, Me, PathPill, Pipeline, Player, PlayerBar, QueueView,
-    ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, View,
-    Weights,
+    ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, TitleBar,
+    View, Weights,
 };
 use crate::Wiring;
 use crate::ui::library::Sort;
@@ -60,17 +60,24 @@ pub fn App() -> Element {
 
     rsx! {
         style { {include_str!("../assets/style.css")} }
-        match phase() {
-            // A list of one, keyed by the pairing: a key on a lone component
-            // is not diffed, a key in a list is, so moving to another server
-            // drops every screen, signal and task the old one fed and starts
-            // the shell afresh.
-            Phase::Ready => rsx! {
-                for epoch in [epoch()] {
-                    Shell { key: "{epoch}" }
+        // The desktop window has no system title bar, so its own sits above
+        // whichever screen is showing, the setup one included.
+        div { class: "frame",
+            TitleBar {}
+            div { class: "frame-body",
+                match phase() {
+                    // A list of one, keyed by the pairing: a key on a lone
+                    // component is not diffed, a key in a list is, so moving
+                    // to another server drops every screen, signal and task
+                    // the old one fed and starts the shell afresh.
+                    Phase::Ready => rsx! {
+                        for epoch in [epoch()] {
+                            Shell { key: "{epoch}" }
+                        }
+                    },
+                    Phase::Setup(error) => rsx! { Setup { phase, error } },
                 }
-            },
-            Phase::Setup(error) => rsx! { Setup { phase, error } },
+            }
         }
     }
 }
