@@ -13,6 +13,7 @@ use crate::ui::{
 };
 use crate::Wiring;
 use crate::ui::library::Sort;
+use crate::ui::tour::{Tour, TourView};
 use crate::platform::wry::http::Response;
 use dioxus::prelude::*;
 use std::collections::HashSet;
@@ -333,6 +334,7 @@ fn Shell() -> Element {
     });
 
     let library = use_context_provider(Library::new);
+    use_context_provider(Tour::new);
 
     let generator = use_context_provider(Generator::new);
     use_context_provider(|| Weights(generator.weights));
@@ -946,6 +948,10 @@ fn Shell() -> Element {
 
             // Last, so it paints over everything it can be opened from.
             ContextMenuView {}
+
+            // Over even that: while it shows, the app is only something to
+            // point at.
+            TourView {}
         }
     }
 }

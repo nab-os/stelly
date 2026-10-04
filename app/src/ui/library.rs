@@ -8,6 +8,7 @@ use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, play_next, Player};
 use super::prefs::{self, Prefs};
 use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
+use super::search_history::SearchHistory;
 use super::settings::SettingsScreen;
 use super::{
     artist_link, open_remote_track, open_track, Blocklist, Cover, LocalIds, MapView,
@@ -338,6 +339,8 @@ pub struct Library {
     /// every back. Keyed on the source as well: the same search asked of the
     /// space and of Qobuz finds different things.
     kept: Signal<Vec<(View, Source, Shelf)>>,
+    /// Recent searches, newest first, saved. See `search_history`.
+    pub(crate) searches: Signal<Vec<String>>,
 }
 
 /// How many views `Library::kept` remembers. Enough to step back through a
@@ -376,6 +379,7 @@ impl Library {
             liked: Signal::new(None),
             epoch: Signal::new(0),
             kept: Signal::new(Vec::new()),
+            searches: Signal::new(prefs.searches),
         }
     }
 
@@ -627,6 +631,13 @@ impl Library {
     /// A view seen recently comes back with what it had, and is fetched again
     /// underneath, so a like or an unlike made since still shows up.
     pub fn show(mut self, target: View) {
+        // Leaving the search screen with something on it is when a search
+        // counts as used: whatever it found was opened, or read and left.
+        if let View::Search { query, .. } = &*self.view.peek() {
+            if !matches!(target, View::Search { .. }) {
+                self.remember_search(query);
+            }
+        }
         let source = *self.source.peek();
         if !*self.loading.peek() && self.error.peek().is_none() {
             let leaving = (self.view.peek().clone(), source, self.loaded.peek().clone());
@@ -1082,6 +1093,7 @@ fn SearchBar() -> Element {
                             return;
                         }
                         search.submitted.set(text.clone());
+                        library.remember_search(&text);
                         library.search_to(text);
                     },
                 }
@@ -1278,7 +1290,7 @@ fn BrowseScreen() -> Element {
                     }
                 }
                 if empty_search {
-                    p { class: "muted", "Type to search." }
+                    SearchHistory {}
                 } else if nothing_visible && matches!(view, View::Favourites { scope: Scope::Everything }) {
                     p { class: "muted", "No likes yet. Heart anything to keep it here." }
                 } else if nothing_visible {

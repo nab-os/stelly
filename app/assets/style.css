@@ -595,6 +595,33 @@ ol.list .row::before {
 }
 .clear-search:hover:not(:disabled) { background: transparent; color: var(--text); }
 
+/* Recent searches, where the results go while the box is empty. The cross
+   is the queue's: shown on hover where there is one, and always on a touch
+   screen, where these rows have no swipe to leave by. */
+.search-history { display: flex; flex-direction: column; gap: 8px; }
+.search-history-head { display: flex; align-items: center; gap: 8px; }
+.search-history-head h3 { margin: 0; font-size: 13px; color: var(--muted); font-weight: 600; }
+.search-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.search-history-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+.search-history-row .title { flex: 1; min-width: 0; }
+.search-history-icon { display: grid; place-items: center; color: var(--muted); flex: none; }
+.search-history-icon .icon { width: 16px; height: 16px; }
+@media (hover: hover) and (pointer: fine) {
+  .search-history-row:hover { background: var(--row-hover); }
+  .search-history-row:hover .search-history-remove { visibility: visible; }
+}
+@media (hover: none) {
+  .search-history-remove { visibility: visible; }
+}
+
 /* Two options, exactly one of them lit. */
 .segmented {
   display: flex;
@@ -1715,4 +1742,67 @@ span.path-end {
   .tiles { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px 8px; }
   .tile .chip { visibility: visible; }
   .queue-remove { display: none; }
+  .queue-remove.search-history-remove { display: grid; }
+}
+
+/* ------------------------------------------------------------------- tour
+   Over everything, the flying cover included. The ring is a hole in the
+   shade: its own shadow, spread to the window's edges, is the shade, so
+   whatever it surrounds stays lit and the rest dims. Clicks stop at the
+   overlay, the tour is walked with its own buttons. */
+
+.tour {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  outline: none;
+}
+
+.tour-ring {
+  position: fixed;
+  border-radius: 12px;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 0 100vmax rgba(8, 9, 14, 0.72);
+  pointer-events: none;
+  transition: top 260ms cubic-bezier(0.2, 0, 0, 1), left 260ms cubic-bezier(0.2, 0, 0, 1),
+    width 260ms cubic-bezier(0.2, 0, 0, 1), height 260ms cubic-bezier(0.2, 0, 0, 1);
+}
+.tour-ring.none { box-shadow: 0 0 0 100vmax rgba(8, 9, 14, 0.72); }
+
+.tour-card {
+  position: fixed;
+  width: min(360px, calc(100vw - 24px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  visibility: hidden;
+}
+/* Shown only once tour.js has put it somewhere, so it never flashes in the
+   corner first; and only then moving, so the first placing is not a slide. */
+.tour-card.placed {
+  visibility: visible;
+  transition: top 260ms cubic-bezier(0.2, 0, 0, 1), left 260ms cubic-bezier(0.2, 0, 0, 1);
+}
+.tour-card h2 { margin: 0; font-size: 17px; }
+.tour-card p { margin: 0; line-height: 1.55; }
+
+.tour-head { display: flex; align-items: center; justify-content: space-between; }
+.tour-dots { display: flex; gap: 6px; }
+.tour-dot {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--row-hover);
+}
+.tour-dot:hover:not(:disabled) { background: var(--muted); }
+.tour-dot.active, .tour-dot.active:hover:not(:disabled) { background: var(--accent); }
+
+.tour-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-ring, .tour-card.placed { transition: none; }
 }
