@@ -125,6 +125,15 @@ pub fn close() -> Element {
     })
 }
 
+/// A clock with the arrow running back, a recent search.
+pub fn history() -> Element {
+    stroked(rsx! {
+        path { d: "M3 12a9 9 0 1 0 3-6.7L3 8" }
+        path { d: "M3 3v5h5" }
+        path { d: "M12 7v5l3 2" }
+    })
+}
+
 /// Home, which is the favourites.
 pub fn home() -> Element {
     stroked(rsx! {
