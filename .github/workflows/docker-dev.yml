@@ -74,7 +74,11 @@ jobs:
           flavor: latest=false
 
       # Built and loaded first so the smoke test runs before anything is
-      # pushed; the push step after it is a cache hit.
+      # pushed; the push step after it is a cache hit, from the builder's own
+      # local cache.
+      #
+      # Restores from main's gha cache but never writes one: a cache saved
+      # here is scoped to `dev` or `nightly`, which nothing else reads.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -84,7 +88,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
 
       - name: Smoke test
         run: |
