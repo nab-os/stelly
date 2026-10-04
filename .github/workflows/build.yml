@@ -507,8 +507,13 @@ jobs:
           load: ${{ github.ref_type != 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Written from main only, like the rust caches and for the same
+          # reason: a pull request's or a tag's cache is scoped to its own ref,
+          # nothing else can read it, and mode=max leaves a fresh set of blobs
+          # behind on every run. PRs and tags still restore from main's. An
+          # empty cache-to turns the export off.
           cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max,ignore-error=true' || '' }}
 
       # Cheap proof the binary in the image actually runs: it opens the
       # database, finds no devices and says so.
