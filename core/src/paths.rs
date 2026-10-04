@@ -62,6 +62,13 @@ impl Navigator {
         self.knn = None;
     }
 
+    /// Mark row `i` as used, and with it every other release of the same
+    /// recording, so no list holds one song twice. See `recording`.
+    fn take(&self, used: &mut HashSet<usize>, i: usize) {
+        used.insert(i);
+        used.extend(self.catalog.twins(i));
+    }
+
     fn step(&self, i: usize, similarity: Option<f32>) -> Step {
         Step {
             track: self.catalog.get(i).clone(),
@@ -77,6 +84,9 @@ impl Navigator {
         };
         let mut sims = self.space.similarities(self.space.row(i));
         sims[i] = f32::NEG_INFINITY;
+        for &twin in self.catalog.twins(i) {
+            sims[twin] = f32::NEG_INFINITY;
+        }
         self.mask_blocked(&mut sims);
 
         if exclude_same_artist {
@@ -88,8 +98,20 @@ impl Navigator {
             }
         }
 
-        crate::space::top_k(&sims, k)
+        // Nearest first, skipping a release of a song already listed: they
+        // sit practically on top of each other, so would come out together.
+        let mut taken = HashSet::new();
+        argsort_desc(&sims)
             .into_iter()
+            .filter(|&j| sims[j].is_finite())
+            .filter(|&j| {
+                let fresh = !taken.contains(&j);
+                if fresh {
+                    self.take(&mut taken, j);
+                }
+                fresh
+            })
+            .take(k)
             .map(|j| self.step(j, Some(sims[j])))
             .collect()
     }
@@ -115,7 +137,8 @@ impl Navigator {
         }
 
         let mut chosen = vec![start];
-        let mut used: HashSet<usize> = [start].into_iter().collect();
+        let mut used: HashSet<usize> = HashSet::new();
+        self.take(&mut used, start);
         let mut similarity: Vec<Option<f32>> = vec![None];
 
         while chosen.len() < steps {
@@ -149,7 +172,7 @@ impl Navigator {
             let Some(pick) = pick else { break };
             similarity.push(Some(sims[pick]));
             chosen.push(pick);
-            used.insert(pick);
+            self.take(&mut used, pick);
         }
 
         chosen
@@ -231,7 +254,9 @@ impl Navigator {
         let end = self.space.row(b).to_vec();
 
         let mut chosen = vec![a];
-        let mut used: HashSet<usize> = [a, b].into_iter().collect();
+        let mut used: HashSet<usize> = HashSet::new();
+        self.take(&mut used, a);
+        self.take(&mut used, b);
 
         for step in 1..steps.saturating_sub(1) {
             let t = step as f32 / (steps - 1) as f32;
@@ -239,7 +264,7 @@ impl Navigator {
             match self.snap(&waypoint, &chosen, &used, c) {
                 Some(pick) => {
                     chosen.push(pick);
-                    used.insert(pick);
+                    self.take(&mut used, pick);
                 }
                 None => break,
             }
@@ -420,7 +445,14 @@ impl Navigator {
 
         let mut best: HashMap<usize, f32> = HashMap::from([(start, 0.0)]);
         let mut previous: HashMap<usize, usize> = HashMap::new();
+        // A song's releases are one place on the way: reaching a song closes
+        // all of them, so the path cannot step onto it a second time, and the
+        // way on is through any of their edges, since a song's nearest
+        // neighbours are mostly its own other releases and closing them alone
+        // could leave it none. An edge to a release of the destination
+        // arrives at the destination.
         let mut visited: HashSet<usize> = HashSet::new();
+        let goal_twins: HashSet<usize> = self.catalog.twins(goal).iter().copied().collect();
         let mut queue = BinaryHeap::new();
         queue.push(Entry {
             cost: 0.0,
@@ -434,7 +466,13 @@ impl Navigator {
             if node == goal {
                 break;
             }
-            for &(neighbour, edge) in &graph[node] {
+            let twins = self.catalog.twins(node);
+            visited.extend(twins.iter().filter(|&&twin| twin != goal));
+            let edges = std::iter::once(node)
+                .chain(twins.iter().copied())
+                .flat_map(|from| graph[from].iter().copied());
+            for (neighbour, edge) in edges {
+                let neighbour = if goal_twins.contains(&neighbour) { goal } else { neighbour };
                 if visited.contains(&neighbour) {
                     continue;
                 }
@@ -546,7 +584,8 @@ impl Navigator {
         let start = self.space.row(start_index).to_vec();
 
         let mut chosen = vec![start_index];
-        let mut used: HashSet<usize> = [start_index].into_iter().collect();
+        let mut used: HashSet<usize> = HashSet::new();
+        self.take(&mut used, start_index);
 
         for step in 1..steps {
             let t = step as f32 / (steps - 1) as f32;
@@ -558,7 +597,7 @@ impl Navigator {
             match self.snap(&waypoint, &chosen, &used, c) {
                 Some(pick) => {
                     chosen.push(pick);
-                    used.insert(pick);
+                    self.take(&mut used, pick);
                 }
                 None => break,
             }
@@ -593,12 +632,13 @@ impl Navigator {
             .collect();
 
         let mut chosen: Vec<usize> = Vec::with_capacity(count);
+        let mut taken: HashSet<usize> = HashSet::new();
         let mut uses: HashMap<i64, usize> = HashMap::new();
         while chosen.len() < count {
             let pick = pool
                 .iter()
                 .copied()
-                .filter(|j| !chosen.contains(j) && self.allowed(*j, &chosen, c))
+                .filter(|j| !taken.contains(j) && self.allowed(*j, &chosen, c))
                 .map(|j| {
                     let artist = self.catalog.get(j).artist_id;
                     let times = uses.get(&artist).copied().unwrap_or(0);
@@ -611,6 +651,7 @@ impl Navigator {
                 *uses.entry(artist).or_insert(0) += 1;
             }
             chosen.push(pick);
+            self.take(&mut taken, pick);
         }
 
         let ids: Vec<i64> = chosen
@@ -741,6 +782,7 @@ mod tests {
                 clap: None,
                 clap_dims: 0,
                 blocked_artists: HashSet::new(),
+                twins: HashMap::new(),
             },
             index_of,
             knn: None,
@@ -893,5 +935,100 @@ mod tests {
     #[test]
     fn mood_without_clap_vectors_finds_nothing() {
         assert!(fixture().mood(&[1.0], 3, 0.1, &Constraints::default()).is_empty());
+    }
+
+    /// One artist's songs round the circle, some on two releases: rows with
+    /// the same title once release wording is set aside are one recording.
+    fn with_twins(rows: &[(i64, f32, &str)]) -> Navigator {
+        let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _)| (id, angle)).collect();
+        let mut nav = navigator(&angles);
+        for (track, &(_, _, title)) in nav.catalog.tracks.iter_mut().zip(rows) {
+            track.title = title.into();
+            track.artist_id = 1;
+        }
+        nav.catalog.twins = Catalog::twins_of(&nav.catalog.tracks);
+        nav
+    }
+
+    const TWINS: [(i64, f32, &str); 8] = [
+        (1, 0.0, "a"),
+        (2, 1.0, "a (2011 Remaster)"),
+        (3, 2.0, "b"),
+        (4, 3.0, "b - Single Version"),
+        (5, 10.0, "c"),
+        (6, 11.0, "c [Deluxe Edition]"),
+        (7, 20.0, "d"),
+        (8, 30.0, "e"),
+    ];
+
+    /// No constraint that would keep a twin out on its own account.
+    fn loose() -> Constraints {
+        Constraints {
+            artist_cooldown: 0,
+            allow_same_album_consecutive: true,
+            ..Constraints::default()
+        }
+    }
+
+    fn assert_no_song_twice(nav: &Navigator, steps: &[Step]) {
+        let songs: Vec<String> = steps
+            .iter()
+            .map(|step| crate::recording::song_title(&step.track.title))
+            .collect();
+        let unique: HashSet<&String> = songs.iter().collect();
+        assert_eq!(unique.len(), songs.len(), "a song twice in {songs:?}");
+        assert!(!steps.is_empty());
+        let _ = nav;
+    }
+
+    #[test]
+    fn neighbours_skip_other_releases_and_still_fill_the_count() {
+        let nav = with_twins(&TWINS);
+        let found = nav.neighbours(1, 3, false);
+        assert_eq!(ids(&found), vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn radio_never_plays_a_song_twice() {
+        let nav = with_twins(&TWINS);
+        let walk = nav.radio_nearest(1, 5, 0.0, &loose());
+        assert_eq!(ids(&walk), vec![1, 3, 5, 7, 8]);
+    }
+
+    #[test]
+    fn interpolate_never_plays_a_song_twice() {
+        let nav = with_twins(&TWINS);
+        let walk = nav.interpolate(1, 8, 6, &loose());
+        assert_no_song_twice(&nav, &walk);
+        assert_eq!(walk.last().map(|step| step.track.track_id), Some(8));
+    }
+
+    #[test]
+    fn graph_path_never_steps_onto_a_twin() {
+        let mut nav = with_twins(&TWINS);
+        let path = nav.graph_path(1, 8, 4);
+        assert_no_song_twice(&nav, &path);
+        assert_eq!(path.first().map(|step| step.track.track_id), Some(1));
+        assert_eq!(path.last().map(|step| step.track.track_id), Some(8));
+    }
+
+    #[test]
+    fn mood_never_takes_a_song_twice() {
+        let mut nav = with_twins(&TWINS);
+        // The twins score highest, both of each pair.
+        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1]);
+        nav.catalog.clap_dims = 1;
+        let picked = nav.mood(&[1.0], 3, 0.0, &loose());
+        assert_no_song_twice(&nav, &picked);
+        assert_eq!(picked.len(), 3);
+    }
+
+    /// 1 and 2 are one song, and only 2 has an edge on to 3: the song is left
+    /// through its other release rather than being a dead end.
+    #[test]
+    fn graph_path_leaves_a_song_through_any_of_its_releases() {
+        let mut nav = with_twins(&[(1, 0.0, "a"), (2, 4.0, "a - Remastered"), (3, 6.0, "b"), (4, 20.0, "c")]);
+        let path = nav.graph_path(1, 3, 1);
+        assert_eq!(ids(&path), vec![1, 3]);
     }
 }

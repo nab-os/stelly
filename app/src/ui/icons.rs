@@ -284,3 +284,52 @@ pub fn mood() -> Element {
         }
     })
 }
+
+/// Done, for a pipeline step with nothing left to do.
+pub fn check() -> Element {
+    stroked(rsx! {
+        path { d: "M5 12.5l4.5 4.5L19 7.5" }
+    })
+}
+
+pub fn stop() -> Element {
+    filled(rsx! {
+        rect { x: "6", y: "6", width: "12", height: "12", rx: "2" }
+    })
+}
+
+/// The server this device talks to.
+pub fn server() -> Element {
+    stroked(rsx! {
+        rect { x: "3", y: "4", width: "18", height: "7", rx: "2" }
+        rect { x: "3", y: "13", width: "18", height: "7", rx: "2" }
+        path { d: "M7 7.5h.01M7 16.5h.01" }
+    })
+}
+
+/// Crawl: outward from the favourites, artist to similar artist.
+pub fn crawl() -> Element {
+    stroked(rsx! {
+        circle { cx: "12", cy: "12", r: "2.5" }
+        circle { cx: "4.5", cy: "5.5", r: "1.5" }
+        circle { cx: "19.5", cy: "6.5", r: "1.5" }
+        circle { cx: "18", cy: "19", r: "1.5" }
+        circle { cx: "5", cy: "18.5", r: "1.5" }
+        path { d: "M10.2 10.3L5.6 6.6M13.9 10.6l4.4-3.2M13.8 13.9l3.2 4M10.1 13.7l-4 3.8" }
+    })
+}
+
+/// Analyse: listening to the audio.
+pub fn waveform() -> Element {
+    stroked(rsx! {
+        path { d: "M3 12h1M7 8v8M11 4v16M15 7v10M19 10v4M21 12h0" }
+    })
+}
+
+/// Build space: the vectors assembled into one block.
+pub fn cube() -> Element {
+    stroked(rsx! {
+        path { d: "M12 2.5l8.5 4.75v9.5L12 21.5l-8.5-4.75v-9.5z" }
+        path { d: "M3.5 7.25L12 12l8.5-4.75M12 12v9.5" }
+    })
+}

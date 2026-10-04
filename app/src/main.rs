@@ -20,9 +20,11 @@ fn main() {
 
     // Release builds of dioxus-desktop cancel every `contextmenu` from the
     // document. On Android that is also the long press that brings up a text
-    // field's Paste, so a token could only be typed out by hand. Rows lose
-    // nothing: their menus come from their own handlers and long-press.js,
-    // which still see the event.
+    // field's Paste, so a token could only be typed out by hand, and on a
+    // desktop the right click that offers Copy. Rows lose nothing: their
+    // menus come from their own handlers and long-press.js, which still see
+    // the event, and long-press.js cancels the platform's menu wherever
+    // there is no text for it to act on.
     #[cfg(feature = "mobile")]
     dioxus::LaunchBuilder::mobile()
         .with_cfg(dioxus::mobile::Config::new().with_disable_context_menu(false))
@@ -38,7 +40,7 @@ fn main() {
     #[cfg(not(feature = "mobile"))]
     {
         let (width, height) = window_size();
-        let mut config = dioxus::desktop::Config::new().with_window(
+        let mut config = dioxus::desktop::Config::new().with_disable_context_menu(false).with_window(
             dioxus::desktop::WindowBuilder::new()
                 .with_title("Stelly")
                 .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),

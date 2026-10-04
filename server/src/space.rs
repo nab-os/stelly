@@ -236,7 +236,20 @@ impl SpaceService {
         let constraints = Constraints::default();
 
         Some(match (&request.recipe, embedding) {
-            (Recipe::Neighbours { seed }, _) => navigator.neighbours(*seed, count, false),
+            // Led by the seed itself, as radio and path are: the list then
+            // plays as "this, and what sounds like it" rather than starting
+            // somewhere other than the track that was asked about.
+            (Recipe::Neighbours { seed }, _) => match navigator.index_of.get(seed) {
+                Some(&i) => {
+                    let mut steps = vec![Step {
+                        track: navigator.catalog.get(i).clone(),
+                        similarity: None,
+                    }];
+                    steps.extend(navigator.neighbours(*seed, count.saturating_sub(1), false));
+                    steps
+                }
+                None => Vec::new(),
+            },
             (Recipe::Radio { seed }, _) => navigator.radio_nearest(*seed, count, request.penalty, &constraints),
             (Recipe::Path { a, b, even: true }, _) => navigator.interpolate(*a, *b, count, &constraints),
             (Recipe::Path { a, b, even: false }, _) => navigator.graph_path(*a, *b, 16),
