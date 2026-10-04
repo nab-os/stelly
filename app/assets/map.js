@@ -48,6 +48,28 @@
     scale: 0, dpr: 0, dim: false, valid: false,
   };
 
+  // Groups standing in for dense patches of points, rebuilt with the cloud;
+  // see the cloud layer. `hidden[i]` is set for every point inside one, so
+  // hover and click reach the group rather than a point that is not drawn.
+  let clusters = [];
+  let hidden = new Uint8Array(0);
+  // Scratch for bucketing the visible points by bin, sized to the corpus.
+  let visible = new Int32Array(0);
+  let visibleBin = new Int32Array(0);
+  let binOrder = new Int32Array(0);
+  let tally = new Int32Array(0);
+  // A fixed pseudo-random rank per point, from its track id, deciding which
+  // stars a crowded patch keeps. Fixed so the sky does not twinkle between
+  // rebuilds, and so zooming in only ever adds stars to those already shown.
+  let rank = new Float32Array(0);
+
+  function rankOf(id) {
+    let h = Math.imul((id % 4294967296) | 0, 0x9e3779b1) ^ ((id / 4294967296) | 0);
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+
   async function loadPoints() {
     meta = await (await fetch("/points/meta")).json();
     const buffer = await (await fetch("/points/data")).arrayBuffer();
@@ -58,6 +80,14 @@
     genre = new Uint16Array(buffer, 16 * n, n);
     byId = new Map();
     for (let i = 0; i < n; i++) byId.set(ids[i], i);
+    clusters = [];
+    hidden = new Uint8Array(n);
+    visible = new Int32Array(n);
+    visibleBin = new Int32Array(n);
+    binOrder = new Int32Array(n);
+    tally = new Int32Array(Math.max(1, meta.genres.length));
+    rank = new Float32Array(n);
+    for (let i = 0; i < n; i++) rank[i] = rankOf(ids[i]);
     buildGrid();
     cloud.valid = false;
   }
@@ -125,6 +155,10 @@
   // are all zero, and fitting those zooms in by a factor of ~1e8.
   let fitted = false;
   let hover = -1;
+  let hoverCluster = -1;
+  // Where the mouse last was over the canvas, so hover can be re-resolved
+  // when the groups under it are rebuilt. Null on touch, which has no hover.
+  let pointer = null;
   let selected = -1;
   let route = [];
 
@@ -172,6 +206,126 @@
   const toScreen = (i) => [screenX(i), screenY(i)];
 
   const pointRadius = (scale) => Math.max(1.5, Math.min(4, scale * 0.08));
+
+  // Grouping, kept a night sky. The screen is cut into BIN-pixel bins, and a
+  // bin crowded enough that its stars would cover COVERAGE of it is thinned
+  // to about that many stars, with a soft glow in its main genre's colour
+  // standing in for the rest, a nebula rather than a smear. Zooming in
+  // shrinks the bins in layout space and grows the stars, so the thinning
+  // eases off and the hidden stars come back on their own.
+  const BIN = 56;
+  const COVERAGE = 0.25;
+
+  /// How many points make a bin a group at this scale. Measured in covered
+  /// area rather than a flat count: twenty dots of 1.5px are a speck, twenty
+  /// of 4px are already a crowd. Never fewer than a handful, a group of two
+  /// hides more than it tidies.
+  const clusterMin = (scale) => {
+    const r = pointRadius(scale);
+    return Math.max(8, Math.round((BIN * BIN * COVERAGE) / (Math.PI * r * r)));
+  };
+
+  /// How far a group's glow reaches, in CSS pixels. Wider than a bin, so
+  /// neighbouring glows run together into one cloud instead of a grid of
+  /// spots, and wider still the more crowded it is.
+  const glowRadius = (crowding) => Math.min(BIN * 1.3, BIN * 0.75 * (1 + 0.2 * Math.log2(crowding)));
+
+  /// How bright a group's glow is at its centre. Faint on purpose: the stars
+  /// are the picture, the glow only says that there are more of them here.
+  const glowAlpha = (crowding) => Math.min(0.18, 0.05 + 0.04 * Math.log2(crowding));
+
+  const formatCount = (count) =>
+    count >= 10000 ? `${Math.round(count / 1000)}k`
+      : count >= 1000 ? `${(count / 1000).toFixed(1)}k`
+        : `${count}`;
+
+  /// Paint the groups' glows over the rasterised stars, into the cloud
+  /// buffer. Added rather than blended, so they light the sky up the way a
+  /// nebula would and never cover a star. A few hundred gradients, once per
+  /// rebuild rather than per frame, which the canvas API manages fine; it is
+  /// the tens of thousands of stars it cannot.
+  function drawClusters(c, S, offX, offY, dpr, dim) {
+    if (clusters.length === 0) return;
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "lighter";
+    for (const cluster of clusters) {
+      const x = cluster.x * S + offX;
+      const y = cluster.y * S + offY;
+      const r = cluster.glow * dpr;
+      const [cr, cg, cb] = RGB[cluster.genre % PALETTE.length];
+      const a = dim ? cluster.alpha * 0.25 : cluster.alpha;
+      const gradient = c.createRadialGradient(x, y, 0, x, y, r);
+      gradient.addColorStop(0, `rgba(${cr},${cg},${cb},${a})`);
+      gradient.addColorStop(0.45, `rgba(${cr},${cg},${cb},${a * 0.4})`);
+      gradient.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+      c.fillStyle = gradient;
+      c.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    c.restore();
+  }
+
+  /// The group under a screen position, if any. The buffer may be blitted at
+  /// another scale mid-gesture, so the drawn radius is scaled to match.
+  function clusterAt(px, py, slop = 3) {
+    if (clusters.length === 0 || !cloud.scale) return -1;
+    const k = view.scale / cloud.scale;
+    let best = -1;
+    let bestDistance = Infinity;
+    for (let c = 0; c < clusters.length; c++) {
+      const cluster = clusters[c];
+      const dx = cluster.x * view.scale + view.offsetX - px;
+      const dy = cluster.y * view.scale + view.offsetY - py;
+      const reach = cluster.glow * 0.45 * k + slop;
+      const d = dx * dx + dy * dy;
+      if (d <= reach * reach && d < bestDistance) {
+        bestDistance = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  /// Fly to a group, framing the points it holds. At least doubling the zoom,
+  /// so a click always makes progress even on a tight knot, and at most 4x,
+  /// so a click opens the group up rather than losing everything around it.
+  let flight = 0;
+  function zoomTo(cluster) {
+    if (width <= 0 || height <= 0) return;
+    const pad = 60;
+    const spanX = Math.max(cluster.maxX - cluster.minX, 1e-6);
+    const spanY = Math.max(cluster.maxY - cluster.minY, 1e-6);
+    const fitScale = Math.min((width - pad * 2) / spanX, (height - pad * 2) / spanY);
+    const from = {
+      scale: view.scale,
+      x: (width / 2 - view.offsetX) / view.scale,
+      y: (height / 2 - view.offsetY) / view.scale,
+    };
+    const to = {
+      scale: Math.min(Math.max(fitScale, view.scale * 2), view.scale * 4),
+      x: (cluster.minX + cluster.maxX) / 2,
+      y: (cluster.minY + cluster.maxY) / 2,
+    };
+
+    // Scale eases in log space, so the zoom feels even from start to end.
+    const began = performance.now();
+    const duration = 280;
+    const id = ++flight;
+    const step = (now) => {
+      if (id !== flight) return;
+      const t = Math.min(1, (now - began) / duration);
+      const e = 1 - Math.pow(1 - t, 3);
+      const scale = Math.exp(Math.log(from.scale) + (Math.log(to.scale) - Math.log(from.scale)) * e);
+      const cx = from.x + (to.x - from.x) * e;
+      const cy = from.y + (to.y - from.y) * e;
+      view.scale = scale;
+      view.offsetX = width / 2 - cx * scale;
+      view.offsetY = height / 2 - cy * scale;
+      draw();
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
 
   // A pan or a wheel tick can fire several times between two frames. Painting
   // each one is wasted work that arrives on screen as lag, so collapse them.
@@ -283,6 +437,10 @@
     const offX = view.offsetX * dpr + mx;
     const offY = view.offsetY * dpr + my;
 
+    clusters = [];
+    hoverCluster = -1;
+    hidden.fill(0);
+
     if (grid && n > 0) {
       const { side: gside, start, order } = grid;
       const k = stampFor(pointRadius(view.scale) * dpr, dim ? 0.18 : 0.8);
@@ -300,6 +458,20 @@
       const cy0 = row(Math.min(ly0, ly1));
       const cy1 = row(Math.max(ly0, ly1));
 
+      // Bins are BIN screen pixels wide but numbered from the layout origin,
+      // floor(x * S / B), so a pan at the same scale lands every point in the
+      // same bin and the groups hold still under the finger.
+      const B = BIN * dpr;
+      const bx0 = Math.floor(Math.min(lx0, lx1) * S / B);
+      const by0 = Math.floor(Math.min(ly0, ly1) * S / B);
+      const nbx = Math.floor(Math.max(lx0, lx1) * S / B) - bx0 + 1;
+      const nby = Math.floor(Math.max(ly0, ly1) * S / B) - by0 + 1;
+      const bins = nbx * nby;
+      const least = clusterMin(view.scale);
+      const binStart = new Int32Array(bins + 1);
+
+      // Pass one: which points show at all, and how many land in each bin.
+      let m = 0;
       for (let cy = cy0; cy <= cy1; cy++) {
         const base = cy * gside;
         // Cells in a row are contiguous in `order`, so one slice covers the
@@ -308,33 +480,123 @@
         const to = start[base + cx1 + 1];
         for (let q = from; q < to; q++) {
           const i = order[q];
-          const x0 = Math.round(xy[i * 2] * S + offX) - off;
-          const y0 = Math.round(xy[i * 2 + 1] * S + offY) - off;
-          if (x0 + side <= 0 || y0 + side <= 0 || x0 >= cw || y0 >= ch) continue;
+          const px = xy[i * 2] * S + offX;
+          const py = xy[i * 2 + 1] * S + offY;
+          if (px < -pad || py < -pad || px > cw + pad || py > ch + pad) continue;
+          let bx = Math.floor(xy[i * 2] * S / B) - bx0;
+          let by = Math.floor(xy[i * 2 + 1] * S / B) - by0;
+          if (bx < 0) bx = 0; else if (bx >= nbx) bx = nbx - 1;
+          if (by < 0) by = 0; else if (by >= nby) by = nby - 1;
+          const b = by * nbx + bx;
+          visible[m] = i;
+          visibleBin[m] = b;
+          m++;
+          binStart[b + 1]++;
+        }
+      }
+      for (let b = 0; b < bins; b++) binStart[b + 1] += binStart[b];
+      const cursor = binStart.slice(0, bins);
+      for (let q = 0; q < m; q++) binOrder[cursor[visibleBin[q]]++] = visible[q];
 
-          const c = RGB[genre[i] % PALETTE.length];
-          const cr = c[0], cg = c[1], cb = c[2];
-          const yA = y0 < 0 ? -y0 : 0;
-          const yB = y0 + side > ch ? ch - y0 : side;
-          for (let yy = yA; yy < yB; yy++) {
-            let a0 = rowFrom[yy], a1 = rowTo[yy];
-            if (x0 + a0 < 0) a0 = -x0;
-            if (x0 + a1 > cw) a1 = cw - x0;
-            if (a0 >= a1) continue;
-            const crow = yy * side;
-            let o = ((y0 + yy) * cw + x0 + a0) * 4;
-            for (let xx = a0; xx < a1; xx++, o += 4) {
-              const a = cov[crow + xx];
-              d[o] += ((cr - d[o]) * a) >> 8;
-              d[o + 1] += ((cg - d[o + 1]) * a) >> 8;
-              d[o + 2] += ((cb - d[o + 2]) * a) >> 8;
-            }
+      const stampPoint = (i) => {
+        const x0 = Math.round(xy[i * 2] * S + offX) - off;
+        const y0 = Math.round(xy[i * 2 + 1] * S + offY) - off;
+        if (x0 + side <= 0 || y0 + side <= 0 || x0 >= cw || y0 >= ch) return;
+
+        const c = RGB[genre[i] % PALETTE.length];
+        const cr = c[0], cg = c[1], cb = c[2];
+        const yA = y0 < 0 ? -y0 : 0;
+        const yB = y0 + side > ch ? ch - y0 : side;
+        for (let yy = yA; yy < yB; yy++) {
+          let a0 = rowFrom[yy], a1 = rowTo[yy];
+          if (x0 + a0 < 0) a0 = -x0;
+          if (x0 + a1 > cw) a1 = cw - x0;
+          if (a0 >= a1) continue;
+          const crow = yy * side;
+          let o = ((y0 + yy) * cw + x0 + a0) * 4;
+          for (let xx = a0; xx < a1; xx++, o += 4) {
+            const a = cov[crow + xx];
+            d[o] += ((cr - d[o]) * a) >> 8;
+            d[o + 1] += ((cg - d[o + 1]) * a) >> 8;
+            d[o + 2] += ((cb - d[o + 2]) * a) >> 8;
           }
         }
+      };
+
+      // How crowded each bin is, blurred over its neighbours. Thinning on the
+      // raw count makes every bin edge a visible step in star density; on the
+      // blurred one the sky thins out smoothly towards a crowded core.
+      const crowd = new Float32Array(bins);
+      for (let by = 0; by < nby; by++) {
+        for (let bx = 0; bx < nbx; bx++) {
+          let sum = 0, weight = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            const y = by + dy;
+            if (y < 0 || y >= nby) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const x = bx + dx;
+              if (x < 0 || x >= nbx) continue;
+              const w = (dx === 0 ? 2 : 1) * (dy === 0 ? 2 : 1);
+              const b = y * nbx + x;
+              sum += (binStart[b + 1] - binStart[b]) * w;
+              weight += w;
+            }
+          }
+          crowd[by * nbx + bx] = sum / weight;
+        }
+      }
+
+      // Pass two: a sparse bin draws its stars as they are; a crowded one is
+      // thinned to about `least` of them and becomes a group, whose glow
+      // stands in for the rest.
+      for (let b = 0; b < bins; b++) {
+        const from = binStart[b];
+        const to = binStart[b + 1];
+        const count = to - from;
+        if (count === 0) continue;
+        const crowding = crowd[b] / least;
+        if (crowding < 1 || count < least) {
+          for (let q = from; q < to; q++) stampPoint(binOrder[q]);
+          continue;
+        }
+
+        const keep = 1 / crowding;
+        let sx = 0, sy = 0;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        let lead = 0;
+        for (let q = from; q < to; q++) {
+          const i = binOrder[q];
+          const x = xy[i * 2];
+          const y = xy[i * 2 + 1];
+          sx += x;
+          sy += y;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          const g = genre[i];
+          if (++tally[g] > tally[lead]) lead = g;
+          if (rank[i] < keep) stampPoint(i);
+          else hidden[i] = 1;
+        }
+        const share = tally[lead] / count;
+        for (let q = from; q < to; q++) tally[genre[binOrder[q]]] = 0;
+
+        clusters.push({
+          x: sx / count,
+          y: sy / count,
+          count,
+          genre: lead,
+          share,
+          glow: glowRadius(crowding),
+          alpha: glowAlpha(crowding),
+          minX, maxX, minY, maxY,
+        });
       }
     }
 
     cloud.ctx.putImageData(cloud.img, 0, 0);
+    drawClusters(cloud.ctx, S, offX, offY, dpr, dim);
     cloud.offX = offX;
     cloud.offY = offY;
     cloud.scale = view.scale;
@@ -342,6 +604,14 @@
     cloud.dim = dim;
     cloud.valid = true;
     builtAt = performance.now();
+
+    // The groups were just rebuilt, so whatever the mouse was over may now be
+    // a different group, or the points that group came apart into.
+    if (pointer) {
+      const at = pick(pointer.x, pointer.y);
+      hover = at.point;
+      hoverCluster = at.group;
+    }
   }
 
   /// Whether the buffer still reaches every corner of the viewport. When it
@@ -471,6 +741,8 @@
       });
     }
 
+    if (hoverCluster >= 0 && hoverCluster < clusters.length) clusterMarker(clusters[hoverCluster]);
+
     // Markers last, selection under hover, so the selected track reads as one
     // marker rather than two.
     if (selected >= 0) marker(selected, "#ffffff", true);
@@ -538,6 +810,24 @@
     // The selected point has its card instead.
     const text = (meta.labels && meta.labels[index]) || "";
     if (text && !persistent) label(text, x, y, colour);
+  }
+
+  /// A group under the cursor: a ring, and what it holds.
+  function clusterMarker(cluster) {
+    const x = cluster.x * view.scale + view.offsetX;
+    const y = cluster.y * view.scale + view.offsetY;
+    const r = cluster.glow * 0.45 * (view.scale / cloud.scale);
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, TAU);
+    ctx.strokeStyle = "#ffffff";
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    const name = (meta.genres && meta.genres[cluster.genre]) || "unknown genre";
+    const what = cluster.share >= 0.95 ? name : `mostly ${name}`;
+    label(`${formatCount(cluster.count)} tracks · ${what}`, x, y, "#ffffff");
   }
 
   function roundRect(x, y, w, h, r) {
@@ -610,6 +900,8 @@
       const to = start[base + cx1 + 1];
       for (let k = from; k < to; k++) {
         const i = order[k];
+        // Inside a group: the group answers for it, see `clusterAt`.
+        if (hidden[i]) continue;
         const dx = screenX(i) - px;
         const dy = screenY(i) - py;
         const d = dx * dx + dy * dy;
@@ -622,6 +914,17 @@
     return best;
   }
 
+  /// What a pointer at a screen position is on. A star right under it wins,
+  /// since crowded patches still show some; then the group whose glow it is
+  /// in; then the nearest star within the usual reach.
+  function pick(px, py, reach = 14, slop = 3) {
+    const close = nearest(px, py, Math.min(6, reach));
+    if (close >= 0) return { point: close, group: -1 };
+    const group = clusterAt(px, py, slop);
+    if (group >= 0) return { point: -1, group };
+    return { point: nearest(px, py, reach), group: -1 };
+  }
+
   let dragging = false;
   let dragMoved = false;
   let last = { x: 0, y: 0 };
@@ -629,6 +932,7 @@
   canvas.addEventListener("mousedown", (e) => {
     // The left button only: the side ones are back and forward, see back.js.
     if (e.button !== 0) return;
+    flight++;
     dragging = true;
     dragMoved = false;
     last = { x: e.offsetX, y: e.offsetY };
@@ -643,12 +947,22 @@
       schedule();
       return;
     }
-    const found = nearest(e.offsetX, e.offsetY);
-    if (found !== hover) {
+    pointer = { x: e.offsetX, y: e.offsetY };
+    const { point: found, group } = pick(e.offsetX, e.offsetY);
+    if (found !== hover || group !== hoverCluster) {
       hover = found;
-      canvas.style.cursor = found >= 0 ? "pointer" : "grab";
+      hoverCluster = group;
+      canvas.style.cursor = found >= 0 || group >= 0 ? "pointer" : "grab";
       schedule();
     }
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    pointer = null;
+    if (hover < 0 && hoverCluster < 0) return;
+    hover = -1;
+    hoverCluster = -1;
+    schedule();
   });
 
   window.addEventListener("mouseup", () => {
@@ -657,7 +971,11 @@
 
   canvas.addEventListener("click", (e) => {
     if (dragMoved) return;
-    const found = nearest(e.offsetX, e.offsetY);
+    const { point: found, group } = pick(e.offsetX, e.offsetY);
+    if (group >= 0) {
+      zoomTo(clusters[group]);
+      return;
+    }
     if (found >= 0) {
       selected = found;
       schedule();
@@ -687,6 +1005,7 @@
 
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
+    flight++;
     const factor = Math.exp(-e.deltaY * 0.001);
     view.offsetX = e.offsetX - (e.offsetX - view.offsetX) * factor;
     view.offsetY = e.offsetY - (e.offsetY - view.offsetY) * factor;
@@ -749,6 +1068,7 @@
     // A gesture starts with the first finger. Later fingers must not restart
     // it, or a pinch gets counted as a tap.
     if (touchCount === 0) {
+      flight++;
       dragMoved = false;
       touchStart = centre(e.touches);
       pressFired = false;
@@ -833,7 +1153,11 @@
     }
     if (dragMoved || !touchStart) return;
 
-    const found = nearest(touchStart.x, touchStart.y, 22);
+    const { point: found, group } = pick(touchStart.x, touchStart.y, 22, 8);
+    if (group >= 0) {
+      zoomTo(clusters[group]);
+      return;
+    }
     if (found >= 0) {
       selected = found;
       // No cursor means no hover; showing the label for what was just tapped
