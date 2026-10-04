@@ -54,6 +54,7 @@ impl Engine {
             clap: self.navigator.catalog.clap.take(),
             clap_dims: self.navigator.catalog.clap_dims,
             blocked_artists: std::mem::take(&mut self.navigator.catalog.blocked_artists),
+            twins: std::mem::take(&mut self.navigator.catalog.twins),
         };
         self.navigator = Navigator::new(&self.space, &weights, catalog);
         self.weights = weights;

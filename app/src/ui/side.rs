@@ -10,12 +10,12 @@
 //! green A and red B, a track's page, a row's menu) and shown here until both
 //! are known and the path is walked.
 
-use super::generate::{as_remote, describe, Generator, Mode, MOODS};
+use super::generate::{as_remote, describe, failure, Generator, Mode, MOODS};
 use super::icons;
 use super::library::Library;
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, Player};
-use super::{artist_link, open_track, space_row, Cover, MapView, Selection, Space, Weights};
+use super::{artist_link, open_track, space_row_or_glimpse, Cover, MapView, Selection, Space, Weights};
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
 use dioxus::prelude::*;
@@ -30,7 +30,7 @@ async fn export(track_ids: Vec<i64>) -> anyhow::Result<i64> {
 /// holds it.
 fn label_for(id: Option<i64>) -> String {
     let Some(id) = id else { return "-".into() };
-    space_row(id)
+    space_row_or_glimpse(id)
         .map(|track| format!("{} - {}", track.artist, track.title))
         .unwrap_or_else(|| id.to_string())
 }
@@ -48,10 +48,11 @@ pub fn GeneratePanel() -> Element {
     let mode = *generator.mode.read();
     let result = generator.result.read().clone();
     let empty = result.is_empty();
-    let seed = selected().and_then(space_row).map(|meta| as_remote(&meta));
+    let seed = selected().and_then(space_row_or_glimpse).map(|meta| as_remote(&meta));
     let has_selection = seed.is_some();
     let from = *generator.from.read();
     let to = *generator.to.read();
+    let offline = use_context::<Space>().offline.read().is_some();
 
     // On a phone the panel covers the main area, so anything here that
     // navigates the main area has to get out of the way first.
@@ -217,6 +218,13 @@ pub fn GeneratePanel() -> Element {
                 }
             }
 
+            // Generating is the server's, so say so here, by the button it
+            // stops, not only at the top of the main area. The button stays
+            // live: the server may be back before the next retry notices.
+            if offline {
+                p { class: "panel-offline", "The server is unreachable, generating needs it." }
+            }
+
             div { class: "actions",
                 button {
                     class: "primary",
@@ -263,11 +271,16 @@ pub fn GeneratePanel() -> Element {
                             .map(|step| step.track.track_id)
                             .collect();
                         let mut status = generator.status;
+                        let mut failed = generator.failed;
                         status.set(Some("exporting…".into()));
+                        failed.set(false);
                         spawn(async move {
                             match export(ids).await {
                                 Ok(id) => status.set(Some(format!("exported as playlist {id}"))),
-                                Err(err) => status.set(Some(format!("{err:#}"))),
+                                Err(err) => {
+                                    status.set(Some(failure(&err)));
+                                    failed.set(true);
+                                }
                             }
                         });
                     },
@@ -281,7 +294,11 @@ pub fn GeneratePanel() -> Element {
             }
 
             if let Some(message) = generator.status.read().clone() {
-                p { class: "muted ellipsis", "{message}" }
+                if *generator.failed.read() {
+                    p { class: "error", title: "{message}", "{message}" }
+                } else {
+                    p { class: "muted ellipsis", "{message}" }
+                }
             }
 
             if let Some(recipe) = generator.produced_by.read().clone() {

@@ -6,9 +6,9 @@
 //! the point. **Stop** is the only way one ends early.
 
 use super::crawler::Crawler;
-use super::POLL;
+use super::{icons, Me, Space, POLL};
 use dioxus::prelude::*;
-use crate::api::{Corpus, PipelineStatus, Progress, Stage};
+use crate::api::{Corpus, PipelineStatus, Progress, Scope, Stage};
 use crate::backend::backend;
 
 /// How many status polls pass between corpus recounts. Six SQL aggregates
@@ -120,18 +120,35 @@ impl Default for Pipeline {
 /// Keep the status, the log and the counts fresh. Mounted once. One future
 /// rather than three, so the log cursor and the status cannot disagree about
 /// whether a stage is running.
-pub fn use_pipeline_watch(pipeline: Pipeline) {
+///
+/// Also the app's pulse: the space is only asked for when it moves, so this
+/// is what notices a server going away mid-session, and coming back, for the
+/// notice over the main area. Only a server that does not answer counts; one
+/// refusing a play device the pipeline is still there.
+pub fn use_pipeline_watch(pipeline: Pipeline, space: Space) {
     use_future(move || async move {
         let mut pipeline = pipeline;
+        let mut offline = space.offline;
         let mut ticks: u32 = 0;
 
         loop {
-            if let Ok(status) = backend().pipeline_status().await {
-                let generation = status.generation;
-                pipeline.status.set(status);
-                if generation != *pipeline.generation.peek() {
-                    pipeline.generation.set(generation);
+            match backend().pipeline_status().await {
+                Ok(status) => {
+                    if offline.peek().is_some() {
+                        offline.set(None);
+                    }
+                    let generation = status.generation;
+                    pipeline.status.set(status);
+                    if generation != *pipeline.generation.peek() {
+                        pipeline.generation.set(generation);
+                    }
                 }
+                Err(err) if crate::backend::is_unreachable(&err) => {
+                    if offline.peek().is_none() {
+                        offline.set(Some(format!("{err:#}")));
+                    }
+                }
+                Err(_) => {}
             }
 
             // A mirror, not an accumulation, the backend's buffer is
@@ -155,11 +172,61 @@ pub fn use_pipeline_watch(pipeline: Pipeline) {
 
 // ------------------------------------------------------------------- view
 
-/// The corpus counts and the stages that grow it, as one settings row.
+/// Where one step stands, from the same counts the step itself would ask.
+#[derive(Clone, Copy, PartialEq)]
+enum StepState {
+    Running,
+    Queued,
+    /// Has work it could do now.
+    Needed,
+    /// Nothing left for it, as far as the counts can tell.
+    Done,
+    /// The crawl: never done, only ever stopped.
+    Idle,
+}
+
+impl StepState {
+    fn class(self) -> &'static str {
+        match self {
+            StepState::Running => "running",
+            StepState::Queued => "queued",
+            StepState::Needed => "needed",
+            StepState::Done => "done",
+            StepState::Idle => "idle",
+        }
+    }
+}
+
+fn stage_icon(stage: Stage) -> Element {
+    match stage {
+        Stage::Crawl => icons::crawl(),
+        Stage::Analyse => icons::waveform(),
+        Stage::BuildSpace => icons::cube(),
+        Stage::Layout => icons::constellation(),
+    }
+}
+
+fn capitalised(label: &str) -> String {
+    let mut chars = label.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// The four stages as the steps they are, each with the count it moves and
+/// whether it has anything to do, so what to run next reads off the page.
 #[component]
 pub fn PipelineControls() -> Element {
     let pipeline = use_context::<Pipeline>();
     let crawler = use_context::<Crawler>();
+    let me = use_context::<Me>().0;
+    // A server older than users answers no `me`, and let any device run it.
+    let admin = me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin);
+
+    // The counts are the last the server sent, zeros if it never answered:
+    // nothing to judge a step done or due by.
+    let offline = use_context::<Space>().offline.read().is_some();
 
     let running = pipeline.running();
     let crawling = crawler.running();
@@ -169,107 +236,176 @@ pub fn PipelineControls() -> Element {
     let adding = pipeline.status.read().adding.len();
     let progress = pipeline.status.read().progress.clone();
 
-    // Each hint names the stage that would fix it, and is derived from the
-    // same question that stage asks.
-    let needs_build = corpus.buildable != corpus.in_space;
-    let needs_layout = corpus.in_space > corpus.on_map;
+    // Each derived from the same question the stage asks.
+    let needs = |stage: Stage| match stage {
+        Stage::Crawl => false,
+        Stage::Analyse => corpus.to_analyse > 0,
+        Stage::BuildSpace => corpus.buildable != corpus.in_space,
+        Stage::Layout => corpus.in_space > corpus.on_map,
+    };
+    let state = |stage: Stage| {
+        if running == Some(stage) || (stage == Stage::Crawl && crawling) {
+            StepState::Running
+        } else if queued.contains(&stage) {
+            StepState::Queued
+        } else if stage == Stage::Crawl || offline {
+            StepState::Idle
+        } else if needs(stage) {
+            StepState::Needed
+        } else {
+            StepState::Done
+        }
+    };
+    let up_to_date = !busy && !offline && Stage::ALL.iter().all(|stage| !needs(*stage));
+
+    let figure = |stage: Stage| -> (String, Option<String>) {
+        match stage {
+            Stage::Crawl => (
+                format!("{} tracks found", corpus.tracks),
+                (corpus.pending > 0).then(|| format!("{} still to visit", corpus.pending)),
+            ),
+            Stage::Analyse => (
+                format!("{} analysed", corpus.analysed),
+                match (corpus.to_analyse, corpus.failed) {
+                    (0, 0) => None,
+                    (0, failed) => Some(format!("{failed} failed")),
+                    (left, 0) => Some(format!("{left} to go")),
+                    (left, failed) => Some(format!("{left} to go, {failed} failed")),
+                },
+            ),
+            Stage::BuildSpace => (
+                format!("{} in the space", corpus.in_space),
+                needs(stage).then(|| format!("{} ready", corpus.buildable)),
+            ),
+            Stage::Layout => (
+                format!("{} on the map", corpus.on_map),
+                needs(stage).then(|| format!("{} without a place", corpus.in_space - corpus.on_map)),
+            ),
+        }
+    };
+
+    let headline = match running {
+        Some(stage) => format!("{} running", capitalised(stage.label())),
+        None if crawling => "Crawling".into(),
+        None if offline => "Server unreachable".into(),
+        None if up_to_date => "Up to date".into(),
+        None => "Work waiting".into(),
+    };
+    let headline_class = if offline {
+        "pipeline-state down"
+    } else if busy {
+        "pipeline-state running"
+    } else if up_to_date {
+        "pipeline-state done"
+    } else {
+        "pipeline-state needed"
+    };
 
     rsx! {
         section { class: "panel setting pipeline",
             h2 {
                 "Pipeline"
+                span { class: "{headline_class}", "{headline}" }
                 span { class: "spacer" }
-                if busy {
-                    button {
-                        class: "danger",
-                        onclick: move |_| pipeline.stop(crawler),
-                        "Stop"
-                    }
-                }
-                button {
-                    class: "primary",
-                    disabled: busy,
-                    onclick: move |_| pipeline.start_full_run(),
-                    "Analyse → space → layout"
-                }
-            }
-            div { class: "counts",
-                div { span { class: "count", "{corpus.tracks}" } span { class: "muted", "tracks" } }
-                div { span { class: "count", "{corpus.analysed}" } span { class: "muted", "analysed" } }
-                div { span { class: "count", "{corpus.to_analyse}" } span { class: "muted", "to analyse" } }
-                div { span { class: "count", "{corpus.on_map}" } span { class: "muted", "on the map" } }
-                div { span { class: "count", "{corpus.pending}" } span { class: "muted", "queued to crawl" } }
-                div { span { class: "count", "{corpus.failed}" } span { class: "muted", "failed" } }
-            }
-            if needs_build {
-                p { class: "muted notice",
-                    "The space holds {corpus.in_space} tracks but {corpus.buildable} are ready, run build space."
-                }
-            }
-            if needs_layout {
-                p { class: "muted notice",
-                    {format!("{} tracks in the space have no coordinates, run layout.",
-                             corpus.in_space - corpus.on_map)}
-                }
-            }
-            if adding > 0 {
-                p { class: "muted notice",
-                    "{adding} asked for by name, going into the space ahead of the backlog."
-                }
-            }
-            if !needs_build && !needs_layout && corpus.to_analyse == 0 {
-                p { class: "muted", "Up to date. Crawl for more, or analyse after a crawl." }
-            }
-
-            if let Some(message) = pipeline.error.read().clone() {
-                p { class: "muted error", "{message}" }
-            }
-
-            ul { class: "stages",
-                for stage in Stage::ALL {
-                    li {
-                        key: "{stage.label()}",
-                        class: if running == Some(stage) || (stage == Stage::Crawl && crawling) {
-                            "stage active"
-                        } else {
-                            "stage"
-                        },
-                        div { class: "stage-name", "{stage.label()}" }
-                        div { class: "stage-blurb muted", "{stage.blurb()}" }
-                        if running == Some(stage) {
-                            if let Some(progress) = progress.clone() {
-                                {progress_row(&progress)}
-                            }
+                if admin {
+                    if busy {
+                        button {
+                            class: "danger",
+                            onclick: move |_| pipeline.stop(crawler),
+                            {icons::stop()}
+                            "Stop"
                         }
-                        div { class: "stage-run",
-                            if queued.contains(&stage) {
-                                span { class: "muted", "queued" }
-                            } else if stage == Stage::Crawl && crawling {
-                                button {
-                                    class: "danger",
-                                    onclick: move |_| crawler.request_stop(),
-                                    "stop"
-                                }
-                            } else {
-                                button {
-                                    disabled: busy,
-                                    onclick: move |_| pipeline.start(stage, crawler),
-                                    "run"
-                                }
-                            }
+                    } else {
+                        button {
+                            class: "primary",
+                            title: "analyse what is new, then build the space and lay out the map",
+                            disabled: up_to_date || offline,
+                            onclick: move |_| pipeline.start_full_run(),
+                            "Update the space"
                         }
                     }
-                }
-            }
-
-            if crawling {
-                p { class: "muted ellipsis",
-                    "crawling: "
-                    {crawler.last().unwrap_or_default()}
                 }
             }
             p { class: "muted",
-                "Stages run on the server, and keep going if you close the app. Stop is the only way to end one early."
+                if admin {
+                    "Stages run on the server and keep going if you close the app. Update the space runs analyse, build space and layout in turn."
+                } else {
+                    "Stages run on the server. Only an admin device can start or stop them."
+                }
+            }
+
+            if let Some(message) = pipeline.error.read().clone() {
+                p { class: "setup-error", "{message}" }
+            }
+
+            ol { class: "steps",
+                for stage in Stage::ALL {
+                    {
+                        let now = state(stage);
+                        let (main, aside) = figure(stage);
+                        rsx! {
+                            li { key: "{stage.label()}", class: "step {now.class()}",
+                                span { class: "step-icon",
+                                    if now == StepState::Done { {icons::check()} } else { {stage_icon(stage)} }
+                                }
+                                div { class: "step-body",
+                                    div { class: "step-head",
+                                        span { class: "step-name", {capitalised(stage.label())} }
+                                        match now {
+                                            StepState::Running => rsx! { span { class: "step-badge running", "running" } },
+                                            StepState::Queued => rsx! { span { class: "step-badge", "queued" } },
+                                            StepState::Needed => rsx! { span { class: "step-badge needed", "to run" } },
+                                            _ => rsx! {},
+                                        }
+                                    }
+                                    span { class: "step-figure",
+                                        "{main}"
+                                        if let Some(aside) = aside {
+                                            span { class: "muted", " · {aside}" }
+                                        }
+                                    }
+                                    span { class: "muted step-blurb", "{stage.blurb()}" }
+                                    if running == Some(stage) {
+                                        if let Some(progress) = progress.clone() {
+                                            {progress_row(&progress)}
+                                        }
+                                    }
+                                    if stage == Stage::Crawl && crawling {
+                                        if let Some(last) = crawler.last() {
+                                            span { class: "muted ellipsis step-last", "{last}" }
+                                        }
+                                    }
+                                }
+                                if admin {
+                                    div { class: "step-run",
+                                        if stage == Stage::Crawl && crawling {
+                                            button {
+                                                class: "chip danger",
+                                                onclick: move |_| crawler.request_stop(),
+                                                "stop"
+                                            }
+                                        } else if now != StepState::Queued && now != StepState::Running {
+                                            button {
+                                                class: if now == StepState::Needed { "chip active" } else { "chip" },
+                                                title: "run {stage.label()} on its own",
+                                                disabled: busy || offline,
+                                                onclick: move |_| pipeline.start(stage, crawler),
+                                                {icons::play()}
+                                                "run"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if adding > 0 {
+                p { class: "pipeline-note",
+                    "{adding} asked for by name, going into the space ahead of the backlog."
+                }
             }
         }
     }
@@ -313,27 +449,69 @@ fn span_of(seconds: f64) -> String {
     }
 }
 
-/// What the pipeline has been printing, as the last settings row.
+/// What the pipeline has been printing, as the last settings row. Follows
+/// the newest line unless scrolled up to read an older one.
 #[component]
 pub fn PipelineLog() -> Element {
     let pipeline = use_context::<Pipeline>();
+    let me = use_context::<Me>().0;
+    let admin = me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin);
     let log = pipeline.log.read().clone();
+    let count = log.len();
+
+    use_effect(|| {
+        document::eval(
+            "const log = document.getElementById('pipeline-log');
+             if (log && !log.dataset.follow) {
+               log.dataset.follow = '1';
+               let stuck = true;
+               log.addEventListener('scroll', () => {
+                 stuck = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+               });
+               new MutationObserver(() => { if (stuck) log.scrollTop = log.scrollHeight; })
+                 .observe(log, { childList: true, subtree: true });
+               log.scrollTop = log.scrollHeight;
+             }",
+        );
+    });
 
     rsx! {
         section { class: "panel setting log-panel",
             h2 {
                 "Pipeline output"
+                if count > 0 {
+                    span { class: "muted", "{count} lines" }
+                }
                 span { class: "spacer" }
-                button { class: "chip", onclick: move |_| pipeline.clear_log(), "clear" }
+                if admin {
+                    button {
+                        class: "chip",
+                        disabled: count == 0,
+                        onclick: move |_| pipeline.clear_log(),
+                        "clear"
+                    }
+                }
             }
-            pre { class: "log",
+            pre { id: "pipeline-log", class: "log",
                 if log.is_empty() {
-                    span { class: "muted", "Nothing run yet. Output from the pipeline appears here." }
+                    span { class: "muted", "Nothing run yet. What the stages print appears here." }
                 }
                 for (index, line) in log.into_iter().enumerate() {
-                    div { key: "{index}", "{line}" }
+                    div { key: "{index}", class: line_class(&line), "{line}" }
                 }
             }
         }
+    }
+}
+
+/// Failures and warnings stand out of a few thousand lines of progress.
+fn line_class(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("failed") || lower.contains("panic") {
+        "log-line error"
+    } else if lower.contains("warn") {
+        "log-line warn"
+    } else {
+        "log-line"
     }
 }
