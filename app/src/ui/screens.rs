@@ -23,7 +23,7 @@ use dioxus::prelude::*;
 /// Add to or remove from this user's likes, which the server keeps and Qobuz
 /// never hears of. `kind` is "track", "album" or "artist". The heart flipping
 /// is the confirmation; only a failure is worth a line of text.
-fn toggle_like(
+pub(super) fn toggle_like(
     kind: &'static str,
     id: String,
     currently_liked: bool,
