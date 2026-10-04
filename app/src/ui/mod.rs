@@ -112,6 +112,11 @@ struct Known {
     /// Asked for already, found or not, so a track the space does not hold
     /// is not asked for again on every render.
     asked: HashSet<i64>,
+    /// What a Qobuz track said about a space track, for when the space's own
+    /// row has not arrived: the server unreachable, say, while a favourite
+    /// is opened from the cache. Enough to name it in the generate panel and
+    /// on a path's ends; never stands in for the row once that arrives.
+    glimpsed: HashMap<i64, TrackMeta>,
 }
 
 fn with_known<T>(work: impl FnOnce(&mut Known) -> T) -> T {
@@ -132,8 +137,40 @@ pub(crate) fn forget_known() {
     *KNOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Note what a Qobuz track says about itself, for a space track whose row
+/// may not be fetchable. See `Known::glimpsed`.
+pub(crate) fn glimpse(track: &RemoteTrack) {
+    with_known(|known| {
+        known.glimpsed.entry(track.id).or_insert_with(|| TrackMeta {
+            track_id: track.id,
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            genre: String::new(),
+            artist_id: track.artist_id.unwrap_or(-1),
+            album_id: track.album_id.clone().unwrap_or_default(),
+            bpm: None,
+            seed_distance: 0,
+            isrc: track.isrc.clone(),
+            x: None,
+            y: None,
+        });
+    });
+}
+
 fn known(track_id: i64) -> Option<TrackMeta> {
     with_known(|known| known.rows.get(&track_id).cloned())
+}
+
+/// The row if it arrived, or else what was glimpsed of the track.
+fn known_or_glimpsed(track_id: i64) -> Option<TrackMeta> {
+    with_known(|known| {
+        known
+            .rows
+            .get(&track_id)
+            .or_else(|| known.glimpsed.get(&track_id))
+            .cloned()
+    })
 }
 
 /// A space row, from what has been seen or else from the server. `None` when
@@ -142,9 +179,13 @@ pub(crate) async fn space_meta(track_id: i64) -> Option<TrackMeta> {
     if let Some(found) = known(track_id) {
         return Some(found);
     }
-    let found = backend().space_tracks(vec![track_id]).await.ok()?;
-    remember(&found);
-    found.into_iter().next()
+    match backend().space_tracks(vec![track_id]).await {
+        Ok(found) => {
+            remember(&found);
+            found.into_iter().next()
+        }
+        Err(_) => known_or_glimpsed(track_id),
+    }
 }
 
 /// A space row for a component to show. One not seen yet is asked for, and
@@ -173,10 +214,16 @@ pub(crate) fn space_row(track_id: i64) -> Option<TrackMeta> {
     None
 }
 
+/// `space_row`, or failing it what was glimpsed of the track: enough to name
+/// and show it, never to read its space facts from.
+pub(crate) fn space_row_or_glimpse(track_id: i64) -> Option<TrackMeta> {
+    space_row(track_id).or_else(|| with_known(|known| known.glimpsed.get(&track_id).cloned()))
+}
+
 /// A space track, as something to display or play, if it has been seen. The
 /// synchronous half of `space_meta`, for an event handler that cannot wait.
 pub(crate) fn space_track(track_id: i64) -> Option<RemoteTrack> {
-    known(track_id).as_ref().map(generate::as_remote)
+    known_or_glimpsed(track_id).as_ref().map(generate::as_remote)
 }
 
 /// Select a space track for the map and the generator, and open its details
@@ -202,6 +249,7 @@ pub fn open_track(library: Library, mut selection: Signal<Option<i64>>, track_id
 /// follow along.
 pub(crate) fn open_remote_track(library: Library, mut selection: Signal<Option<i64>>, local: &LocalIds, track: RemoteTrack) {
     if local.0.peek().contains(&track.id) {
+        glimpse(&track);
         selection.set(Some(track.id));
     }
     library.go(View::Track(track));

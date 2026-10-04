@@ -54,19 +54,79 @@ pub fn App() -> Element {
         }
     });
     use_context_provider(|| phase);
+    let epoch = use_signal(|| 0u64);
+    use_context_provider(|| Pairing { phase, epoch });
 
     rsx! {
         style { {include_str!("../assets/style.css")} }
         match phase() {
-            Phase::Ready => rsx! { Shell {} },
+            // A list of one, keyed by the pairing: a key on a lone component
+            // is not diffed, a key in a list is, so moving to another server
+            // drops every screen, signal and task the old one fed and starts
+            // the shell afresh.
+            Phase::Ready => rsx! {
+                for epoch in [epoch()] {
+                    Shell { key: "{epoch}" }
+                }
+            },
             Phase::Setup(error) => rsx! { Setup { phase, error } },
         }
     }
 }
 
-/// The server not answering, bottom left of the main area, opposite the
-/// buttons. The app carries on from what it has cached; this says why
-/// nothing new is arriving.
+/// Moving this device to another server, or off any, without a restart.
+#[derive(Clone, Copy)]
+pub(crate) struct Pairing {
+    phase: Signal<Phase>,
+    epoch: Signal<u64>,
+}
+
+impl Pairing {
+    /// Save the pairing and start talking to it. The caller has already
+    /// checked the server answers: this cannot fail short of the disk.
+    pub(crate) fn switch(mut self, config: crate::ServerConfig) -> anyhow::Result<()> {
+        config.save()?;
+        wire(Wiring::remote(config.base, config.token));
+        forget_server_state();
+        *self.epoch.write() += 1;
+        Ok(())
+    }
+
+    /// Forget the pairing and go back to the setup screen.
+    pub(crate) fn forget(mut self) -> anyhow::Result<()> {
+        crate::ServerConfig::clear()?;
+        forget_server_state();
+        self.phase.set(Phase::Setup(None));
+        Ok(())
+    }
+}
+
+/// What the process keeps outside any component about the server it talks
+/// to. The disk caches are per pairing already and need nothing.
+fn forget_server_state() {
+    crate::ui::forget_known();
+    *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// `nas:7700` is how an address is typed more often than not.
+pub(crate) fn normalise_address(typed: &str) -> String {
+    let base = typed.trim().trim_end_matches('/');
+    if base.is_empty() || base.contains("://") {
+        base.to_string()
+    } else {
+        format!("http://{base}")
+    }
+}
+
+/// Whether the environment names the server, which then wins over whatever
+/// is saved at the next start.
+pub(crate) fn pinned_by_env() -> bool {
+    std::env::var("STELLY_SERVER").is_ok()
+}
+
+/// The server not answering, top centre of the main area. The app carries on
+/// from what it has cached; this says why nothing new is arriving, loudly,
+/// since generating, searching and playing all stop with it.
 #[component]
 fn OfflineNotice() -> Element {
     let offline = use_context::<Space>().offline;
@@ -74,7 +134,11 @@ fn OfflineNotice() -> Element {
         return rsx! {};
     };
     rsx! {
-        div { class: "sync-notice muted", title: "{reason}", "server unreachable, retrying…" }
+        div { class: "sync-notice", title: "{reason}", role: "alert",
+            span { class: "sync-notice-dot" }
+            "Server unreachable"
+            span { class: "muted", "retrying…" }
+        }
     }
 }
 
@@ -92,17 +156,13 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
         if *busy.peek() {
             return;
         }
-        let mut base = address.peek().trim().trim_end_matches('/').to_string();
+        let base = normalise_address(&address.peek());
         let secret = token.peek().trim().to_string();
         if base.is_empty() || secret.is_empty() {
             failure.set(Some("Both the address and the token are needed.".into()));
             return;
         }
-        // Typed as `nas:7700` more often than not.
-        if !base.contains("://") {
-            base = format!("http://{base}");
-            address.set(base.clone());
-        }
+        address.set(base.clone());
 
         busy.set(true);
         failure.set(None);
@@ -320,7 +380,7 @@ fn Shell() -> Element {
     // The crawl and pipeline publish status rather than writing these signals,
     // a server cannot reach into a Dioxus scope.
     crate::ui::crawler::use_crawl_status(crawler);
-    crate::ui::pipeline::use_pipeline_watch(pipeline);
+    crate::ui::pipeline::use_pipeline_watch(pipeline, space);
 
     // One menu for every row in the window. Rows open it; it performs the
     // action itself, so no row has to carry a popup or a set of callbacks.

@@ -18,6 +18,10 @@ pub struct Catalog {
     /// blocking is enforced on every read, which is what lets it take effect
     /// without a rebuild.
     pub blocked_artists: HashSet<i64>,
+    /// For each row that is not the only one of its recording, the rows that
+    /// are the same song on other releases. See `recording`. Worked out once
+    /// per load, since it depends on the catalogue alone.
+    pub twins: HashMap<usize, Vec<usize>>,
 }
 
 fn open(db_path: &Path) -> Result<SqliteConnection> {
@@ -137,7 +141,7 @@ impl Catalog {
             .map(|row| (row.id, TrackMeta::from(row)))
             .collect();
 
-        let tracks = track_ids
+        let tracks: Vec<TrackMeta> = track_ids
             .iter()
             .map(|id| {
                 by_id.remove(id).unwrap_or(TrackMeta {
@@ -151,12 +155,35 @@ impl Catalog {
         let (clap, clap_dims) = load_clap(conn, track_ids)?;
         let blocked_artists = load_blocked(conn)?;
 
+        let twins = Self::twins_of(&tracks);
+
         Ok(Self {
             tracks,
             clap,
             clap_dims,
             blocked_artists,
+            twins,
         })
+    }
+
+    /// The `twins` map for a set of rows.
+    pub fn twins_of(tracks: &[TrackMeta]) -> HashMap<usize, Vec<usize>> {
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (row, group) in crate::recording::recordings(tracks).into_iter().enumerate() {
+            groups.entry(group).or_default().push(row);
+        }
+        let mut twins = HashMap::new();
+        for rows in groups.into_values().filter(|rows| rows.len() > 1) {
+            for &row in &rows {
+                twins.insert(row, rows.iter().copied().filter(|&other| other != row).collect());
+            }
+        }
+        twins
+    }
+
+    /// The other rows of row `i`'s recording, none for most.
+    pub fn twins(&self, i: usize) -> &[usize] {
+        self.twins.get(&i).map_or(&[], Vec::as_slice)
     }
 
     /// Whether row `i` belongs to a blocked artist.

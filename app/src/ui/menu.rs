@@ -14,7 +14,7 @@
 use super::generate::{Generator, Mode, PathEnd};
 use super::library::{add_to_space, Library};
 use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
-use super::{open_remote_track, space_row, space_track, Blocklist, LocalIds, MapView, Selection};
+use super::{glimpse, open_remote_track, space_track, Blocklist, LocalIds, MapView, Selection};
 use crate::api::Target;
 use crate::backend::backend;
 use crate::qobuz::RemoteTrack;
@@ -206,6 +206,10 @@ fn ShelfTrackItems(index: usize) -> Element {
     let mut menu = menu;
     let mut selection = selection;
     let in_space = local.0.read().contains(&track.id);
+    if in_space {
+        // The generation verbs below name it by id alone.
+        glimpse(&track);
+    }
     let artist = track.artist_id.map(|id| (id, track.artist.clone()));
 
     rsx! {
@@ -619,7 +623,7 @@ fn SpaceTrackItems(track_id: i64) -> Element {
     let map = use_context::<MapView>();
 
     // A point on the map is only an id until its row arrives.
-    let Some(track) = space_row(track_id).map(|meta| super::generate::as_remote(&meta)) else {
+    let Some(track) = super::space_row_or_glimpse(track_id).map(|meta| super::generate::as_remote(&meta)) else {
         return rsx! {};
     };
 

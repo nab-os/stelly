@@ -4,7 +4,7 @@
 pub mod remote;
 
 pub use crate::logbuffer::LogBuffer;
-pub use remote::{is_unauthorised, Remote, SessionFeed};
+pub use remote::{is_bad_address, is_unauthorised, is_unreachable, Remote, SessionFeed};
 use std::sync::RwLock;
 
 /// The one backend there is. Named for what callers use it as.

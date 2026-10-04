@@ -235,25 +235,59 @@ button.danger:hover:not(:disabled),
   gap: 12px;
 }
 
-/* The server not answering. Opposite the fabs, and never in the way:
-   clicks go through it. */
+/* The server not answering. Top centre of the main area, in the danger
+   colour, since everything that needs the server quietly stops working
+   until it is back. Never in the way: clicks go through it. */
 .sync-notice {
   position: absolute;
-  left: 18px;
-  bottom: 18px;
+  top: max(14px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 12;
-  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 28px);
+  padding: 8px 16px;
   border-radius: 999px;
-  background: var(--bg);
-  font-size: 12px;
+  border: 1px solid var(--danger);
+  background: #3a1d26;
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
   pointer-events: none;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
   /* Faded in late, so a rebuild with nothing new to fetch does not flash. */
   animation: sync-notice-in 0.2s 0.3s both;
+}
+.sync-notice .muted { color: #f2b8c3; font-weight: 400; }
+.sync-notice-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: sync-notice-pulse 1.4s ease-in-out infinite;
 }
 @keyframes sync-notice-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+@keyframes sync-notice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* The same news in the generate panel, which is what it stops. */
+.panel-offline {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border-left: 3px solid var(--danger);
+  background: #3a1d26;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .fab {
@@ -1160,30 +1194,162 @@ span.path-end {
   -webkit-user-select: all;
 }
 
-.counts { display: flex; flex-wrap: wrap; gap: 18px; }
-.counts > div { display: flex; flex-direction: column; }
-.count { font-size: 20px; font-variant-numeric: tabular-nums; }
-
-.stages { list-style: none; margin: 0; padding: 0; }
-.stage {
-  display: grid;
-  grid-template-columns: 110px 1fr auto;
+/* The server row: what this device talks to, as one card. */
+.server-card {
+  display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
-  border-radius: 6px;
-  border-left: 2px solid transparent;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
 }
-.stage + .stage { margin-top: 2px; }
-.stage.active { background: var(--row); border-left-color: var(--accent); }
-.stage-name { font-weight: 600; }
-.stage-blurb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stage-progress { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.server-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--row);
+  color: var(--accent);
+}
+.server-icon .icon { width: 20px; height: 20px; }
+.server-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+.server-address {
+  font: 600 13px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.server-state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.server-state.ok { color: var(--path-a); background: rgba(158, 206, 106, 0.12); }
+.server-state.down { color: var(--danger); background: rgba(247, 118, 142, 0.12); }
+.server-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.server-state.down .server-dot { animation: sync-notice-pulse 1.4s ease-in-out infinite; }
+
+.server-form, .server-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+.server-form .pair-actions, .server-confirm .pair-actions { align-items: center; }
+.server-form .pair-hint { flex: 1; }
+.server-confirm { border-left: 3px solid var(--danger); }
+
+/* The pipeline as steps down a line, each with its own count and state. */
+.pipeline h2 { flex-wrap: wrap; }
+.pipeline h2 button .icon { width: 14px; height: 14px; }
+.pipeline-state {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--row);
+  color: var(--muted);
+}
+.pipeline-state.running { color: var(--accent); background: rgba(122, 162, 247, 0.14); }
+.pipeline-state.done { color: var(--path-a); background: rgba(158, 206, 106, 0.12); }
+.pipeline-state.down { color: var(--danger); background: rgba(247, 118, 142, 0.12); }
+.pipeline-state.needed { color: #e0af68; background: rgba(224, 175, 104, 0.14); }
+
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.step {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 10px 10px 8px;
+  border-radius: 8px;
+}
+/* The line joining one step's icon to the next. */
+.step + .step::before {
+  content: "";
+  position: absolute;
+  left: 25px;
+  top: -10px;
+  height: 20px;
+  border-left: 2px solid var(--row);
+}
+.step.running { background: var(--bg); }
+.step-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--row);
+  color: var(--muted);
+  position: relative;
+  z-index: 1;
+}
+.step-icon .icon { width: 18px; height: 18px; }
+.step.done .step-icon { color: var(--path-a); background: rgba(158, 206, 106, 0.14); }
+.step.needed .step-icon { color: #e0af68; background: rgba(224, 175, 104, 0.14); }
+.step.running .step-icon {
+  color: #12131a;
+  background: var(--accent);
+  animation: step-glow 1.6s ease-in-out infinite;
+}
+@keyframes step-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(122, 162, 247, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(122, 162, 247, 0); }
+}
+
+.step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.step-head { display: flex; align-items: center; gap: 8px; }
+.step-name { font-weight: 600; font-size: 14px; }
+.step-badge {
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--row);
+}
+.step-badge.running { color: var(--accent); background: rgba(122, 162, 247, 0.14); }
+.step-badge.needed { color: #e0af68; background: rgba(224, 175, 104, 0.14); }
+.step-figure { font-variant-numeric: tabular-nums; }
+.step-blurb { line-height: 1.4; }
+.step-last { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; }
+.step-run { flex: none; align-self: center; }
+.step-run .chip .icon { width: 12px; height: 12px; }
+
+.stage-progress { display: flex; align-items: center; gap: 10px; margin-top: 4px; font-size: 12px; }
 .stage-progress .muted { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pipeline-note {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  font-size: 12px;
+}
+
 .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; }
 .bar > div { height: 100%; background: var(--accent); transition: width 0.2s linear; }
 
+.log-panel h2 .muted { font-weight: 400; }
+.log-line.error { color: var(--danger); }
+.log-line.warn { color: #e0af68; }
 .log {
+  user-select: text;
+  -webkit-user-select: text;
   min-height: 160px;
   max-height: 420px;
   overflow-y: auto;

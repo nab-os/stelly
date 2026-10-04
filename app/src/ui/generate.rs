@@ -15,7 +15,7 @@ use super::icons;
 pub use crate::api::Recipe;
 use crate::api::{GenerateRequest, Step, TrackMeta};
 use crate::qobuz::RemoteTrack;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -105,6 +105,8 @@ pub struct Generator {
     /// Path shape: evenly paced interpolation rather than the shortest route.
     pub even: Signal<bool>,
     pub status: Signal<Option<String>>,
+    /// Whether `status` reports a failure, to be shown as one.
+    pub failed: Signal<bool>,
     /// Whether the server can steer by a phrase: it has the text tower, and
     /// the corpus the audio embeddings to match it against.
     pub tower: Signal<bool>,
@@ -134,6 +136,7 @@ impl Generator {
             to: Signal::new(None),
             even: Signal::new(false),
             status: Signal::new(None),
+            failed: Signal::new(false),
             tower: Signal::new(false),
             weights: Signal::new(HashMap::new()),
             panel_open: Signal::new(false),
@@ -160,6 +163,7 @@ impl Generator {
     pub fn run(self, selected: Option<i64>) {
         let mut generator = self;
         generator.status.set(None);
+        generator.failed.set(false);
         generator.busy.set(true);
         // Asked for from a row or a path button, the result has to be
         // somewhere to look at, which on a phone means sliding the panel in.
@@ -207,7 +211,8 @@ impl Generator {
                     match backend().generate(&request).await {
                         Ok(steps) => Some(steps),
                         Err(err) => {
-                            generator.status.set(Some(format!("{err:#}")));
+                            generator.status.set(Some(failure(&err)));
+                            generator.failed.set(true);
                             None
                         }
                     }
@@ -329,6 +334,17 @@ impl Generator {
         self.produced_by.set(None);
         self.stale.set(false);
         self.status.set(None);
+        self.failed.set(false);
+    }
+}
+
+/// A failed request in words: a server that did not answer is said plainly,
+/// anything else is the server's own message.
+pub(crate) fn failure(err: &anyhow::Error) -> String {
+    if crate::backend::is_unreachable(err) {
+        "Couldn't reach the server. Try again once it's back.".into()
+    } else {
+        format!("{err:#}")
     }
 }
 
@@ -366,35 +382,12 @@ pub(crate) fn describe(recipe: &Recipe, label: impl Fn(Option<i64>) -> String) -
 
 /// Keep the first occurrence of each recording, dropping the rest.
 ///
-/// The space has no ISRC-awareness in its distances: a single, an album cut
-/// and a deluxe reissue of the same song are three rows with three track
-/// ids, close enough in the space to plausibly both land in one
-/// neighbours/radio/path/drift result, which reads as "the same track
-/// twice", even though structurally it is not (`radio_nearest`, `interpolate`
-/// and `graph_path` already refuse to revisit the same *row*; this catches
-/// what they cannot see).
-///
-/// A post-processing step here rather than inside `paths.rs`: that module
-/// mirrors `pipeline/two_khz/paths.py`, the parity oracle the Rust port is
-/// checked against, and this filter has no Python equivalent to stay in step
-/// with, adding it to the shared algorithm would make the two disagree
-/// wherever the corpus has a duplicate ISRC.
+/// The server's walks already skip other releases of a song they have used
+/// (see `stelly_core::recording`), which keeps their counts full. This is the
+/// same rule again for a server older than that, where the duplicate is
+/// dropped and the list comes out a track short instead.
 fn dedup_by_recording(steps: Vec<Step>) -> Vec<Step> {
-    let mut seen: HashSet<String> = HashSet::new();
-    steps
-        .into_iter()
-        .filter(|step| {
-            let key = step
-                .track
-                .isrc
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_ascii_uppercase)
-                .unwrap_or_else(|| format!("id:{}", step.track.track_id));
-            seen.insert(key)
-        })
-        .collect()
+    crate::recording::first_of_each(steps, |step| &step.track)
 }
 
 /// Present a space track to the player, which speaks in Qobuz terms.
@@ -451,7 +444,9 @@ mod tests {
     /// say. The second is what this filter exists to catch.
     #[test]
     fn drops_a_second_row_with_the_same_isrc() {
-        let steps = vec![step(1, Some("GBAAA0000001")), step(2, Some("gbaaa0000001"))];
+        let mut album_cut = step(2, Some("gbaaa0000001"));
+        album_cut.track.title = "track 1".into();
+        let steps = vec![step(1, Some("GBAAA0000001")), album_cut];
         let kept = dedup_by_recording(steps);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].track.track_id, 1);
@@ -463,6 +458,15 @@ mod tests {
     fn untagged_tracks_are_never_treated_as_duplicates() {
         let steps = vec![step(1, None), step(2, None)];
         assert_eq!(dedup_by_recording(steps).len(), 2);
+    }
+
+    /// A remaster with an ISRC of its own is still the same song.
+    #[test]
+    fn drops_a_remaster_under_another_isrc() {
+        let mut remaster = step(2, Some("GBAAA0000099"));
+        remaster.track.title = "track 1 - 2011 Remaster".into();
+        let kept = dedup_by_recording(vec![step(1, Some("GBAAA0000001")), remaster]);
+        assert_eq!(kept.len(), 1);
     }
 
     #[test]
