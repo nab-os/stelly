@@ -12,7 +12,7 @@ pub mod backend;
 pub mod cache;
 pub mod update;
 
-pub use stelly_core::{api, logbuffer, qobuz, session};
+pub use stelly_core::{api, logbuffer, qobuz, recording, session};
 
 /// The window, and everything in it. Shared by every platform that has one.
 #[cfg(feature = "gui")]

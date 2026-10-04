@@ -69,6 +69,17 @@ impl Remote {
         format!("{:016x}", hasher.finish())
     }
 
+    /// The server's address, as paired.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// The token this device was paired with, for keeping it across a move
+    /// to another address.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
     }
@@ -112,6 +123,7 @@ impl Remote {
             .http
             .get(self.url(path))
             .bearer_auth(&self.token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("GET {}", self.url(path)))?;
@@ -119,11 +131,21 @@ impl Remote {
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        self.post_within(path, body, REQUEST_TIMEOUT).await
+    }
+
+    async fn post_within<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        timeout: std::time::Duration,
+    ) -> Result<T> {
         let response = self
             .http
             .post(self.url(path))
             .bearer_auth(&self.token)
             .json(body)
+            .timeout(timeout)
             .send()
             .await
             .with_context(|| format!("POST {}", self.url(path)))?;
@@ -495,7 +517,10 @@ impl Remote {
     }
 
     pub async fn generate(&self, request: &GenerateRequest) -> Result<Vec<Step>> {
-        self.post("/api/space/generate", request).await
+        // Shorter than the rest: a button says "working…" for as long as
+        // this takes, and a walk the server can do at all is done in seconds.
+        self.post_within("/api/space/generate", request, std::time::Duration::from_secs(30))
+            .await
     }
 
     /// The queue's upcoming tracks in an order that flows, those the space
@@ -630,6 +655,33 @@ pub(crate) fn http_client() -> reqwest::Client {
 /// copy is still on screen, not after the OS gives up. Never an overall
 /// timeout, the session and the log are streams that stay open.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// How long a plain request may take from start to end, for everything but
+/// the streams. The connect timeout alone does not cover a pooled connection
+/// that died with the server: reusing it skips connecting, and the request
+/// then waits on the OS to give up, minutes, with a button stuck on
+/// "working…" all along. Generous, since a long favourites list is paged
+/// through Qobuz behind one request.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The address could not even be made into a request: a stray character,
+/// a port out of range.
+pub fn is_bad_address(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|err| err.is_builder())
+}
+
+/// The server could not be reached or did not answer in time, as opposed to
+/// answering with an error of its own.
+pub fn is_unreachable(err: &anyhow::Error) -> bool {
+    if is_bad_address(err) {
+        return false;
+    }
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|err| err.is_connect() || err.is_timeout() || err.is_request())
+}
 
 /// reqwest's default verifier is rustls-platform-verifier, which on Android
 /// calls into Java and panics unless it was handed a JNI context at startup,

@@ -151,6 +151,36 @@
     { capture: true }
   );
 
+  // The platform's own menu, Copy, Paste, Select all, only where there is
+  // text to act on: a field, a selection, or selectable text under the
+  // pointer. Everywhere else it offers Back and Reload, which would only
+  // break the app, so it is cancelled. dioxus-desktop used to cancel it
+  // everywhere in release builds, which made text copyable only by keyboard.
+  // Bubble phase on the window, after the rows' own handlers.
+  const nativeMenuWanted = (event) => {
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!target) return false;
+    if (target.closest("input, textarea, [contenteditable=''], [contenteditable='true']")) return true;
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim()) return true;
+    if (target.closest("[data-menu], button, a, canvas")) return false;
+    if (getComputedStyle(target).userSelect === "none") return false;
+    // On the text itself, not the empty end of a line or a block's padding.
+    const caret = document.caretRangeFromPoint?.(event.clientX, event.clientY);
+    const node = caret?.startContainer;
+    if (!node || node.nodeType !== Node.TEXT_NODE || !node.textContent.trim()) return false;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return [...range.getClientRects()].some(
+      (rect) =>
+        event.clientX >= rect.left && event.clientX <= rect.right &&
+        event.clientY >= rect.top && event.clientY <= rect.bottom
+    );
+  };
+  window.addEventListener("contextmenu", (event) => {
+    if (!event.defaultPrevented && !nativeMenuWanted(event)) event.preventDefault();
+  });
+
   document.addEventListener(
     "click",
     (event) => {

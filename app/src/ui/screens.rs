@@ -139,8 +139,13 @@ fn add_or_badge(
 /// Disabled for a track the space does not hold: it has no coordinates to
 /// walk from or to.
 #[component]
-pub(crate) fn PathButtons(track_id: i64, enabled: bool, compact: bool) -> Element {
+pub(crate) fn PathButtons(track: RemoteTrack, enabled: bool, compact: bool) -> Element {
     let generator = use_context::<Generator>();
+    let track_id = track.id;
+    if enabled {
+        // So the panel can name the end even with the server out of reach.
+        super::glimpse(&track);
+    }
     let from = *generator.from.read();
     let to = *generator.to.read();
     let why = if enabled { "" } else { ", only for tracks in your space" };
@@ -218,6 +223,9 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     // Looking at a track the space holds makes it the one in hand, for the
     // generate panel and the map, however the page was reached.
     let seed = track.id;
+    if in_space {
+        super::glimpse(&track);
+    }
     use_effect(move || {
         if in_space {
             selection.set(Some(seed));
@@ -280,7 +288,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                             "analyse this track and put it on the map",
                             status,
                         )}
-                        PathButtons { track_id: track.id, enabled: in_space, compact: false }
+                        PathButtons { track: track.clone(), enabled: in_space, compact: false }
                         if in_space {
                             button {
                                 title: "show where it sits",
@@ -547,7 +555,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                                     {icons::play()}
                                 }
                                 PathButtons {
-                                    track_id: track.id,
+                                    track: track.clone(),
                                     enabled: local_ids.contains(&track.id),
                                     compact: true,
                                 }

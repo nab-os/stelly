@@ -5,6 +5,7 @@
 pub mod api;
 pub mod logbuffer;
 pub mod qobuz;
+pub mod recording;
 pub mod session;
 
 #[cfg(feature = "engine")]
