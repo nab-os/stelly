@@ -120,6 +120,10 @@
   await loadPoints();
 
   let view = { scale: 1, offsetX: 0, offsetY: 0 };
+  // Whether `view` has been fitted to real points yet. Not just to a real
+  // rect: until the server answers, the points are `EMPTY_META`, whose bounds
+  // are all zero, and fitting those zooms in by a factor of ~1e8.
+  let fitted = false;
   let hover = -1;
   let selected = -1;
   let route = [];
@@ -148,8 +152,11 @@
     draw();
   }
 
+  /// Fit the whole cloud to the canvas. False, leaving the view alone, when
+  /// there is nothing to fit yet: no points or no rect.
   function fit() {
     const rect = measure();
+    if (n === 0 || rect.width <= 0 || rect.height <= 0) return false;
     const spanX = Math.max(meta.bounds.max_x - meta.bounds.min_x, 1e-6);
     const spanY = Math.max(meta.bounds.max_y - meta.bounds.min_y, 1e-6);
     const pad = 30;
@@ -157,6 +164,7 @@
     view.offsetX = pad - meta.bounds.min_x * view.scale;
     view.offsetY = pad - meta.bounds.min_y * view.scale;
     cloud.valid = false;
+    return true;
   }
 
   const screenX = (i) => xy[i * 2] * view.scale + view.offsetX;
@@ -892,6 +900,8 @@
     selected = -1;
     hover = -1;
     route = [];
+    // The first real points, if the map was opened before they arrived.
+    if (!fitted) fitted = fit();
     schedule();
     // The indices changed, but the track id did not; re-resolve it rather
     // than leaving the map unmarked after every rebuild.
@@ -904,14 +914,10 @@
   // The canvas can resize without the window doing so: opening the map
   // with `display: none` takes it from 0x0 to full with no resize event. `fit`
   // waits for a real rect for the same reason.
-  let fitted = false;
   function measured() {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
-    if (!fitted) {
-      fit();
-      fitted = true;
-    }
+    if (!fitted) fitted = fit();
     resize();
   }
 
