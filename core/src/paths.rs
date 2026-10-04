@@ -623,6 +623,55 @@ impl Navigator {
             .map(|i| self.step(i, Some(sims[i])))
             .collect()
     }
+
+    /// One track's CLAP vector, if it has one. A track analysed before the
+    /// embeddings were stored has a row of zeros instead.
+    fn clap_row(&self, i: usize) -> Option<&[f32]> {
+        let dims = self.catalog.clap_dims;
+        let row = self.catalog.clap.as_ref()?.get(i * dims..(i + 1) * dims)?;
+        row.iter().any(|v| *v != 0.0).then_some(row)
+    }
+
+    /// Where each phrase's similarity sits across the corpus: (mean, spread).
+    /// Depends on the corpus alone, so it is worked out once per load.
+    ///
+    /// Without it the words that describe a track best are the ones that
+    /// describe every track: "music" matches anything, "piano" matches far
+    /// more than it should. Measured against the corpus, a word only scores
+    /// when this track sounds like it more than the others do.
+    pub fn text_baseline(&self, phrases: &[Vec<f32>]) -> Vec<(f32, f32)> {
+        let rows: Vec<&[f32]> = (0..self.catalog.len()).filter_map(|i| self.clap_row(i)).collect();
+        phrases
+            .iter()
+            .map(|phrase| {
+                if rows.is_empty() || phrase.len() != self.catalog.clap_dims {
+                    return (0.0, 1.0);
+                }
+                let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
+                let mean = sims.iter().sum::<f32>() / sims.len() as f32;
+                let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
+                (mean, variance.sqrt().max(1e-6))
+            })
+            .collect()
+    }
+
+    /// How much more than the average track this one sounds like each
+    /// phrase, in spreads, row-aligned with `phrases`. `None` when the space
+    /// does not hold the track or has no CLAP vector for it.
+    pub fn describe(&self, track_id: i64, phrases: &[Vec<f32>], baseline: &[(f32, f32)]) -> Option<Vec<f32>> {
+        let row = self.clap_row(*self.index_of.get(&track_id)?)?;
+        Some(
+            phrases
+                .iter()
+                .zip(baseline)
+                .map(|(phrase, (mean, spread))| (dot(row, phrase) - mean) / spread)
+                .collect(),
+        )
+    }
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Min-heap entry for Dijkstra. BinaryHeap is a max-heap, so the ordering is
@@ -782,6 +831,32 @@ mod tests {
         let nav = fixture();
         assert_eq!(nav.shortest_path_order(&[14, 11], Some(10)), vec![14, 11]);
         assert!(nav.shortest_path_order(&[], Some(10)).is_empty());
+    }
+
+    /// Every track scores high on the first phrase and only track 11 on the
+    /// second: measured against the corpus, the second describes 11 better.
+    #[test]
+    fn describe_favours_what_sets_a_track_apart() {
+        let mut nav = navigator(&[(10, 0.0), (11, 10.0), (12, 20.0)]);
+        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1]);
+        nav.catalog.clap_dims = 2;
+        let phrases = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let baseline = nav.text_baseline(&phrases);
+        let scores = nav.describe(11, &phrases, &baseline).unwrap();
+        assert!(scores[1] > 1.0, "{scores:?}");
+        assert!(scores[1] > scores[0], "{scores:?}");
+    }
+
+    #[test]
+    fn describe_needs_a_clap_vector() {
+        let mut nav = navigator(&[(10, 0.0), (11, 10.0)]);
+        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0]);
+        nav.catalog.clap_dims = 2;
+        let phrases = vec![vec![1.0, 0.0]];
+        let baseline = nav.text_baseline(&phrases);
+        assert!(nav.describe(11, &phrases, &baseline).is_none());
+        assert!(nav.describe(99, &phrases, &baseline).is_none());
+        assert!(nav.describe(10, &phrases, &baseline).is_some());
     }
 
     #[test]

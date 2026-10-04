@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest, PairingGrant,
     PipelineStatus, Recipe, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
-    Target, TrackMeta, TracksRequest, User,
+    Target, TrackMeta, TracksRequest, User, Word,
 };
 use stelly_core::session::{Command, Session, Update};
 use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -83,6 +83,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/space/search", get(space_search).layer(CompressionLayer::new()))
         .route("/api/space/generate", post(space_generate))
         .route("/api/space/order", post(space_order))
+        .route("/api/space/describe/{id}", get(space_describe))
         // ---------------------------------------------------------- devices
         .route("/api/devices", get(devices).post(pair_device))
         .route("/api/devices/{id}", delete(revoke_device))
@@ -588,6 +589,21 @@ async fn space_tracks(
     Json(body): Json<TracksRequest>,
 ) -> Reply<Vec<TrackMeta>> {
     Ok(Json(on_space(&state, move |space| space.tracks(&body.ids)).await?))
+}
+
+/// How many words a description runs to.
+const DESCRIBED_BY: usize = 12;
+
+/// A track in words: the vocabulary scored against its audio.
+async fn space_describe(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Path(id): Path<i64>,
+) -> Reply<Vec<Word>> {
+    let vocabulary = state.hub.vocabulary().await?;
+    Ok(Json(
+        on_space(&state, move |space| space.describe(id, &vocabulary, DESCRIBED_BY)).await?,
+    ))
 }
 
 #[derive(Deserialize)]
