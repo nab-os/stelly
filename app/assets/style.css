@@ -917,6 +917,8 @@ span.path-end {
 .now-sub, .queue-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
 .now-sub > span, .queue-sub > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .now-sub > span:nth-child(2), .queue-sub > span:nth-child(2) { flex: none; }
+/* Right after the names, so the names give way before it does. */
+.now-like { flex: none; }
 
 .transport { display: flex; align-items: center; gap: 8px; justify-self: center; }
 .transport .icon-btn { width: 36px; height: 36px; color: var(--text); }
