@@ -1,0 +1,70 @@
+name: cache cleanup
+
+# GitHub only evicts caches once the repo is past its 10 GB, and then evicts
+# by age, which is as likely to throw out main's current rust caches as the
+# leftovers that caused it. So the leftovers are deleted here instead:
+#
+#   - a pull request's caches as soon as it closes. They are scoped to its
+#     merge ref, nothing can read them once it is gone.
+#   - after every build on main, and daily as a backstop:
+#       - superseded rust caches. rust-cache ends its key with a hash of
+#         Cargo.lock, so every version bump saves a whole new ~3.8 GB set and
+#         the old one is dead weight. Only the newest per key prefix is kept.
+#       - every cache outside main: tags, `dev`, and PRs still open from
+#         before the build stopped saving there.
+#       - anything else on main nobody has restored for a week, which is the
+#         buildkit blobs each mode=max export leaves behind.
+#
+# Nothing here is precious: the worst a wrong deletion costs is one cold build.
+
+on:
+  # _target rather than plain pull_request: a fork's pull request gets a
+  # read-only token, which cannot delete anything. Safe here because nothing
+  # from the pull request is checked out or run.
+  pull_request_target:
+    types: [closed]
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR_REF: refs/pull/${{ github.event.pull_request.number }}/merge
+    steps:
+      - name: Delete the closed pull request's caches
+        if: github.event_name == 'pull_request_target'
+        run: |
+          set -euo pipefail
+          ids=$(gh cache list --ref "$PR_REF" --limit 1000 --json id --jq '.[].id')
+          for id in $ids; do gh cache delete "$id"; done
+          echo "deleted $(wc -w <<< "$ids") caches from $PR_REF"
+
+      - name: Delete superseded, stray and unused caches
+        if: github.event_name != 'pull_request_target'
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '7 days ago' +%s)
+          ids=$(gh cache list --limit 1000 --json id,key,ref,createdAt,lastAccessedAt --jq "
+            def age: sub(\"\\\\.[0-9]+\"; \"\") | fromdateiso8601;
+            (map(select(.ref == \"refs/heads/main\")) | . as \$main
+              | (map(select(.key | startswith(\"v0-rust-\")))
+                 | group_by(.key | sub(\"-[^-]+\$\"; \"\"))
+                 | map(sort_by(.createdAt) | .[:-1][]))
+              + (\$main | map(select((.key | startswith(\"v0-rust-\") | not)
+                                      and (.lastAccessedAt | age) < $cutoff))))
+            + map(select(.ref != \"refs/heads/main\"))
+            | .[].id")
+          for id in $ids; do gh cache delete "$id"; done
+          echo "deleted $(wc -w <<< "$ids") caches"
+          gh api "repos/$GH_REPO/actions/cache/usage"
