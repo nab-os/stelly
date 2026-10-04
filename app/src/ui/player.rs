@@ -7,6 +7,7 @@
 //! `<audio>` element (see `assets/player.js`) follows the session, and reports
 //! back what it is actually doing.
 
+use super::screens::toggle_like;
 use super::{album_link, artist_link, icons, open_remote_track, Cover, Library, LocalIds, Selection};
 use crate::backend::{backend, SessionFeed};
 use crate::qobuz::{RemoteTrack, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
@@ -570,6 +571,9 @@ pub fn PlayerBar() -> Element {
     let muted = *player.muted.read();
     let mut queue_open = player.queue_open;
 
+    library.ensure_liked_loaded();
+    let liked = current.as_ref().is_some_and(|t| library.liked().tracks.contains(&t.id));
+
     // The audio element's own duration is authoritative once it has loaded;
     // Qobuz's metadata fills the gap before that, and on every device that is
     // not the output.
@@ -646,6 +650,15 @@ pub fn PlayerBar() -> Element {
                                 {album_link(library, &track, "muted")}
                             }
                         }
+                    }
+                    button {
+                        class: if liked { "icon-btn now-like liked" } else { "icon-btn now-like" },
+                        title: if liked { "unlike" } else { "like" },
+                        onclick: {
+                            let id = track.id.to_string();
+                            move |_| toggle_like("track", id.clone(), liked, library, player.status)
+                        },
+                        {icons::heart(liked)}
                     }
                 } else {
                     Cover { class: "now-art" }
