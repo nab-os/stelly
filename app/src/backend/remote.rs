@@ -7,7 +7,7 @@
 use crate::api::{
     ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest,
     PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage,
-    Step, Target, TrackMeta, TracksRequest, User,
+    Step, Target, TrackMeta, TracksRequest, User, Word,
 };
 use crate::session::{Command, Session, Update};
 use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -486,6 +486,12 @@ impl Remote {
             .await
             .with_context(|| format!("GET {path}"))?;
         Ok(Self::check(response).await?.bytes().await?.to_vec())
+    }
+
+    /// A track of the space in words, the ones it sounds like most next to
+    /// the rest of the space, best first.
+    pub async fn describe(&self, track_id: i64) -> Result<Vec<Word>> {
+        self.get(&format!("/api/space/describe/{track_id}")).await
     }
 
     pub async fn generate(&self, request: &GenerateRequest) -> Result<Vec<Step>> {

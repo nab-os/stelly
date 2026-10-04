@@ -11,7 +11,7 @@ use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, Remot
 use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
-use crate::space::SpaceService;
+use crate::space::{SpaceService, Vocabulary};
 use crate::likes;
 use crate::{crawl, db};
 use anyhow::{Context, Result};
@@ -45,6 +45,8 @@ pub struct Hub {
     /// been exported, which is not an error, the UI hides steering.
     text: tokio::sync::Mutex<Option<TextEncoder>>,
     text_tried: AtomicBool,
+    /// The describing words, embedded on first use and kept.
+    vocabulary: tokio::sync::Mutex<Option<Arc<Vocabulary>>>,
     crawl: Arc<CrawlJob>,
     pipeline: Arc<PipelineJob>,
     log: Arc<LogBuffer>,
@@ -124,6 +126,7 @@ impl Hub {
             account: Cache::new(Duration::from_secs(2 * 60), 200),
             text: tokio::sync::Mutex::new(None),
             text_tried: AtomicBool::new(false),
+            vocabulary: tokio::sync::Mutex::new(None),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
             log: Arc::new(LogBuffer::default()),
@@ -316,6 +319,23 @@ impl Hub {
             )
         })?;
         encoder.embed(phrase)
+    }
+
+    /// Every word a track can be described with, embedded. The first call
+    /// embeds them all, a few seconds; after that it is free.
+    pub async fn vocabulary(&self) -> Result<Arc<Vocabulary>> {
+        let mut held = self.vocabulary.lock().await;
+        if let Some(vocabulary) = held.as_ref() {
+            return Ok(vocabulary.clone());
+        }
+        let mut vocabulary = Vocabulary::default();
+        for (word, phrase) in crate::pipeline::labels::vocabulary() {
+            vocabulary.vectors.push(self.embed(&phrase).await?);
+            vocabulary.words.push(word);
+        }
+        let vocabulary = Arc::new(vocabulary);
+        *held = Some(vocabulary.clone());
+        Ok(vocabulary)
     }
 
     pub async fn can_steer(&self) -> Result<bool> {

@@ -203,7 +203,8 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     let blocklist = use_context::<Blocklist>();
     let map = use_context::<MapView>();
     let mut selection = use_context::<Selection>().0;
-    let mut panel_open = use_context::<Generator>().panel_open;
+    let generator = use_context::<Generator>();
+    let mut panel_open = generator.panel_open;
     let status = use_signal(|| None::<String>);
 
     library.ensure_liked_loaded();
@@ -324,6 +325,10 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("Qobuz album", track.album_id.clone())}
             }
 
+            if in_space && generator.can_steer() {
+                Described { key: "{track.id}", track_id: track.id }
+            }
+
             if !credits.is_empty() {
                 h3 { class: "shelf-head", "Credits" }
                 ul { class: "credits",
@@ -348,6 +353,43 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The words a track sounds like, as CLAP hears it: its audio scored against
+/// a vocabulary, next to how the rest of the space scores. Experimental: the
+/// words are only as good as CLAP's sense of them.
+#[component]
+fn Described(track_id: i64) -> Element {
+    let mut words = use_signal(|| None::<Result<Vec<crate::api::Word>, String>>);
+    use_future(move || async move {
+        words.set(Some(backend().describe(track_id).await.map_err(|err| format!("{err:#}"))));
+    });
+
+    rsx! {
+        h3 { class: "shelf-head",
+            "In words"
+            span { class: "chip", title: "zero-shot, from the CLAP model: a guess, not a tag", "experimental" }
+        }
+        match &*words.read() {
+            None => rsx! { p { class: "muted", "listening…" } },
+            Some(Err(err)) => rsx! { p { class: "muted", "{err}" } },
+            Some(Ok(found)) if found.is_empty() => rsx! {
+                p { class: "muted", "nothing to go on: this track has no CLAP embedding" }
+            },
+            Some(Ok(found)) => rsx! {
+                div { class: "moods",
+                    for word in found.iter() {
+                        span {
+                            key: "{word.word}",
+                            class: "chip",
+                            title: "{word.score:+.1} spreads above the average track",
+                            "{word.word}"
+                        }
+                    }
+                }
+            },
         }
     }
 }
