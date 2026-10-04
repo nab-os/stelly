@@ -10,10 +10,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use stelly_core::api::{
     BlockWeight, GenerateRequest, OrderRequest, Recipe, SpaceAlbum, SpaceArtist, SpaceIndex,
-    SpaceInfo, SpaceSearch, SpaceSort, Step, TrackMeta,
+    SpaceInfo, SpaceSearch, SpaceSort, Step, TrackMeta, Word,
 };
 use stelly_core::engine::Engine;
 use stelly_core::map;
@@ -36,6 +36,18 @@ struct Loaded {
     /// What follows from which artists are hidden, rebuilt when that changes.
     /// Its own lock, so a long radio walk does not hold up the map.
     derived: RwLock<Arc<Derived>>,
+    /// Where each describing word sits across this corpus, worked out on the
+    /// first description asked of it. The words never change while the
+    /// server runs, so the corpus is all it depends on.
+    baseline: OnceLock<Vec<(f32, f32)>>,
+}
+
+/// The words a track can be described with, and their CLAP text embeddings,
+/// row-aligned.
+#[derive(Default)]
+pub struct Vocabulary {
+    pub words: Vec<String>,
+    pub vectors: Vec<Vec<f32>>,
 }
 
 /// Searchable text, kept per field: terms are split on whitespace, so no term
@@ -90,6 +102,7 @@ impl SpaceService {
             built_at,
             haystacks,
             derived: RwLock::new(Arc::new(derived)),
+            baseline: OnceLock::new(),
         };
         *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(loaded));
         Ok(())
@@ -233,6 +246,27 @@ impl SpaceService {
             (Recipe::Mood { .. }, Some(embedding)) => navigator.mood(embedding, count, request.penalty, &constraints),
             (Recipe::Drift { .. } | Recipe::Mood { .. }, None) => Vec::new(),
         })
+    }
+
+    /// The words a track sounds like more than the rest of the space does,
+    /// best first. Empty when the space holds no CLAP vector for it.
+    pub fn describe(&self, track_id: i64, vocabulary: &Vocabulary, count: usize) -> Option<Vec<Word>> {
+        let loaded = self.loaded()?;
+        let engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
+        let navigator = &engine.navigator;
+        let baseline = loaded.baseline.get_or_init(|| navigator.text_baseline(&vocabulary.vectors));
+        let Some(scores) = navigator.describe(track_id, &vocabulary.vectors, baseline) else {
+            return Some(Vec::new());
+        };
+        let mut words: Vec<Word> = vocabulary
+            .words
+            .iter()
+            .zip(scores)
+            .map(|(word, score)| Word { word: word.clone(), score })
+            .collect();
+        words.sort_by(|a, b| b.score.total_cmp(&a.score));
+        words.truncate(count);
+        Some(words)
     }
 
     pub fn order(&self, request: &OrderRequest) -> Option<Vec<i64>> {
