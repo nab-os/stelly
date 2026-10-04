@@ -251,6 +251,14 @@ pub struct Step {
     pub similarity: Option<f32>,
 }
 
+/// One word a track is described by, and how strongly: how many spreads
+/// above the average track it sounds like the word.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Word {
+    pub word: String,
+    pub score: f32,
+}
+
 /// What the server's space looks like, small enough to ask for on every start.
 ///
 /// `stamp` changes whenever anything a client caches would: a rebuild, or a
