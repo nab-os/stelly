@@ -18,8 +18,10 @@ pub mod prefs;
 pub mod queue;
 pub mod release;
 pub mod screens;
+mod search_history;
 pub mod settings;
 pub mod side;
+pub mod tour;
 
 pub use crawler::Crawler;
 pub use generate::Generator;

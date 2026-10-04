@@ -1,12 +1,13 @@
 //! Settings: one row per group, top to bottom, the server this device talks
-//! to, the version it runs, how it plays, who uses it and from which devices, who is hidden,
-//! and the pipeline that builds the space, with its output last.
+//! to, the version it runs, how it plays, the tour again, who uses it and from which
+//! devices, who is hidden, and the pipeline that builds the space, with its output last.
 
 use super::family::FamilyRow;
 use super::pipeline::{PipelineControls, PipelineLog};
 use super::player::{quality_label, Player};
 use super::prefs;
 use super::release::ReleaseRow;
+use super::tour::TourRow;
 use super::{icons, Blocklist, Me, Space};
 use crate::app::{normalise_address, pinned_by_env, Pairing};
 use crate::backend::{backend, is_bad_address, is_unauthorised, is_unreachable, Remote};
@@ -21,6 +22,7 @@ pub fn SettingsScreen() -> Element {
             ServerRow {}
             ReleaseRow {}
             PlaybackRow {}
+            TourRow {}
             FamilyRow {}
             HiddenArtists {}
             PipelineControls {}

@@ -1,6 +1,7 @@
 //! What this device remembers between runs, besides the pairing: the stream
 //! quality, grid or list for each kind of page, whether mixed pages split
-//! by kind, and what to say about new releases.
+//! by kind, what to say about new releases, what was searched for, and
+//! whether the tour has been shown.
 //!
 //! Its own file next to `server.json` rather than inside it: forgetting the
 //! pairing should not also forget how the lists were laid out.
@@ -26,6 +27,11 @@ pub struct Prefs {
     /// The release whose notice was closed. Only that one: the next release
     /// is announced again.
     pub dismissed_release: Option<String>,
+    /// Recent searches, newest first. See `search_history`.
+    pub searches: Vec<String>,
+    /// The tour has been through once, finished or skipped. Missing from a
+    /// file written before there was a tour, and so shown once to everyone.
+    pub toured: bool,
 }
 
 impl Prefs {
