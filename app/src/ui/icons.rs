@@ -342,3 +342,40 @@ pub fn cube() -> Element {
         path { d: "M3.5 7.25L12 12l8.5-4.75M12 12v9.5" }
     })
 }
+
+/// The title bar's window buttons, finer than the rest so they read as the
+/// window's rather than the app's.
+pub fn window_minimize() -> Element {
+    window_glyph(rsx! { path { d: "M6 12h12" } })
+}
+
+pub fn window_maximize() -> Element {
+    window_glyph(rsx! { rect { x: "6", y: "6", width: "12", height: "12", rx: "1.5" } })
+}
+
+/// Two windows, one behind the other: back to the size it was.
+pub fn window_restore() -> Element {
+    window_glyph(rsx! {
+        rect { x: "5", y: "9", width: "10", height: "10", rx: "1.5" }
+        path { d: "M9 9V6.5A1.5 1.5 0 0 1 10.5 5h7A1.5 1.5 0 0 1 19 6.5v7a1.5 1.5 0 0 1-1.5 1.5H15" }
+    })
+}
+
+pub fn window_close() -> Element {
+    window_glyph(rsx! { path { d: "M7 7l10 10M17 7L7 17" } })
+}
+
+fn window_glyph(body: Element) -> Element {
+    rsx! {
+        svg {
+            class: "icon",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "1.5",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            {body}
+        }
+    }
+}

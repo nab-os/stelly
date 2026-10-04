@@ -43,6 +43,8 @@ fn main() {
         let mut config = dioxus::desktop::Config::new().with_disable_context_menu(false).with_window(
             dioxus::desktop::WindowBuilder::new()
                 .with_title("Stelly")
+                // The app draws its own, see ui/titlebar.rs.
+                .with_decorations(false)
                 .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),
         );
         if let Ok(icon) =

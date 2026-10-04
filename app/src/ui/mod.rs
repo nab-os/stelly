@@ -21,7 +21,20 @@ pub mod screens;
 mod search_history;
 pub mod settings;
 pub mod side;
+#[cfg(all(feature = "desktop", not(feature = "mobile")))]
+mod titlebar;
 pub mod tour;
+
+#[cfg(all(feature = "desktop", not(feature = "mobile")))]
+pub use titlebar::TitleBar;
+
+/// Only a desktop window is opened without the system's title bar; a phone
+/// or a browser tab has nothing to replace.
+#[cfg(not(all(feature = "desktop", not(feature = "mobile"))))]
+#[component]
+pub fn TitleBar() -> Element {
+    rsx! {}
+}
 
 pub use crawler::Crawler;
 pub use generate::Generator;
