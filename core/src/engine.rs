@@ -63,7 +63,5 @@ impl Engine {
     /// Apply a block list. Blocking only filters, so nothing needs rebuilding.
     pub fn set_blocked(&mut self, blocked: HashSet<i64>) {
         self.navigator.catalog.blocked_artists = blocked;
-        // The kNN graph was built over the old visibility, so drop it.
-        self.navigator.invalidate_graph();
     }
 }
