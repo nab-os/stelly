@@ -263,6 +263,17 @@ async fn session_command(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// An event stream, marked so that a reverse proxy passes each event on as it
+/// is written. nginx otherwise holds a response back until its buffer fills,
+/// and a session update, which the app waits on before it can play, sat there
+/// until whatever came next pushed it through.
+fn unbuffered<S>(events: Sse<S>) -> impl IntoResponse
+where
+    Sse<S>: IntoResponse,
+{
+    ([("x-accel-buffering", "no")], events)
+}
+
 /// Push the session to one device on every change.
 ///
 /// Opening this is also what makes a device show up in the output picker, so
@@ -313,7 +324,7 @@ async fn session_events(
         }
     });
 
-    Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default())
+    unbuffered(Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default()))
 }
 
 #[derive(Deserialize)]
@@ -535,7 +546,7 @@ async fn pipeline_log(State(state): State<AppState>, _: PlayAuth) -> impl IntoRe
         }
     });
 
-    Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default())
+    unbuffered(Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default()))
 }
 
 // -------------------------------------------------------------------- space
