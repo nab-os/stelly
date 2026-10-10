@@ -14,6 +14,7 @@ use crate::qobuz::{RemoteTrack, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_32
 use crate::session::{Clocked, Command, Op, Output, Session, Update};
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -247,14 +248,21 @@ fn show(mut player: Player) {
 fn follow(player: Player) {
     let mut mirror = mirror();
     let current = mirror.session().current().cloned();
+    let output = mirror.is_output();
 
-    let Some(track) = current.filter(|_| mirror.is_output()) else {
-        if mirror.loaded.take().is_some() {
+    let Some(track) = current.clone().filter(|_| output) else {
+        let stopped = mirror.loaded.take().is_some();
+        if stopped {
             mirror.loading = None;
             mirror.sounding = false;
-            drop(mirror);
+        }
+        drop(mirror);
+        if stopped {
             transport("stellyStop");
             announce();
+        }
+        if let Some(track) = current {
+            presign(player, &track);
         }
         return;
     };
@@ -449,8 +457,68 @@ pub fn quality_label(format_id: u32) -> &'static str {
     }
 }
 
+/// Stream URLs signed earlier, by (track, format). Qobuz's last an hour and
+/// are kept for less, so one handed to the audio element still has time to
+/// run.
+#[derive(Default)]
+struct Signed {
+    urls: HashMap<(i64, u32), (String, Instant)>,
+    signing: HashSet<(i64, u32)>,
+}
+
+const SIGNED_FOR: Duration = Duration::from_secs(40 * 60);
+
+static SIGNED: LazyLock<Mutex<Signed>> = LazyLock::new(Default::default);
+
+fn signed() -> MutexGuard<'static, Signed> {
+    SIGNED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl Signed {
+    fn fresh(&mut self, key: (i64, u32)) -> Option<String> {
+        self.urls.retain(|_, (_, at)| at.elapsed() < SIGNED_FOR);
+        self.urls.get(&key).map(|(url, _)| url.clone())
+    }
+
+    fn keep(&mut self, key: (i64, u32), url: String) {
+        self.urls.retain(|_, (_, at)| at.elapsed() < SIGNED_FOR);
+        self.urls.insert(key, (url, Instant::now()));
+    }
+}
+
 async fn stream_url(track_id: i64, format_id: u32) -> anyhow::Result<String> {
-    backend().file_url(track_id, format_id).await
+    let key = (track_id, format_id);
+    if let Some(url) = signed().fresh(key) {
+        return Ok(url);
+    }
+    let url = backend().file_url(track_id, format_id).await?;
+    signed().keep(key, url.clone());
+    Ok(url)
+}
+
+/// Sign the session's current track on a device that is not making the
+/// sound, so that taking it over starts without a round trip to the server
+/// and on to Qobuz. One request per track per device, the account's budget
+/// can spare it.
+fn presign(player: Player, track: &RemoteTrack) {
+    if !track.streamable {
+        return;
+    }
+    let key = (track.id, *player.quality.peek());
+    {
+        let mut signed = signed();
+        if signed.fresh(key).is_some() || !signed.signing.insert(key) {
+            return;
+        }
+    }
+    spawn_forever(async move {
+        let url = backend().file_url(key.0, key.1).await;
+        let mut signed = signed();
+        signed.signing.remove(&key);
+        if let Ok(url) = url {
+            signed.keep(key, url);
+        }
+    });
 }
 
 /// Whether a queued track belongs to a hidden artist. Peeked: this runs in
@@ -887,9 +955,12 @@ pub fn use_transport(player: Player) {
                     let ours = {
                         let mut mirror = mirror();
                         mirror.loading = None;
-                        mirror.is_output() && mirror.loaded.is_some()
+                        mirror.loaded.filter(|_| mirror.is_output())
                     };
-                    if ours {
+                    if let Some((_, track_id)) = ours {
+                        // Whatever is wrong with the URL, the next try signs
+                        // a new one.
+                        signed().urls.retain(|&(id, _), _| id != track_id);
                         player
                             .status
                             .set(Some("playback failed, the stream URL may have expired".into()));
