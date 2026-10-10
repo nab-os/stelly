@@ -26,11 +26,18 @@ impl Default for Constraints {
     }
 }
 
+/// How many points along the line between a path's ends are looked around,
+/// and how many tracks are taken around each: the corridor holds a few
+/// thousand at most, whatever the size of the space. Narrower and the
+/// corridor's graph falls apart more often, so a path that cannot get through
+/// is tried once more in one twice as wide.
+const CORRIDOR_WAYPOINTS: usize = 16;
+const CORRIDOR_WIDTH: usize = 384;
+
 pub struct Navigator {
     pub space: WeightedSpace,
     pub catalog: Catalog,
     pub index_of: HashMap<i64, usize>,
-    knn: Option<(usize, Vec<Vec<(usize, f32)>>)>,
 }
 
 impl Navigator {
@@ -39,7 +46,6 @@ impl Navigator {
             space: space.weighted(weights),
             catalog,
             index_of: space.index_of.clone(),
-            knn: None,
         }
     }
 
@@ -54,12 +60,6 @@ impl Navigator {
                 *s = f32::NEG_INFINITY;
             }
         }
-    }
-
-    /// Drop the cached kNN graph. Needed when visibility changes, since the
-    /// graph's edges were chosen over the old set of reachable tracks.
-    pub fn invalidate_graph(&mut self) {
-        self.knn = None;
     }
 
     /// Mark row `i` as used, and with it every other release of the same
@@ -273,58 +273,69 @@ impl Navigator {
         chosen.into_iter().map(|i| self.step(i, None)).collect()
     }
 
-    /// kNN graph over the whole space, built once and cached.
+    /// The tracks a path from `a` to `b` may pass through: those nearest to
+    /// points along the straight line between them, the two ends, and every
+    /// release of each.
     ///
-    /// Every row against every row, so it dominates the first path after a
-    /// load, weight change or block. Kept interactive by splitting rows across
-    /// cores, reusing one buffer per worker, and partial selection over a sort.
-    fn knn_graph(&mut self, k: usize) -> &Vec<Vec<(usize, f32)>> {
-        if self.knn.as_ref().map(|(cached, _)| *cached) != Some(k) {
-            let n = self.space.n_tracks;
-            let space = &self.space;
-            // Resolved up front: the workers cannot borrow self.catalog while
-            // the graph is being written.
-            let blocked: Vec<bool> = (0..n).map(|i| self.catalog.is_blocked(i)).collect();
-            let any_blocked = blocked.iter().any(|&b| b);
-
-            let mut graph: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
-            let threads = std::thread::available_parallelism()
-                .map_or(1, |v| v.get())
-                .min(n.max(1));
-            let chunk = n.div_ceil(threads.max(1));
-
-            std::thread::scope(|scope| {
-                for (index, slice) in graph.chunks_mut(chunk.max(1)).enumerate() {
-                    let blocked = &blocked;
-                    scope.spawn(move || {
-                        let base = index * chunk;
-                        let mut sims = vec![0.0f32; n];
-                        for (offset, edges) in slice.iter_mut().enumerate() {
-                            let i = base + offset;
-                            space.similarities_into(space.row(i), &mut sims);
-                            sims[i] = f32::NEG_INFINITY;
-                            if any_blocked {
-                                for (j, s) in sims.iter_mut().enumerate() {
-                                    if blocked[j] {
-                                        *s = f32::NEG_INFINITY;
-                                    }
-                                }
-                            }
-                            *edges = crate::space::top_k(&sims, k)
-                                .into_iter()
-                                // An edge to a masked row is unreachable
-                                // anyway; dropping it keeps the graph honest.
-                                .filter(|&j| sims[j].is_finite())
-                                .map(|j| (j, 1.0 - sims[j]))
-                                .collect();
-                        }
-                    });
-                }
-            });
-
-            self.knn = Some((k, graph));
+    /// A path wanders off that line, but not far, and the space is too big to
+    /// look further: a kNN graph over all of it is every row against every
+    /// row, minutes on a server's space of a few hundred thousand tracks, all
+    /// of it holding the engine every other request waits on.
+    fn corridor(&self, a: usize, b: usize, width: usize) -> Vec<usize> {
+        let d = self.space.n_dims;
+        let (start, end) = (self.space.row(a), self.space.row(b));
+        let mut rows: HashSet<usize> = HashSet::from([a, b]);
+        let mut sims = vec![0.0f32; self.space.n_tracks];
+        for step in 0..=CORRIDOR_WAYPOINTS {
+            let t = step as f32 / CORRIDOR_WAYPOINTS as f32;
+            let waypoint: Vec<f32> = (0..d).map(|k| (1.0 - t) * start[k] + t * end[k]).collect();
+            self.space.similarities_into(&waypoint, &mut sims);
+            self.mask_blocked(&mut sims);
+            rows.extend(
+                crate::space::top_k(&sims, width)
+                    .into_iter()
+                    .filter(|&j| sims[j].is_finite()),
+            );
         }
-        &self.knn.as_ref().unwrap().1
+        let twins: Vec<usize> = rows.iter().flat_map(|&i| self.catalog.twins(i).iter().copied()).collect();
+        rows.extend(twins.into_iter().filter(|&j| !self.catalog.is_blocked(j)));
+        let mut rows: Vec<usize> = rows.into_iter().collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// kNN graph over `rows` alone, keyed by space row, edges weighted by
+    /// cosine distance. Rows split across cores, one buffer per worker.
+    fn knn_among(&self, rows: &[usize], k: usize) -> HashMap<usize, Vec<(usize, f32)>> {
+        let m = rows.len();
+        let mut graph: Vec<Vec<(usize, f32)>> = vec![Vec::new(); m];
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |v| v.get())
+            .min(m.max(1));
+        let chunk = m.div_ceil(threads.max(1)).max(1);
+
+        std::thread::scope(|scope| {
+            for (index, slice) in graph.chunks_mut(chunk).enumerate() {
+                scope.spawn(move || {
+                    let mut sims = vec![0.0f32; m];
+                    for (offset, edges) in slice.iter_mut().enumerate() {
+                        let i = index * chunk + offset;
+                        let row = self.space.row(rows[i]);
+                        for (s, &j) in sims.iter_mut().zip(rows) {
+                            *s = dot(row, self.space.row(j));
+                        }
+                        sims[i] = f32::NEG_INFINITY;
+                        *edges = crate::space::top_k(&sims, k)
+                            .into_iter()
+                            .filter(|&j| sims[j].is_finite())
+                            .map(|j| (rows[j], 1.0 - sims[j]))
+                            .collect();
+                    }
+                });
+            }
+        });
+
+        rows.iter().copied().zip(graph).collect()
     }
 
     /// Order tracks so that consecutive ones sit close together in the space:
@@ -426,10 +437,11 @@ impl Navigator {
             .collect()
     }
 
-    /// Dijkstra over the kNN graph. Usually better than `interpolate`: a
-    /// straight line through a high-dimensional space crosses empty regions,
-    /// whereas this stays on the data manifold.
-    pub fn graph_path(&mut self, from_id: i64, to_id: i64, k: usize) -> Vec<Step> {
+    /// Dijkstra over a kNN graph of the corridor between the two ends.
+    /// Usually better than `interpolate`: a straight line through a
+    /// high-dimensional space crosses empty regions, whereas this stays on the
+    /// data manifold.
+    pub fn graph_path(&self, from_id: i64, to_id: i64, k: usize) -> Vec<Step> {
         let (Some(&start), Some(&goal)) = (self.index_of.get(&from_id), self.index_of.get(&to_id))
         else {
             return Vec::new();
@@ -438,11 +450,20 @@ impl Navigator {
             return Vec::new();
         }
 
-        let artist_of: Vec<i64> = (0..self.catalog.len())
-            .map(|i| self.catalog.get(i).artist_id)
-            .collect();
-        let graph = self.knn_graph(k).clone();
+        let walked = [CORRIDOR_WIDTH, 2 * CORRIDOR_WIDTH].into_iter().find_map(|width| {
+            let graph = self.knn_among(&self.corridor(start, goal, width), k);
+            self.walk(start, goal, &graph)
+        });
+        walked
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| self.step(i, None))
+            .collect()
+    }
 
+    /// Dijkstra from `start` to `goal`, the rows on the way, both ends
+    /// included. `None` when the graph does not join them.
+    fn walk(&self, start: usize, goal: usize, graph: &HashMap<usize, Vec<(usize, f32)>>) -> Option<Vec<usize>> {
         let mut best: HashMap<usize, f32> = HashMap::from([(start, 0.0)]);
         let mut previous: HashMap<usize, usize> = HashMap::new();
         // A song's releases are one place on the way: reaching a song closes
@@ -470,14 +491,15 @@ impl Navigator {
             visited.extend(twins.iter().filter(|&&twin| twin != goal));
             let edges = std::iter::once(node)
                 .chain(twins.iter().copied())
-                .flat_map(|from| graph[from].iter().copied());
+                .filter_map(|from| graph.get(&from))
+                .flat_map(|edges| edges.iter().copied());
             for (neighbour, edge) in edges {
                 let neighbour = if goal_twins.contains(&neighbour) { goal } else { neighbour };
                 if visited.contains(&neighbour) {
                     continue;
                 }
                 // Nudge away from same-artist chains.
-                let penalty = if artist_of[neighbour] == artist_of[node] {
+                let penalty = if self.catalog.get(neighbour).artist_id == self.catalog.get(node).artist_id {
                     0.05
                 } else {
                     0.0
@@ -495,7 +517,7 @@ impl Navigator {
         }
 
         if goal != start && !previous.contains_key(&goal) {
-            return Vec::new();
+            return None;
         }
 
         let mut path = vec![goal];
@@ -503,7 +525,7 @@ impl Navigator {
             path.push(previous[path.last().unwrap()]);
         }
         path.reverse();
-        path.into_iter().map(|i| self.step(i, None)).collect()
+        Some(path)
     }
 
     /// How well each track's audio matches a text embedding, blocked rows at
@@ -785,7 +807,6 @@ mod tests {
                 twins: HashMap::new(),
             },
             index_of,
-            knn: None,
         }
     }
 
@@ -1005,7 +1026,7 @@ mod tests {
 
     #[test]
     fn graph_path_never_steps_onto_a_twin() {
-        let mut nav = with_twins(&TWINS);
+        let nav = with_twins(&TWINS);
         let path = nav.graph_path(1, 8, 4);
         assert_no_song_twice(&nav, &path);
         assert_eq!(path.first().map(|step| step.track.track_id), Some(1));
@@ -1027,7 +1048,7 @@ mod tests {
     /// through its other release rather than being a dead end.
     #[test]
     fn graph_path_leaves_a_song_through_any_of_its_releases() {
-        let mut nav = with_twins(&[(1, 0.0, "a"), (2, 4.0, "a - Remastered"), (3, 6.0, "b"), (4, 20.0, "c")]);
+        let nav = with_twins(&[(1, 0.0, "a"), (2, 4.0, "a - Remastered"), (3, 6.0, "b"), (4, 20.0, "c")]);
         let path = nav.graph_path(1, 3, 1);
         assert_eq!(ids(&path), vec![1, 3]);
     }
