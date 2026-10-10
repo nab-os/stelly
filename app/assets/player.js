@@ -17,16 +17,36 @@
   // device taking over the sound picks up mid-track. Says "loaded" once the
   // element has started or given up, so Rust can tell the pause a src swap
   // causes from someone pausing.
+  //
+  // Taking over mid-track, the session's clock runs on while the element
+  // fetches enough to start, a second or so from the CDN. So it waits until
+  // it can play and only then moves up to where the session is by now, rather
+  // than starting where it was when asked and sounding behind.
+  let swaps = 0;
   window.stellyPlayUrl = (url, start, autoplay) => {
+    const swap = ++swaps;
+    const asked = performance.now();
     audio.src = url;
     // Set even when it is 0: a previous track's position survives a src swap
     // in some webviews.
     audio.currentTime = start || 0;
     const loaded = () => dioxus.send({ type: "loaded" });
-    if (autoplay) {
-      audio.play().then(loaded, loaded);
-    } else {
+    if (!autoplay) {
       setTimeout(loaded, 0);
+    } else if (start > 0) {
+      audio.addEventListener(
+        "canplay",
+        () => {
+          if (swap !== swaps) return;
+          let now = start + (performance.now() - asked) / 1000;
+          if (Number.isFinite(audio.duration)) now = Math.min(now, audio.duration);
+          audio.currentTime = now;
+          audio.play().then(loaded, loaded);
+        },
+        { once: true },
+      );
+    } else {
+      audio.play().then(loaded, loaded);
     }
   };
   window.stellyResume = () => audio.play().catch(() => {});
