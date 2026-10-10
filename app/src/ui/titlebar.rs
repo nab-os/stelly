@@ -11,6 +11,8 @@
 //! manager. They are taken away while maximised, where there is nothing to
 //! resize.
 
+use std::time::{Duration, Instant};
+
 use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::tao::window::ResizeDirection;
 use dioxus::desktop::{use_window, use_wry_event_handler};
@@ -39,19 +41,32 @@ pub fn TitleBar() -> Element {
         }
     });
 
-    let (drag, toggle, minimize, maximize, close) =
-        (window.clone(), window.clone(), window.clone(), window.clone(), window.clone());
+    // A press on the bar hands the pointer to the window manager to move the
+    // window, so the webview never sees the release and its `dblclick` never
+    // fires. The second press of a double click is caught here instead.
+    let mut last_press = use_signal(|| None::<Instant>);
+
+    let (drag, minimize, maximize, close) =
+        (window.clone(), window.clone(), window.clone(), window.clone());
 
     rsx! {
         header { class: "titlebar",
             div {
                 class: "titlebar-drag",
                 onmousedown: move |evt| {
-                    if evt.trigger_button() == Some(MouseButton::Primary) {
+                    if evt.trigger_button() != Some(MouseButton::Primary) {
+                        return;
+                    }
+                    let now = Instant::now();
+                    let double = last_press().is_some_and(|t| now - t < DOUBLE_CLICK);
+                    if double {
+                        last_press.set(None);
+                        drag.toggle_maximized();
+                    } else {
+                        last_press.set(Some(now));
                         drag.drag();
                     }
                 },
-                ondoubleclick: move |_| toggle.toggle_maximized(),
                 span { class: "titlebar-mark", {icons::constellation()} }
                 span { class: "titlebar-title", "Stelly" }
             }
@@ -102,6 +117,9 @@ pub fn TitleBar() -> Element {
         }
     }
 }
+
+/// How close two presses on the bar must be to count as a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 const RESIZE_HANDLES: [(&str, ResizeDirection); 8] = [
     ("n", ResizeDirection::North),
