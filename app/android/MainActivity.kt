@@ -14,7 +14,10 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
+import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaMetadata
+import android.media.VolumeProvider
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
@@ -24,6 +27,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.view.KeyEvent
 import android.widget.Toast
 import java.io.File
 import java.net.URL
@@ -37,6 +41,14 @@ class MainActivity : WryActivity() {
         Updater.context = applicationContext
         super.onCreate(savedInstanceState)
     }
+
+    // While another device is the output, the volume keys turn its volume.
+    // The session's remote volume does the same once the app is in the
+    // background, but in front Android keeps the keys for its own streams
+    // whenever the session is not playing.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        return Playback.volumeKey(event) || super.dispatchKeyEvent(event)
+    }
 }
 
 // The lock screen's and the shade's "now playing", for whatever this device's
@@ -44,11 +56,18 @@ class MainActivity : WryActivity() {
 // once the screen locks: without one, Android freezes the app and the sound
 // stops with it.
 //
-// Rust calls `show` and `hide` from its own thread, see src/ui/now_playing.rs.
-// Everything else happens on the main one.
+// It also stands for another device's sound: while one is the output, the
+// session plays remotely, and the volume keys turn that device's volume
+// rather than this one's.
+//
+// Rust calls `show`, `hide` and the volume calls from its own thread, see
+// src/ui/now_playing.rs. Everything else happens on the main one.
 object Playback {
     const val CHANNEL = "playback"
     const val ID = 1
+
+    // How finely the keys turn another device's volume: 5% a press.
+    private const val STEPS = 20
 
     lateinit var context: Context
     private val main = Handler(Looper.getMainLooper())
@@ -57,6 +76,9 @@ object Playback {
     private var playing = false
     private var artwork: Bitmap? = null
     private var running = false
+    private var remote: VolumeProvider? = null
+    private var watching = false
+    private var level = -1.0
 
     private class Track(
         val title: String,
@@ -79,8 +101,9 @@ object Playback {
         duration: Long,
         position: Long,
         playing: Boolean,
+        volume: Double,
     ) {
-        main.post { update(title, artist, album, artwork, duration, position, playing) }
+        main.post { update(title, artist, album, artwork, duration, position, playing, volume) }
     }
 
     private fun update(
@@ -91,8 +114,10 @@ object Playback {
         duration: Long,
         position: Long,
         playing: Boolean,
+        volume: Double,
     ) {
         val session = session ?: open()
+        playOn(session, volume)
         if (track?.artwork != artwork) {
             this.artwork = null
             if (artwork != null) fetch(artwork)
@@ -117,6 +142,108 @@ object Playback {
         post()
     }
 
+    // Negative when the sound is this device's own.
+    private fun playOn(session: MediaSession, volume: Double) {
+        if (volume < 0) {
+            if (remote != null) {
+                remote = null
+                session.setPlaybackToLocal(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build(),
+                )
+            }
+            return
+        }
+        val provider = remote ?: object : VolumeProvider(VolumeProvider.VOLUME_CONTROL_ABSOLUTE, STEPS, 0) {
+            override fun onSetVolumeTo(volume: Int) = turn(volume)
+
+            // Only up and down: mute and its toggles would need a level to
+            // come back to.
+            override fun onAdjustVolume(direction: Int) {
+                if (direction == AudioManager.ADJUST_RAISE || direction == AudioManager.ADJUST_LOWER) {
+                    turn(currentVolume + direction)
+                }
+            }
+        }.also {
+            remote = it
+            session.setPlaybackToRemote(it)
+        }
+        provider.currentVolume = Math.round(volume * STEPS).toInt()
+    }
+
+    private fun turn(volume: Int) {
+        val provider = remote ?: return
+        val clamped = volume.coerceIn(0, STEPS)
+        provider.currentVolume = clamped
+        transport("volume", clamped.toDouble() / STEPS)
+    }
+
+    // The other device's volume moved, from its own system or a third one.
+    @JvmStatic
+    fun remoteVolume(volume: Double) {
+        main.post { remote?.currentVolume = Math.round(volume * STEPS).toInt() }
+    }
+
+    fun volumeKey(event: KeyEvent): Boolean {
+        val direction = when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP -> 1
+            KeyEvent.KEYCODE_VOLUME_DOWN -> -1
+            else -> return false
+        }
+        val provider = remote ?: return false
+        // The release too, or it would reach the system's own volume.
+        if (event.action == KeyEvent.ACTION_DOWN) turn(provider.currentVolume + direction)
+        return true
+    }
+
+    // This device's media volume, which is what the app's slider shows while
+    // the sound is its own. Reported now and on every change, wherever it
+    // comes from: the keys, the shade, another app.
+    @JvmStatic
+    fun watchVolume() {
+        main.post {
+            if (watching) return@post
+            watching = true
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) = reportVolume()
+            }
+            // Not in the SDK, but what every volume change broadcasts.
+            val filter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(receiver, filter)
+            }
+            reportVolume()
+        }
+    }
+
+    private fun reportVolume() {
+        val audio = context.getSystemService(AudioManager::class.java)
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max <= 0) return
+        val now = audio.getStreamVolume(AudioManager.STREAM_MUSIC).toDouble() / max
+        if (now != level) {
+            level = now
+            transport("system-volume", now)
+        }
+    }
+
+    @JvmStatic
+    fun setVolume(volume: Double) {
+        main.post {
+            val audio = context.getSystemService(AudioManager::class.java)
+            val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(volume * max).toInt(), 0)
+            // Even when it stayed on the same step, so the slider goes back
+            // to it.
+            level = -1.0
+            reportVolume()
+        }
+    }
+
     @JvmStatic
     fun hide() {
         main.post { close() }
@@ -125,6 +252,7 @@ object Playback {
     private fun close() {
         track = null
         artwork = null
+        remote = null
         session?.release()
         session = null
         if (running) {
