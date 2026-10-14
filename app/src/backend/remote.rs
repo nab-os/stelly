@@ -35,6 +35,16 @@ pub fn is_unauthorised(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Unauthorised>().is_some()
 }
 
+/// How the server took a session command.
+pub enum Sent {
+    Applied,
+    /// Refused for naming rows of a queue that has changed since, which is a
+    /// reason to catch up rather than an error to show.
+    Stale,
+    /// The server is older than the op.
+    Unknown,
+}
+
 pub struct Remote {
     http: reqwest::Client,
     /// No trailing slash.
@@ -225,10 +235,8 @@ impl Remote {
         self.get("/api/session").await
     }
 
-    /// Send one change to the shared session. `Ok(false)` when the server
-    /// refused it for naming rows of a queue that has changed since, which is
-    /// a reason to catch up rather than an error to show.
-    pub async fn session_command(&self, command: &Command) -> Result<bool> {
+    /// Send one change to the shared session.
+    pub async fn session_command(&self, command: &Command) -> Result<Sent> {
         let response = self
             .http
             .post(self.url("/api/session"))
@@ -237,11 +245,15 @@ impl Remote {
             .send()
             .await
             .with_context(|| format!("POST {}", self.url("/api/session")))?;
-        if response.status() == reqwest::StatusCode::CONFLICT {
-            return Ok(false);
+        match response.status() {
+            reqwest::StatusCode::CONFLICT => return Ok(Sent::Stale),
+            // Axum's answer to a body it cannot read: an op newer than the
+            // server.
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY => return Ok(Sent::Unknown),
+            _ => {}
         }
         Self::check(response).await?;
-        Ok(true)
+        Ok(Sent::Applied)
     }
 
     /// Follow the shared session for as long as the receiver is kept.
