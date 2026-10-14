@@ -46,6 +46,12 @@ pub struct Session {
     pub output: Option<i64>,
     /// Devices connected right now, the ones the output picker offers.
     pub devices: Vec<Output>,
+    /// The output's volume, 0.0 to 1.0, so any device can show and turn it.
+    /// `None` until the output has said what it is, which it does on taking
+    /// over, since each device keeps its own level. Absent from servers older
+    /// than it.
+    #[serde(default)]
+    pub volume: Option<f64>,
 }
 
 /// One change to the session, as a device asks for it.
@@ -78,6 +84,9 @@ pub enum Op {
     Report { index: usize, playing: bool, position: f64 },
     /// Send the sound to another device, or nowhere.
     Output { device_id: Option<i64> },
+    /// Set the output's volume. From the output, what its system says it is;
+    /// from any other device, a request the output follows.
+    Volume { level: f64 },
 }
 
 impl Op {
@@ -287,10 +296,17 @@ impl Session {
             Op::Output { device_id } => {
                 if device_id != self.output {
                     self.output = device_id;
+                    // The new output has a level of its own, and says so.
+                    self.volume = None;
                     if device_id.is_none() {
                         self.playing = false;
                     }
                     self.cue += 1;
+                }
+            }
+            Op::Volume { level } => {
+                if level.is_finite() {
+                    self.volume = Some(level.clamp(0.0, 1.0));
                 }
             }
         }
@@ -618,6 +634,26 @@ mod tests {
         assert_eq!(session.output, Some(PHONE));
         assert_eq!(session.position, 30.0);
         assert!(session.cue > cue);
+    }
+
+    #[test]
+    fn the_volume_is_kept_in_range_and_dropped_with_the_output() {
+        let mut session = loaded(&[1], 0);
+        let cue = session.cue;
+        apply(&mut session, Op::Volume { level: 1.5 });
+        assert_eq!(session.volume, Some(1.0));
+        assert_eq!(session.cue, cue);
+
+        apply(&mut session, Op::Output { device_id: Some(PHONE) });
+        assert_eq!(session.volume, None);
+    }
+
+    #[test]
+    fn a_session_from_an_older_server_has_no_volume() {
+        let json = r#"{"version":1,"queue_version":0,"queue":[],"index":0,"playing":false,
+            "position":0.0,"cue":0,"output":null,"devices":[]}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.volume, None);
     }
 
     #[test]

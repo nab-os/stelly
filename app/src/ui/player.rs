@@ -9,7 +9,7 @@
 
 use super::screens::toggle_like;
 use super::{album_link, artist_link, icons, open_remote_track, Cover, Library, LocalIds, Selection};
-use crate::backend::{backend, SessionFeed};
+use crate::backend::{backend, Sent, SessionFeed};
 use crate::qobuz::{RemoteTrack, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
 use crate::session::{Clocked, Command, Op, Output, Session, Update};
 use dioxus::core::spawn_forever;
@@ -29,11 +29,12 @@ pub struct Player {
     pub position: Signal<(f64, f64)>,
     pub quality: Signal<u32>,
     pub status: Signal<Option<String>>,
-    /// 0.0 to 1.0, independent of the device's own volume. Rides on the
-    /// `<audio>` element, which survives a src swap. Per device, not shared:
-    /// it is this device's speakers.
-    pub volume: Signal<f64>,
-    pub muted: Signal<bool>,
+    /// 0.0 to 1.0, the output's, which is what the slider shows and turns.
+    /// This device's own while it is the output, or nothing is: the
+    /// `<audio>` element's, or on Android the system's media volume, which is
+    /// what its keys turn. `None` while another device is the output and has
+    /// not said, or never will against an older server.
+    pub volume: Signal<Option<f64>>,
     /// Whether the queue drawer is showing. Lives here rather than in the
     /// shell so the player bar's toggle and the drawer share one switch.
     pub queue_open: Signal<bool>,
@@ -88,6 +89,11 @@ struct Mirror {
     sounding: bool,
     heard: f64,
     reported: Option<Instant>,
+    /// This device's own volume, as its system last said. `None` until then.
+    local: Option<f64>,
+    /// The server could not read a volume op, being older than it, so there
+    /// is no sending another.
+    volume_refused: bool,
 }
 
 impl Default for Mirror {
@@ -103,6 +109,8 @@ impl Default for Mirror {
             sounding: false,
             heard: 0.0,
             reported: None,
+            local: None,
+            volume_refused: false,
         }
     }
 }
@@ -114,6 +122,11 @@ impl Mirror {
 
     fn is_output(&self) -> bool {
         self.session().output == Some(self.me)
+    }
+
+    /// Whether the sound is another device's, whose volume is the session's.
+    fn is_remote(&self) -> bool {
+        self.session().output.is_some_and(|output| output != self.me)
     }
 }
 
@@ -218,13 +231,19 @@ fn set_if_changed<T: PartialEq + 'static>(mut signal: Signal<T>, value: T) {
 
 /// Bring the signals, and the audio element, into line with the mirror.
 fn show(mut player: Player) {
-    let (session, position, me, shared) = {
+    let (session, position, me, shared, volume) = {
         let mirror = mirror();
+        let volume = if mirror.is_remote() {
+            mirror.session().volume.filter(|_| !mirror.volume_refused)
+        } else {
+            mirror.local
+        };
         (
             mirror.session().clone(),
             mirror.clocked.position(),
             mirror.me,
             mirror.shared,
+            volume,
         )
     };
 
@@ -234,11 +253,15 @@ fn show(mut player: Player) {
     set_if_changed(player.output, session.output);
     set_if_changed(player.devices, session.devices.clone());
     set_if_changed(player.me, shared.then_some(me));
+    set_if_changed(player.volume, volume);
 
     if session.output != Some(me) {
         player.position.set((position, 0.0));
     }
     follow(player);
+    follow_volume(player);
+    #[cfg(target_os = "android")]
+    announce();
 }
 
 // ------------------------------------------------------------- the output
@@ -329,7 +352,6 @@ async fn load(mut player: Player, track: RemoteTrack, index: usize, ticket: u64)
 
     player.status.set(Some(format!("loading {}…", track.title)));
     player.position.set((0.0, track.duration.unwrap_or(0) as f64));
-    apply_volume(player);
     let format_id = *player.quality.peek();
 
     let url = match stream_url(track.id, format_id).await {
@@ -417,10 +439,23 @@ fn report_position(player: Player) {
 
 /// Tell the system what the element holds, for the notification and the lock
 /// screen. Only Android needs telling, see `now_playing`.
+///
+/// While another device is the output, what it is playing instead, so that
+/// the volume keys reach it.
 fn announce() {
     #[cfg(target_os = "android")]
     {
         let mirror = mirror();
+        if mirror.is_remote() {
+            let track = mirror.session().current().cloned();
+            let playing = mirror.session().playing;
+            let position = mirror.clocked.position();
+            // Until the output has said, the keys stay on this device's own.
+            let volume = mirror.session().volume.filter(|_| !mirror.volume_refused);
+            drop(mirror);
+            super::now_playing::show(track.as_ref(), playing, position, volume);
+            return;
+        }
         if mirror.loading.is_some() {
             return;
         }
@@ -431,21 +466,97 @@ fn announce() {
             .cloned();
         let (playing, heard) = (mirror.sounding, mirror.heard);
         drop(mirror);
-        super::now_playing::show(track.as_ref(), playing, heard);
+        super::now_playing::show(track.as_ref(), playing, heard, None);
     }
 }
 
-/// Push the level at the audio element. Muting sends 0 rather than setting
-/// `audio.muted`, so unmuting restores the slider without a second copy.
-pub fn apply_volume(player: Player) {
-    let level = if *player.muted.peek() {
-        0.0
-    } else {
-        *player.volume.peek()
-    };
+// ------------------------------------------------------------- the volume
+
+/// Levels this close are the same one, so a level set and reported back does
+/// not go round again.
+const SAME_LEVEL: f64 = 0.005;
+
+fn same_level(a: f64, b: f64) -> bool {
+    (a - b).abs() < SAME_LEVEL
+}
+
+/// Turn this device's own volume. It comes back as `heard_volume` once the
+/// system has it.
+fn set_local(level: f64) {
+    #[cfg(target_os = "android")]
+    super::now_playing::set_volume(level);
+    #[cfg(not(target_os = "android"))]
     document::eval(&format!(
         "window.stellyVolume && window.stellyVolume({level});"
     ));
+}
+
+/// This device's own volume moved: from here, from its keys, from the
+/// system's mixer. As the output it tells the others.
+fn heard_volume(player: Player, level: f64) {
+    let report = {
+        let mut mirror = mirror();
+        mirror.local = Some(level);
+        mirror.is_output()
+            && !mirror.volume_refused
+            && !mirror.session().volume.is_some_and(|wanted| same_level(wanted, level))
+    };
+    if report {
+        commit(player, Op::Volume { level });
+    } else {
+        show(player);
+    }
+}
+
+/// As the output, take up a level another device asked for, or say what this
+/// one's is on taking over.
+fn follow_volume(player: Player) {
+    let op = {
+        let mut mirror = mirror();
+        if !mirror.is_output() || mirror.volume_refused {
+            return;
+        }
+        let Some(local) = mirror.local else {
+            return;
+        };
+        match mirror.session().volume {
+            None if mirror.shared => Some(Op::Volume { level: local }),
+            Some(wanted) if !same_level(wanted, local) => {
+                // Taken as done, so the next push does not set it again
+                // before the system has answered.
+                mirror.local = Some(wanted);
+                drop(mirror);
+                set_local(wanted);
+                set_if_changed(player.volume, Some(wanted));
+                None
+            }
+            _ => None,
+        }
+    };
+    if let Some(op) = op {
+        commit(player, op);
+    }
+}
+
+/// Turn the output's volume, from the slider, the wheel or the keys.
+pub fn set_volume(player: Player, level: f64) {
+    let level = level.clamp(0.0, 1.0);
+    let remote = {
+        let mirror = mirror();
+        if mirror.is_remote() && mirror.volume_refused {
+            return;
+        }
+        mirror.is_remote()
+    };
+    if remote {
+        commit(player, Op::Volume { level });
+    } else {
+        set_local(level);
+        // Android's volume comes in steps, so it waits for the one the system
+        // landed on.
+        #[cfg(not(target_os = "android"))]
+        heard_volume(player, level);
+    }
 }
 
 pub fn quality_label(format_id: u32) -> &'static str {
@@ -625,7 +736,7 @@ fn clock(seconds: f64) -> String {
 /// the volume, which a scroll wheel turns, and the queue.
 #[component]
 pub fn PlayerBar() -> Element {
-    let mut player = use_context::<Player>();
+    let player = use_context::<Player>();
     let library = use_context::<Library>();
     let selection = use_context::<Selection>().0;
     let local = use_context::<LocalIds>();
@@ -636,7 +747,9 @@ pub fn PlayerBar() -> Element {
     let index = *player.index.read();
     let playing = *player.playing.read();
     let volume = *player.volume.read();
-    let muted = *player.muted.read();
+    let level = volume.unwrap_or(0.0);
+    // What unmuting goes back to.
+    let mut unmuted = use_signal(|| 1.0);
     let mut queue_open = player.queue_open;
 
     library.ensure_liked_loaded();
@@ -656,16 +769,6 @@ pub fn PlayerBar() -> Element {
         0.0
     };
     let filled = progress / 10.0;
-
-    let mut set_volume = move |level: f64| {
-        let level = level.clamp(0.0, 1.0);
-        player.volume.set(level);
-        // Turning it up is an unambiguous request to hear something.
-        if level > 0.0 {
-            player.muted.set(false);
-        }
-        apply_volume(player);
-    };
 
     rsx! {
         footer { class: "player",
@@ -763,40 +866,45 @@ pub fn PlayerBar() -> Element {
                 OutputPicker {}
                 div {
                     class: "volume",
-                    title: "scroll to change the volume",
+                    title: if volume.is_some() { "scroll to change the volume" } else { "the output has not said its volume" },
                     onwheel: move |event: WheelEvent| {
                         event.prevent_default();
                         let dy = event.delta().strip_units().y;
-                        if dy == 0.0 {
-                            return;
-                        }
-                        let step = if dy < 0.0 { 0.05 } else { -0.05 };
                         // Read into a local first: a guard held as a call
                         // argument lives through the call, and `set_volume`
                         // writes the same signal.
-                        let level = *player.volume.peek() + step;
-                        set_volume(level);
+                        let Some(level) = *player.volume.peek() else {
+                            return;
+                        };
+                        if dy != 0.0 {
+                            set_volume(player, level + if dy < 0.0 { 0.05 } else { -0.05 });
+                        }
                     },
                     button {
                         class: "icon-btn",
-                        title: if muted { "unmute" } else { "mute" },
+                        title: if level <= 0.0 { "unmute" } else { "mute" },
+                        disabled: volume.is_none(),
                         onclick: move |_| {
-                            let next = !*player.muted.peek();
-                            player.muted.set(next);
-                            apply_volume(player);
+                            if level > 0.0 {
+                                unmuted.set(level);
+                                set_volume(player, 0.0);
+                            } else {
+                                set_volume(player, unmuted());
+                            }
                         },
-                        {icons::volume(muted || volume <= 0.0)}
+                        {icons::volume(level <= 0.0)}
                     }
                     input {
                         r#type: "range",
                         min: "0",
                         max: "100",
                         step: "1",
-                        value: "{(volume * 100.0).round() as i64}",
-                        style: "--filled: {volume * 100.0}%",
+                        disabled: volume.is_none(),
+                        value: "{(level * 100.0).round() as i64}",
+                        style: "--filled: {level * 100.0}%",
                         oninput: move |event| {
                             if let Ok(percent) = event.value().parse::<f64>() {
-                                set_volume(percent / 100.0);
+                                set_volume(player, percent / 100.0);
                             }
                         },
                     }
@@ -939,6 +1047,10 @@ pub fn use_transport(player: Player) {
                     loaded(player);
                     announce();
                 }
+                // Android's comes from the system instead, the element there
+                // stays at full.
+                #[cfg(not(target_os = "android"))]
+                Some("volume") => heard_volume(player, number("level")),
                 Some("ended") => {
                     let index = {
                         let mut mirror = mirror();
@@ -995,9 +1107,14 @@ pub fn use_transport(player: Player) {
                 Button::Next => step(player, 1),
                 Button::Previous => step(player, -1),
                 Button::Seek(position) => seek(player, position),
+                Button::Volume(level) => set_volume(player, level),
+                Button::SystemVolume(level) => heard_volume(player, level),
             }
         }
     });
+
+    #[cfg(target_os = "android")]
+    use_hook(super::now_playing::watch_volume);
 }
 
 /// Join the shared session: follow what the server pushes, send what this
@@ -1005,8 +1122,15 @@ pub fn use_transport(player: Player) {
 /// making the sound.
 pub fn use_session(player: Player) {
     use_future(move || async move {
-        // A fresh start, and a fresh outbox, for each pairing.
-        *mirror() = Mirror::default();
+        // A fresh start, and a fresh outbox, for each pairing. The device's
+        // own volume stays, it may have been reported already.
+        {
+            let mut mirror = mirror();
+            *mirror = Mirror {
+                local: mirror.local,
+                ..Mirror::default()
+            };
+        }
         let (outbox, mut commands) = tokio::sync::mpsc::unbounded_channel::<Command>();
         *OUTBOX.lock().unwrap_or_else(|e| e.into_inner()) = Some(outbox);
 
@@ -1016,10 +1140,21 @@ pub fn use_session(player: Player) {
                 let sent = backend().session_command(&command).await;
                 let mut mirror = mirror();
                 mirror.pending = mirror.pending.saturating_sub(1);
+                let volume = matches!(command.op, Op::Volume { .. });
+                if volume && matches!(sent, Ok(Sent::Unknown)) {
+                    // Each device keeps its own volume then, as before there
+                    // was a shared one.
+                    mirror.volume_refused = true;
+                }
                 drop(mirror);
                 match sent {
-                    Ok(true) => {}
-                    Ok(false) => catch_up(player).await,
+                    Ok(Sent::Applied) => {}
+                    Ok(Sent::Stale) => catch_up(player).await,
+                    Ok(Sent::Unknown) if volume => catch_up(player).await,
+                    Ok(Sent::Unknown) => {
+                        status.set(Some("the server is older than this app".into()));
+                        catch_up(player).await;
+                    }
                     Err(err) => {
                         status.set(Some(format!("{err:#}")));
                         catch_up(player).await;
