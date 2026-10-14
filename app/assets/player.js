@@ -62,6 +62,11 @@
   window.stellyVolume = (value) => {
     audio.volume = Math.max(0, Math.min(1, value));
   };
+  // Whatever moves it, this page or the system's mixer, which WebKitGTK
+  // passes on to the element. Once now, for the slider's starting point.
+  const volume = () => dioxus.send({ type: "volume", level: audio.volume });
+  audio.addEventListener("volumechange", volume);
+  volume();
 
   // What the OS shows as "now playing", and where a hardware or mouse
   // previous/next button (and a lock screen's transport row) actually comes
