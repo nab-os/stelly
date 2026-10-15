@@ -504,6 +504,36 @@ pub fn discography(artist_id: i64, raw: &[Value]) -> Vec<RemoteAlbum> {
         .collect()
 }
 
+/// The releases out between `since` and `until`, both `YYYY-MM-DD` and
+/// inclusive, newest first, from several artists' discographies at once.
+///
+/// Only an artist's own: a feature or a remix credit is someone else's
+/// release. One album reached through two liked artists shows once, and so
+/// does a release Qobuz carries as several same-day editions (explicit and
+/// clean, standard and deluxe artwork), which would otherwise fill a row.
+pub fn recent_releases(albums: Vec<RemoteAlbum>, since: &str, until: &str) -> Vec<RemoteAlbum> {
+    let mut out: Vec<RemoteAlbum> = albums
+        .into_iter()
+        .filter(|album| album.credit.is_none_or(|credit| credit == Credit::Main))
+        .filter(|album| {
+            album
+                .released
+                .as_deref()
+                .and_then(|date| date.get(..10))
+                .is_some_and(|date| (since..=until).contains(&date))
+        })
+        .collect();
+    out.sort_by(|a, b| b.released.cmp(&a.released).then_with(|| a.title.cmp(&b.title)));
+
+    let mut ids = std::collections::HashSet::new();
+    let mut editions = std::collections::HashSet::new();
+    out.retain(|album| {
+        ids.insert(album.id.clone())
+            && editions.insert((album.artist_id, album.title.to_lowercase(), album.released.clone()))
+    });
+    out
+}
+
 fn credit(value: &Value, artist_id: i64, album: &RemoteAlbum) -> Credit {
     if album.artist_id.is_none_or(|id| id == artist_id) {
         return Credit::Main;
@@ -605,6 +635,35 @@ mod tests {
         assert_eq!(album(Some(1)).credit_on(1), Credit::Main);
         assert_eq!(album(None).credit_on(1), Credit::Main);
         assert_eq!(album(Some(2)).credit_on(1), Credit::Appears);
+    }
+
+    #[test]
+    fn recent_releases_keep_the_artists_own_inside_the_window_newest_first() {
+        let album = |id: &str, title: &str, artist_id, released: &str, credit| RemoteAlbum {
+            id: id.into(),
+            title: title.into(),
+            artist_id: Some(artist_id),
+            released: Some(released.into()),
+            credit: Some(credit),
+            ..Default::default()
+        };
+        let albums = vec![
+            album("old", "Old", 1, "2026-01-01", Credit::Main),
+            album("a", "Single", 1, "2026-09-01", Credit::Main),
+            album("feat", "Featuring", 2, "2026-09-02", Credit::Featured),
+            album("b", "Album", 2, "2026-10-01", Credit::Main),
+            // The same album, reached through its second main artist.
+            album("b", "Album", 2, "2026-10-01", Credit::Main),
+            // A clean edition of the single, out the same day.
+            album("a2", "single", 1, "2026-09-01", Credit::Main),
+            album("future", "Pre-order", 1, "2026-12-01", Credit::Main),
+            RemoteAlbum { id: "undated".into(), ..Default::default() },
+        ];
+        let ids: Vec<_> = recent_releases(albums, "2026-07-17", "2026-10-15")
+            .into_iter()
+            .map(|album| album.id)
+            .collect();
+        assert_eq!(ids, ["b", "a"]);
     }
 
     fn track(id: i64, isrc: Option<&str>) -> RemoteTrack {

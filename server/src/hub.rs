@@ -26,6 +26,12 @@ use stelly_core::api::{
 };
 use stelly_core::logbuffer::LogBuffer;
 
+/// Every liked artist counts towards recent releases, however many.
+const LIKED_ARTISTS_CAP: usize = 10_000;
+/// Each artist's newest few: enough to reach back months for all but the
+/// busiest, in one request.
+const RECENT_PER_ARTIST: usize = 20;
+
 pub struct Hub {
     paths: Paths,
     env_dir: PathBuf,
@@ -239,6 +245,55 @@ impl Hub {
                 Ok(self.session().await?.artist_albums(artist_id, cap).await?)
             })
             .await
+    }
+
+    /// What the artists this user likes have put out in the last `days`,
+    /// newest first.
+    ///
+    /// One request per liked artist, cached per artist rather than per user,
+    /// so a family sharing artists shares the spend, and liking one more
+    /// costs one request rather than all of them again. An artist that fails
+    /// is left out rather than failing the list.
+    pub async fn recent_releases(&self, user_id: i64, days: u32) -> Result<Vec<RemoteAlbum>> {
+        use futures_util::StreamExt;
+
+        let blocked: std::collections::HashSet<i64> =
+            db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+        let artists: Vec<i64> = self
+            .favourite_artists(user_id, LIKED_ARTISTS_CAP)
+            .await?
+            .into_iter()
+            .map(|artist| artist.id)
+            .filter(|id| !blocked.contains(id))
+            .collect();
+
+        // The bucket paces the requests; this only keeps it from idling
+        // between them.
+        let albums: Vec<RemoteAlbum> = futures_util::stream::iter(artists)
+            .map(|id| async move {
+                let fetched = self
+                    .catalogue
+                    .get_or(format!("artist_recent:{id}"), async {
+                        self.session().await?.artist_recent_releases(id, RECENT_PER_ARTIST).await
+                    })
+                    .await;
+                fetched.unwrap_or_else(|err| {
+                    eprintln!("recent releases of artist {id} failed: {err:#}");
+                    Vec::new()
+                })
+            })
+            .buffer_unordered(4)
+            .flat_map(futures_util::stream::iter)
+            .collect()
+            .await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let since = db::utc_at(now.saturating_sub(u64::from(days) * 86_400));
+        let until = db::utc_at(now);
+        Ok(stelly_core::qobuz::recent_releases(albums, &since[..10], &until[..10]))
     }
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {

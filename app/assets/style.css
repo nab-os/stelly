@@ -585,6 +585,7 @@ ol.list .row::before {
 /* Fixed box, always: a cover that arrives late must not reflow the grid. */
 .tile .cover { width: 100%; aspect-ratio: 1; border-radius: 8px; }
 .tile .round { border-radius: 50%; }
+.tile .date { font-size: 11px; color: var(--muted); }
 .tile .title, .tile .artist {
   min-width: 0;
   font-size: 12px;

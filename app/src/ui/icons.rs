@@ -142,6 +142,15 @@ pub fn home() -> Element {
     })
 }
 
+/// A calendar with today marked, the new releases.
+pub fn releases() -> Element {
+    stroked(rsx! {
+        rect { x: "3", y: "5", width: "18", height: "16", rx: "2" }
+        path { d: "M3 10h18M8 3v4M16 3v4" }
+        path { d: "M12 13l1 2 2 .3-1.5 1.4.4 2.1-1.9-1-1.9 1 .4-2.1L9 15.3l2-.3z" }
+    })
+}
+
 pub fn heart(full: bool) -> Element {
     rsx! {
         svg {
