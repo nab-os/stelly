@@ -129,11 +129,15 @@ impl Remote {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.get_within(path, REQUEST_TIMEOUT).await
+    }
+
+    async fn get_within<T: DeserializeOwned>(&self, path: &str, timeout: std::time::Duration) -> Result<T> {
         let response = self
             .http
             .get(self.url(path))
             .bearer_auth(&self.token)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(timeout)
             .send()
             .await
             .with_context(|| format!("GET {}", self.url(path)))?;
@@ -182,6 +186,14 @@ impl Remote {
 
     pub async fn favourite_artists(&self, cap: usize) -> Result<Vec<RemoteArtist>> {
         self.get(&format!("/api/favourites/artists?cap={cap}")).await
+    }
+
+    /// What the liked artists put out in the last `days`, newest first. One
+    /// Qobuz request per liked artist the server has not asked about in the
+    /// last few hours, at two a second, so the first time can take minutes.
+    pub async fn recent_releases(&self, days: u32) -> Result<Vec<RemoteAlbum>> {
+        self.get_within(&format!("/api/releases?days={days}"), RELEASES_TIMEOUT)
+            .await
     }
 
     pub async fn playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
@@ -675,6 +687,10 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 /// "working…" all along. Generous, since a long favourites list is paged
 /// through Qobuz behind one request.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Recent releases cost the server one Qobuz request per liked artist when
+/// its cache is cold: five hundred artists at two a second is four minutes.
+const RELEASES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// The address could not even be made into a request: a stray character,
 /// a port out of range.

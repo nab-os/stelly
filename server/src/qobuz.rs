@@ -580,7 +580,7 @@ impl QobuzClient {
         // `artist/get`'s listing is the same albums without a release type,
         // so the page still loads, ungrouped, if the web player's endpoint
         // ever goes away.
-        let raw = match self.artist_releases_raw(artist_id, cap).await {
+        let raw = match self.artist_releases_raw(artist_id, "all", cap).await {
             Ok(raw) => raw,
             Err(err) => {
                 eprintln!("artist/getReleasesList for {artist_id} failed, using artist/get: {err:#}");
@@ -592,17 +592,28 @@ impl QobuzClient {
         Ok(out)
     }
 
+    /// An artist's own latest releases, newest first: albums, EPs, singles
+    /// and live records. `all` would also list everyone else's covers of
+    /// their songs, and for a much-covered artist those bury a year of their
+    /// own releases.
+    pub async fn artist_recent_releases(&mut self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
+        let raw = self.artist_releases_raw(artist_id, "album,epSingle,live", cap).await?;
+        Ok(discography(artist_id, &raw))
+    }
+
     /// Raw release objects for an artist, through `artist/getReleasesList`,
     /// what the web player builds its discography from. Unlike `artist/get`
     /// it reports `release_type`, which is what tells an EP from an album.
-    async fn artist_releases_raw(&mut self, artist_id: i64, cap: usize) -> Result<Vec<Value>> {
+    /// Newest first. `release_type` is `all` or a comma list of the web
+    /// player's tabs: `album`, `epSingle`, `live`, `other`.
+    async fn artist_releases_raw(&mut self, artist_id: i64, release_type: &str, cap: usize) -> Result<Vec<Value>> {
         self.login().await?;
 
         let mut out: Vec<Value> = Vec::new();
         while out.len() < cap {
             let params = BTreeMap::from([
                 ("artist_id".to_string(), artist_id.to_string()),
-                ("release_type".to_string(), "all".to_string()),
+                ("release_type".to_string(), release_type.to_string()),
                 ("sort".to_string(), "release_date".to_string()),
                 // Each item carries the start of its tracklist; one is the least
                 // it accepts.

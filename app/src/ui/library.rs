@@ -164,6 +164,8 @@ pub enum View {
     /// One track, everything known about it, laid out to be screenshotted.
     Track(RemoteTrack),
     Settings,
+    /// What the liked artists have released lately, newest first.
+    Releases,
 }
 
 /// Where a search looks: the analysed space, or the whole Qobuz catalogue.
@@ -187,6 +189,7 @@ impl View {
             View::Artist(_) => "artist".into(),
             View::Track(_) => "track".into(),
             View::Settings => "settings".into(),
+            View::Releases => "new releases".into(),
         }
     }
 
@@ -219,6 +222,7 @@ impl View {
             },
             View::Playlists => ViewKind::Playlists,
             View::Playlist { .. } => ViewKind::Playlist,
+            View::Releases => ViewKind::Albums,
             View::Artist(_) => ViewKind::Artist,
             View::Album(_) | View::Track(_) | View::Settings => return None,
         })
@@ -555,6 +559,19 @@ impl Library {
         }
     }
 
+    /// The new releases button, a toggle like search and settings.
+    pub(crate) fn toggle_releases(self) {
+        if matches!(&*self.view.peek(), View::Releases) {
+            if self.history.peek().is_empty() {
+                self.show(home());
+            } else {
+                self.back();
+            }
+        } else {
+            self.go(View::Releases);
+        }
+    }
+
     /// The settings button: open settings, or leave them again if they are
     /// the screen showing, the same way the search button does.
     pub(crate) fn toggle_settings(self) {
@@ -653,7 +670,10 @@ impl Library {
             .peek()
             .iter()
             .find(|(view, from, _)| *view == target && *from == source)
-            .map(|(_, _, shelf)| shelf.clone());
+            .map(|(_, _, shelf)| shelf.clone())
+            // Releases can take minutes to fetch cold, so last time's list is
+            // shown in the meantime, not only at startup the way home's is.
+            .or_else(|| (target == View::Releases).then(|| crate::cache::read(RELEASES_CACHE)).flatten());
 
         self.view.set(target.clone());
         self.error.set(None);
@@ -689,7 +709,13 @@ impl Library {
 
         spawn(async move {
             let mut library = self;
-            let home = target == home();
+            let cache = if target == home() {
+                Some(HOME_CACHE)
+            } else if target == View::Releases {
+                Some(RELEASES_CACHE)
+            } else {
+                None
+            };
             let loaded = load(target, space_only).await;
 
             // Someone asked for a different view while this was in flight.
@@ -701,8 +727,8 @@ impl Library {
 
             match loaded {
                 Ok(shelf) => {
-                    if home {
-                        crate::cache::write(HOME_CACHE, &shelf);
+                    if let Some(name) = cache {
+                        crate::cache::write(name, &shelf);
                     }
                     let sort = *library.sort.peek();
                     library.loaded.set(shelf.clone());
@@ -787,6 +813,10 @@ fn home() -> View {
 }
 
 const HOME_CACHE: &str = "favourites.json";
+const RELEASES_CACHE: &str = "releases.json";
+
+/// How far back new releases reach.
+const RELEASES_DAYS: u32 = 90;
 
 async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
     let mut shelf = Shelf::default();
@@ -874,6 +904,7 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
                 });
             }
         }
+        View::Releases => shelf.albums = backend().recent_releases(RELEASES_DAYS).await?,
         View::Playlists => shelf.playlists = backend().playlists(LIST_CAP).await?,
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
         View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
@@ -968,6 +999,7 @@ pub fn MainScreen() -> Element {
     let home = matches!(view, View::Favourites { .. });
     let searching = matches!(view, View::Search { .. });
     let settings = matches!(view, View::Settings);
+    let releases = matches!(view, View::Releases);
 
     rsx! {
         section { class: "screen",
@@ -993,6 +1025,15 @@ pub fn MainScreen() -> Element {
                         library.home();
                     },
                     {icons::home()}
+                }
+                button {
+                    class: if releases { "icon-btn active" } else { "icon-btn" },
+                    title: "new releases",
+                    onclick: move |_| {
+                        map.close();
+                        library.toggle_releases();
+                    },
+                    {icons::releases()}
                 }
                 button {
                     class: if searching { "icon-btn active" } else { "icon-btn" },
@@ -1293,6 +1334,10 @@ fn BrowseScreen() -> Element {
                     SearchHistory {}
                 } else if nothing_visible && matches!(view, View::Favourites { scope: Scope::Everything }) {
                     p { class: "muted", "No likes yet. Heart anything to keep it here." }
+                } else if nothing_visible && view == View::Releases {
+                    p { class: "muted",
+                        "Nothing new from the artists you like in the last {RELEASES_DAYS} days. Heart more artists to follow them here."
+                    }
                 } else if nothing_visible {
                     p { class: "muted", "nothing here" }
                 }
@@ -2016,6 +2061,9 @@ fn AlbumRows() -> Element {
         .enumerate()
         .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
         .collect();
+    // How recent is the point of new releases, so they say when, and what
+    // sort of release when it is not a whole album.
+    let releases = *library.view.read() == View::Releases;
 
     rsx! {
         h3 { class: "shelf-head", "Albums" }
@@ -2037,13 +2085,33 @@ fn AlbumRows() -> Element {
                         open_menu(&mut menu, &event, MenuTarget::ShelfAlbum(index));
                     },
                     Cover { url: album.image.clone() }
+                    if releases {
+                        if let Some(kind) = release_kind(&album) {
+                            span { class: "kind", "{kind}" }
+                        }
+                    }
                     {space_mark(reach.read().0.contains(&album.id))}
                     span { class: "title", "{album.title}" }
                     {artist_link(library, album.artist_id, album.artist.clone(), "artist")}
+                    if releases {
+                        span { class: "date", {album.released.clone().unwrap_or_default()} }
+                    }
                     {menu_button(menu, MenuTarget::ShelfAlbum(index))}
                 }
             }
         }
+    }
+}
+
+/// The badge on a new release, none for a plain album.
+fn release_kind(album: &crate::qobuz::RemoteAlbum) -> Option<&'static str> {
+    use crate::qobuz::ReleaseKind;
+    match album.kind? {
+        ReleaseKind::Album => None,
+        ReleaseKind::Ep => Some("ep"),
+        ReleaseKind::Single => Some("single"),
+        ReleaseKind::Live => Some("live"),
+        ReleaseKind::Compilation => Some("compilation"),
     }
 }
 
