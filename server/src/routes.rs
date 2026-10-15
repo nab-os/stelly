@@ -38,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/favourites/tracks", get(favourite_tracks))
         .route("/api/favourites/albums", get(favourite_albums))
         .route("/api/favourites/artists", get(favourite_artists))
+        .route("/api/releases", get(recent_releases))
         .route("/api/playlists", get(playlists).post(export_playlist))
         .route("/api/playlists/{id}", get(playlist_tracks))
         .route("/api/albums/{id}", get(album_tracks))
@@ -128,6 +129,16 @@ fn default_similar() -> usize {
 }
 
 #[derive(Deserialize)]
+struct DaysQuery {
+    #[serde(default = "default_days")]
+    days: u32,
+}
+
+fn default_days() -> u32 {
+    90
+}
+
+#[derive(Deserialize)]
 struct FormatQuery {
     #[serde(default = "default_format")]
     format: u32,
@@ -170,6 +181,15 @@ async fn favourite_artists(
     Query(query): Query<CapQuery>,
 ) -> Reply<Vec<RemoteArtist>> {
     Ok(Json(state.hub.favourite_artists(device.user_id, query.cap).await?))
+}
+
+/// What the asking user's liked artists have released lately.
+async fn recent_releases(
+    State(state): State<AppState>,
+    PlayAuth(device): PlayAuth,
+    Query(query): Query<DaysQuery>,
+) -> Reply<Vec<RemoteAlbum>> {
+    Ok(Json(state.hub.recent_releases(device.user_id, query.days.clamp(1, 365)).await?))
 }
 
 async fn playlists(
