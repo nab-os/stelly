@@ -182,6 +182,14 @@ pub struct Serve {
     /// address:port to listen on (default 127.0.0.1:7700)
     #[argh(option, default = "DEFAULT_BIND.to_string()")]
     bind: String,
+    /// hours between checks of the liked artists for new releases, 0 for
+    /// never (default 6)
+    #[argh(option, default = "6")]
+    releases_every: u64,
+    /// add new releases from the last this many days to the space when a
+    /// check finds them, 0 to only list them (default 30)
+    #[argh(option, default = "30")]
+    auto_add_days: u32,
 }
 
 /// Add, list, rename or remove the people sharing this server.
@@ -306,7 +314,7 @@ fn main() -> Result<()> {
     };
 
     match command {
-        Command::Serve(args) => serve(args.bind, paths, store()?),
+        Command::Serve(args) => serve(args, paths, store()?),
         Command::User(args) => user(args.action, &store()?),
         Command::Pair(args) => {
             let store = store()?;
@@ -377,7 +385,8 @@ fn user(action: UserAction, store: &AuthStore) -> Result<()> {
     Ok(())
 }
 
-fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
+fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
+    let Serve { bind, releases_every, auto_add_days } = args;
     let address: SocketAddr = bind
         .parse()
         .with_context(|| format!("“{bind}” is not an address:port"))?;
@@ -416,6 +425,11 @@ fn serve(bind: String, paths: Paths, store: AuthStore) -> Result<()> {
                 eprintln!("no space loaded yet: {err:#}");
             }
         });
+
+        if releases_every > 0 {
+            let every = std::time::Duration::from_secs(releases_every * 60 * 60);
+            tokio::spawn(state.hub.clone().watch_releases(every, auto_add_days));
+        }
 
         let listener = tokio::net::TcpListener::bind(address).await?;
         println!("stelly-server listening on http://{address}");

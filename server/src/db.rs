@@ -141,6 +141,22 @@ pub fn unblock_artist(db_path: &Path, artist_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Whether the pipeline has already been at an album: one of its tracks
+/// analysed, or given up on. Adding it again would only rebuild the space
+/// for nothing.
+pub fn album_known(conn: &mut SqliteConnection, album_id: &str) -> Result<bool> {
+    let owned = || tracks::table.filter(tracks::album_id.eq(album_id)).select(tracks::id);
+    let analysed = diesel::select(diesel::dsl::exists(
+        features::table.filter(features::track_id.eq_any(owned())),
+    ))
+    .get_result::<bool>(conn)?;
+    let failed = diesel::select(diesel::dsl::exists(
+        failures::table.filter(failures::track_id.eq_any(owned())),
+    ))
+    .get_result::<bool>(conn)?;
+    Ok(analysed || failed)
+}
+
 pub fn blocked_artists(db_path: &Path) -> Result<Vec<BlockedArtist>> {
     let conn = &mut connect(db_path, Duration::from_secs(5))?;
     let mut rows: Vec<BlockedArtist> = blocked_artists::table
@@ -286,6 +302,27 @@ mod tests {
             ..Default::default()
         };
         analyse::store(conn, track, &descriptors, &[0.5; 512]).unwrap();
+    }
+
+    /// Catalogued is not enough to skip an album: only analysed or given up on.
+    #[test]
+    fn an_album_is_known_once_analysed_or_failed() {
+        let dir = scratch("album-known");
+        let conn = &mut open_for_write(&dir.join("stelly.db")).unwrap();
+        let track = |id, album| json!({"id": id, "title": "T", "album": {"id": album, "title": "A"}});
+        crawl::upsert_track(conn, &track(1, "fresh"), None, None, 0).unwrap();
+        crawl::upsert_track(conn, &track(2, "done"), None, None, 0).unwrap();
+        crawl::upsert_track(conn, &track(3, "broken"), None, None, 0).unwrap();
+        analysed(conn, 2);
+        diesel::insert_into(failures::table)
+            .values((failures::track_id.eq(3), failures::stage.eq("analyse")))
+            .execute(conn)
+            .unwrap();
+
+        assert!(!album_known(conn, "fresh").unwrap());
+        assert!(!album_known(conn, "unseen").unwrap());
+        assert!(album_known(conn, "done").unwrap());
+        assert!(album_known(conn, "broken").unwrap());
     }
 
     /// The queries every stage leans on, end to end on a scratch database:
