@@ -26,6 +26,17 @@ use stelly_core::api::{
 };
 use stelly_core::logbuffer::LogBuffer;
 
+/// The releases out in the last `days`, up to today, newest first.
+fn released_within(albums: Vec<RemoteAlbum>, days: u32) -> Vec<RemoteAlbum> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let since = db::utc_at(now.saturating_sub(u64::from(days) * 86_400));
+    let until = db::utc_at(now);
+    stelly_core::qobuz::recent_releases(albums, &since[..10], &until[..10])
+}
+
 /// Every liked artist counts towards recent releases, however many.
 const LIKED_ARTISTS_CAP: usize = 10_000;
 /// Each artist's newest few: enough to reach back months for all but the
@@ -47,6 +58,10 @@ pub struct Hub {
     /// Playlists, which the account can change from any Qobuz client.
     /// Cleared on our own writes, and short for everyone else's.
     account: Cache,
+    /// Each liked artist's newest releases. Outlives the background check's
+    /// interval, which overwrites it, so a client never waits on Qobuz for an
+    /// artist that check has seen.
+    releases: Cache,
     /// Loaded on first use and kept. `None` inside means the tower has not
     /// been exported, which is not an error, the UI hides steering.
     text: tokio::sync::Mutex<Option<TextEncoder>>,
@@ -130,6 +145,7 @@ impl Hub {
             catalogue: Cache::new(Duration::from_secs(6 * 60 * 60), 5_000),
             searches: Cache::new(Duration::from_secs(5 * 60), 500),
             account: Cache::new(Duration::from_secs(2 * 60), 200),
+            releases: Cache::new(Duration::from_secs(48 * 60 * 60), 10_000),
             text: tokio::sync::Mutex::new(None),
             text_tried: AtomicBool::new(false),
             vocabulary: tokio::sync::Mutex::new(None),
@@ -255,28 +271,90 @@ impl Hub {
     /// costs one request rather than all of them again. An artist that fails
     /// is left out rather than failing the list.
     pub async fn recent_releases(&self, user_id: i64, days: u32) -> Result<Vec<RemoteAlbum>> {
-        use futures_util::StreamExt;
-
-        let blocked: std::collections::HashSet<i64> =
-            db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
-        let artists: Vec<i64> = self
+        let artists = self
             .favourite_artists(user_id, LIKED_ARTISTS_CAP)
             .await?
             .into_iter()
             .map(|artist| artist.id)
-            .filter(|id| !blocked.contains(id))
             .collect();
+        let albums = self.artists_recent(self.unblocked(artists)?, false).await;
+        Ok(released_within(albums, days))
+    }
 
+    /// Every liked artist's newest releases, fetched again whatever is
+    /// cached, so the next client to ask is answered from memory. Then,
+    /// unless `add_days` is 0, whatever came out in the last `add_days` and
+    /// is not in the space yet is added to it.
+    pub async fn check_releases(&self, add_days: u32) -> Result<()> {
+        self.qobuz()?;
+        let liked = likes::family(&mut db::connect(&self.db_path, Duration::from_secs(5))?)?;
+        let artists = liked
+            .into_iter()
+            .filter(|(kind, _)| kind == "artist")
+            .filter_map(|(_, item)| Some(RemoteArtist::parse(&item)?.id))
+            .collect();
+        let artists = self.unblocked(artists)?;
+        let checked = artists.len();
+        let albums = self.artists_recent(artists, true).await;
+        self.log.push(format!("checked {checked} liked artists for new releases"));
+        if add_days == 0 {
+            return Ok(());
+        }
+
+        let mut conn = db::connect(&self.db_path, Duration::from_secs(5))?;
+        for album in released_within(albums, add_days) {
+            if db::album_known(&mut conn, &album.id)? {
+                continue;
+            }
+            self.log.push(format!("adding new release {} by {} to the space", album.title, album.artist));
+            self.pipeline_add(Target::Album(album.id)).await?;
+        }
+        Ok(())
+    }
+
+    /// `check_releases` every `every`, for the life of the server. The first
+    /// check waits a minute, for the space to load and the first requests to
+    /// go out ahead of it.
+    pub async fn watch_releases(self: Arc<Self>, every: Duration, add_days: u32) {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            if let Err(err) = self.check_releases(add_days).await {
+                self.log.push(format!("new releases check failed: {err:#}"));
+            }
+            tokio::time::sleep(every).await;
+        }
+    }
+
+    fn unblocked(&self, artists: Vec<i64>) -> Result<Vec<i64>> {
+        let blocked: std::collections::HashSet<i64> =
+            db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+        Ok(artists.into_iter().filter(|id| !blocked.contains(id)).collect())
+    }
+
+    /// These artists' newest releases, from memory unless `fresh` or never
+    /// fetched. An artist that fails is left out rather than failing them all.
+    async fn artists_recent(&self, artists: Vec<i64>, fresh: bool) -> Vec<RemoteAlbum> {
+        use futures_util::StreamExt;
+
+        let fetch = |id: i64| async move {
+            self.session().await?.artist_recent_releases(id, RECENT_PER_ARTIST).await
+        };
         // The bucket paces the requests; this only keeps it from idling
         // between them.
-        let albums: Vec<RemoteAlbum> = futures_util::stream::iter(artists)
+        futures_util::stream::iter(artists)
             .map(|id| async move {
-                let fetched = self
-                    .catalogue
-                    .get_or(format!("artist_recent:{id}"), async {
-                        self.session().await?.artist_recent_releases(id, RECENT_PER_ARTIST).await
-                    })
-                    .await;
+                let key = format!("artist_recent:{id}");
+                let fetched = if fresh {
+                    match fetch(id).await {
+                        Ok(albums) => {
+                            self.releases.put(key, albums.clone()).await;
+                            Ok(albums)
+                        }
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    self.releases.get_or(key, fetch(id)).await
+                };
                 fetched.unwrap_or_else(|err| {
                     eprintln!("recent releases of artist {id} failed: {err:#}");
                     Vec::new()
@@ -285,15 +363,7 @@ impl Hub {
             .buffer_unordered(4)
             .flat_map(futures_util::stream::iter)
             .collect()
-            .await;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let since = db::utc_at(now.saturating_sub(u64::from(days) * 86_400));
-        let until = db::utc_at(now);
-        Ok(stelly_core::qobuz::recent_releases(albums, &since[..10], &until[..10]))
+            .await
     }
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {

@@ -45,6 +45,12 @@ impl Cache {
             .with_context(|| format!("cache entry {key:?} holds another type"))
     }
 
+    /// Replace whatever is held for `key`, for a refresh that should not wait
+    /// for the old value to expire.
+    pub async fn put<T: Send + Sync + 'static>(&self, key: String, value: T) {
+        self.0.insert(key, Arc::new(value) as Entry).await;
+    }
+
     pub fn clear(&self) {
         self.0.invalidate_all();
     }
