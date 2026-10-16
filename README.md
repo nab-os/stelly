@@ -48,6 +48,10 @@ pipeline, with CLAP running in ONNX Runtime. The apps are clients of it and
 nothing else, there is no local mode, so a desktop on its own runs the server
 beside it and pairs with it like any other device.
 
+The part of the analysis that needs neither the network nor the database,
+decoding, the descriptors and CLAP's audio tower, is a crate of its own,
+`stelly-audio`, which stelly-mix uses on local files.
+
 The space is queried, not synced: the server loads it once and answers every
 walk, so a phone downloads nothing before it can generate, and opens straight
 onto the app. A walk is a few milliseconds on the server, one round trip for

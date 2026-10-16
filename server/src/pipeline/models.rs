@@ -12,9 +12,7 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::Path;
 
-pub const CLAP_AUDIO: &str = "clap-htsat-unfused-audio.onnx";
-pub const CLAP_TEXT: &str = "clap-htsat-unfused-text.onnx";
-pub const CLAP_TOKENIZER: &str = "clap-htsat-unfused-tokenizer.json";
+pub use stelly_audio::clap::{CLAP_AUDIO, CLAP_TEXT, CLAP_TOKENIZER};
 
 const REPO: &str = "https://huggingface.co/Xenova/clap-htsat-unfused/resolve";
 const REVISION: &str = "c28f2883575e590e04d3146ff0713c2448d691ba";

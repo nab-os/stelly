@@ -77,6 +77,23 @@ pub fn extract(audio: &[f32], rate: u32) -> Result<Descriptors> {
     })
 }
 
+/// The onset strength `extract` reads tempo from, one value per 10ms frame.
+pub struct Onsets {
+    pub envelope: Vec<f64>,
+    /// Frames per second.
+    pub fps: f64,
+}
+
+/// The onset envelope alone, from mono audio at `rate`, for tracking beats
+/// rather than just estimating a tempo.
+pub fn onsets(audio: &[f32], rate: u32) -> Onsets {
+    let spectral = spectral(audio, rate);
+    Onsets {
+        envelope: onset_envelope(&spectral.band_energy, spectral.frames),
+        fps: rate as f64 / HOP as f64,
+    }
+}
+
 fn finite(value: f64) -> Option<f64> {
     value.is_finite().then_some(value)
 }

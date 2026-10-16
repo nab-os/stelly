@@ -17,6 +17,12 @@ use realfft::{RealFftPlanner, RealToComplex};
 use std::path::Path;
 use std::sync::Arc;
 
+/// The weights' file names in a model directory. Fetching them is the
+/// server's business, see its `pipeline::models`.
+pub const CLAP_AUDIO: &str = "clap-htsat-unfused-audio.onnx";
+pub const CLAP_TEXT: &str = "clap-htsat-unfused-text.onnx";
+pub const CLAP_TOKENIZER: &str = "clap-htsat-unfused-tokenizer.json";
+
 pub const SAMPLE_RATE: u32 = 48_000;
 /// The audio branch consumes 10s windows. A 90s excerpt is cut into nine and
 /// the embeddings mean-pooled, so the result reflects the whole excerpt.
@@ -181,7 +187,7 @@ pub struct AudioEncoder {
 
 impl AudioEncoder {
     pub fn load(model_dir: &Path, threads: usize) -> Result<Self> {
-        let path = model_dir.join(super::models::CLAP_AUDIO);
+        let path = model_dir.join(CLAP_AUDIO);
         let session = Session::builder()
             .context("creating an ONNX session")?
             .with_intra_threads(threads.max(1))

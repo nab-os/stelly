@@ -100,8 +100,8 @@ jobs:
       - name: Build the server
         run: cargo build --release --locked -p stelly-server
 
-      - name: Test the server and the shared crate
-        run: cargo test --release --locked -p stelly-core -p stelly-server
+      - name: Test the server and the shared crates
+        run: cargo test --release --locked -p stelly-core -p stelly-audio -p stelly-server
 
       # dx leaves Depends and Maintainer blank; finish-deb.sh fills them in,
       # computing Depends with dpkg-shlibdeps against this runner's release.
