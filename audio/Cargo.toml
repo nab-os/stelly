@@ -18,7 +18,9 @@ all-codecs = ["symphonia/all-codecs", "symphonia/all-formats"]
 [dependencies]
 anyhow.workspace = true
 ebur128 = "0.1.10"
-ort = { version = "2.0.0-rc.13", features = ["download-binaries"], optional = true }
+# Exact: a pre-release requirement takes any later pre-release, and rc.14
+# changed `Session::builder`.
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"], optional = true }
 realfft = "3.5.0"
 serde.workspace = true
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
