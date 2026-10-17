@@ -11,11 +11,12 @@ path = "src/main.rs"
 stelly-core = { workspace = true, features = ["engine"] }
 
 anyhow.workspace = true
+# Qobuz, through the gateway that holds the account and its request queue.
+stelly-qobuz-client = { git = "ssh://git@github.com/nab-os/stelly-qobuz.git", features = ["async"] }
 argh = "0.1.19"
 axum = "0.8"
 bytemuck.workspace = true
 futures-util.workspace = true
-md-5.workspace = true
 # In-memory cache of Qobuz browse responses, so repeat visits skip the 2/s budget.
 moka = { version = "0.12", features = ["future"] }
 rand = "0.9"
@@ -39,11 +40,10 @@ ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 
 # The rest of the pipeline: MP3 decoding for excerpts, the STFT behind CLAP's
-# mel front end and the descriptors, EBU R128 loudness, the PCA's eigensolver,
-# and the regexes that pull credentials out of the web player.
+# mel front end and the descriptors, EBU R128 loudness and the PCA's
+# eigensolver.
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
 realfft = "3.5.0"
 ebur128 = "0.1.10"
 nalgebra = "0.35.0"
-regex = "1.13.1"
 

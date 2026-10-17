@@ -1,582 +1,120 @@
-//! The Qobuz client: browsing, stream URLs, playlists, and the bulk reads the
-//! crawl and the analyser make. The one place credentials are held.
+//! Qobuz, through stelly-qobuz's gateway: browsing, stream URLs, playlists,
+//! and the bulk reads the crawl and the analyser make.
 //!
-//! The shapes it hands out are `stelly_core::qobuz`'s, shared with the app.
+//! The gateway holds the account, its credentials, signing and its one
+//! request queue, shared with whatever else on the machine talks to Qobuz.
+//! It answers with Qobuz's own JSON; this turns that into
+//! `stelly_core::qobuz`'s shapes, shared with the app. Browsing queues as
+//! interactive, and the crawl and analyse as bulk, so a search never waits
+//! behind them.
 
-use anyhow::{bail, Context, Result};
-use md5::{Digest, Md5};
+use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-pub const API_BASE: &str = "https://www.qobuz.com/api.json/0.2";
+use stelly_qobuz_client::{api, Client, Config, Priority};
 
 pub use stelly_core::qobuz::{
     discography, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults, FORMAT_MP3_320,
 };
 
-/// Requests per second, and how many may be spent at once. One budget for the
-/// whole account, whoever is spending it.
-pub const DEFAULT_RATE_PER_SEC: f64 = 2.0;
-const BURST: f64 = 4.0;
-
-/// Qobuz blocks programmatic user/login at their edge, so a token lifted from
-/// a logged-in web player session is the only way in. See TOKEN_HELP.
-pub const TOKEN_HELP: &str = "\
-A user auth token is required. Get it from a logged-in browser session:
-  1. Log in at https://play.qobuz.com/
-  2. devtools -> Application -> Local Storage -> play.qobuz.com
-  3. Copy the value of the `localuser.token` key
-Then add to .env:  QOBUZ_USER_AUTH_TOKEN=<the token>";
-
-#[derive(Debug, Clone, Default)]
-pub struct Credentials {
-    pub app_id: String,
-    pub secrets: Vec<String>,
-    pub email: Option<String>,
-    pub password_md5: Option<String>,
-    pub auth_token: Option<String>,
-}
-
-fn md5_hex(input: &str) -> String {
-    let mut hasher = Md5::new();
-    hasher.update(input.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn parse_env(path: &Path) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return out;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            out.insert(
-                key.trim().to_string(),
-                value.trim().trim_matches(['\'', '"']).to_string(),
-            );
-        }
-    }
-    out
-}
-
-impl Credentials {
-    /// The qobuz_stream .env supplies app_id/app_secret, the repo .env supplies
-    /// the login, the environment wins.
-    pub fn from_env(repo_root: &Path) -> Result<Self> {
-        let mut merged = parse_env(&repo_root.join("..").join("qobuz_stream").join(".env"));
-        merged.extend(parse_env(&repo_root.join(".env")));
-        for key in [
-            "QOBUZ_APP_ID",
-            "QOBUZ_APP_SECRET",
-            "QOBUZ_APP_SECRETS",
-            "QOBUZ_EMAIL",
-            "QOBUZ_PASSWORD",
-            "QOBUZ_USER_AUTH_TOKEN",
-        ] {
-            if let Ok(value) = std::env::var(key) {
-                if !value.is_empty() {
-                    merged.insert(key.to_string(), value);
-                }
-            }
-        }
-
-        let Some(app_id) = merged.get("QOBUZ_APP_ID").cloned() else {
-            bail!("QOBUZ_APP_ID not found in .env")
-        };
-
-        let mut secrets: Vec<String> = merged
-            .get("QOBUZ_APP_SECRETS")
-            .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
-            .unwrap_or_default();
-        if let Some(secret) = merged.get("QOBUZ_APP_SECRET") {
-            secrets.push(secret.clone());
-        }
-
-        let password_md5 = merged.get("QOBUZ_PASSWORD").map(|pw| {
-            let is_md5 = pw.len() == 32 && pw.chars().all(|c| c.is_ascii_hexdigit());
-            if is_md5 {
-                pw.to_lowercase()
-            } else {
-                md5_hex(pw)
-            }
-        });
-
-        Ok(Self {
-            app_id,
-            secrets: secrets.into_iter().filter(|s| !s.is_empty()).collect(),
-            email: merged.get("QOBUZ_EMAIL").cloned(),
-            password_md5,
-            auth_token: merged.get("QOBUZ_USER_AUTH_TOKEN").cloned(),
-        })
-    }
-}
-
-struct TokenBucket {
-    tokens: f64,
-    last: Instant,
-}
-
-/// The shared spend against one Qobuz account.
-///
-/// Separable from the client because there can be several clients and only one
-/// account: a background crawl has its own, and the server answers several
-/// devices. All of them draw from this bucket, or the budget becomes 2/s per
-/// caller rather than per account.
-#[derive(Clone)]
-pub struct RateLimit(Arc<Mutex<TokenBucket>>);
-
-impl RateLimit {
-    pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(TokenBucket {
-            tokens: BURST,
-            last: Instant::now(),
-        })))
-    }
-}
-
-impl Default for RateLimit {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Cloning is cheap and the clone draws on the same budget, which is how the
-/// server reads Qobuz for several devices at once.
+/// Cheap to clone; clones share the gateway's connections.
 #[derive(Clone)]
 pub struct QobuzClient {
-    credentials: Credentials,
-    http: reqwest::Client,
-    auth_token: Option<String>,
-    working_secret: Option<String>,
-    limiter: RateLimit,
-    rate_per_sec: f64,
+    gateway: Client,
 }
 
 impl QobuzClient {
-    pub fn new(credentials: Credentials) -> Self {
-        Self::sharing(credentials, RateLimit::new())
-    }
-
-    /// A second client drawing on the same budget as an existing one.
-    pub fn sharing(credentials: Credentials, limiter: RateLimit) -> Self {
-        let auth_token = credentials.auth_token.clone();
+    /// The gateway at `STELLY_QOBUZ_URL`, with `STELLY_QOBUZ_TOKEN`, from the
+    /// environment over the .env in `env_dir`; by default the gateway on
+    /// this machine.
+    pub fn from_env(env_dir: &Path) -> Self {
         Self {
-            credentials,
-            http: reqwest::Client::new(),
-            auth_token,
-            working_secret: None,
-            limiter,
-            rate_per_sec: DEFAULT_RATE_PER_SEC,
+            gateway: Client::new(Config::from_env(Some(&env_dir.join(".env")))),
         }
     }
 
-    /// Hand out this client's budget so another can draw on it.
-    pub fn rate_limit(&self) -> RateLimit {
-        self.limiter.clone()
-    }
-
-    /// Crawling politely is the default; raise this only if you know the
-    /// account can take it.
-    pub fn with_rate(mut self, rate_per_sec: f64) -> Self {
-        self.rate_per_sec = rate_per_sec.max(0.1);
-        self
-    }
-
-    pub fn from_repo(repo_root: &Path) -> Result<Self> {
-        Ok(Self::new(Credentials::from_env(repo_root)?))
-    }
-
-    /// md5(endpoint without slashes + sorted key/value pairs + timestamp + secret)
-    fn sign(endpoint: &str, params: &BTreeMap<String, String>, secret: &str) -> (u64, String) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let mut to_hash = endpoint.replace('/', "");
-        for (key, value) in params {
-            if key == "app_id" || key == "user_auth_token" {
-                continue;
-            }
-            to_hash.push_str(key);
-            to_hash.push_str(value);
+    /// The same gateway, this client's requests queued behind browsing: for
+    /// the crawl and analyse, which can wait.
+    pub fn bulk(&self) -> Self {
+        Self {
+            gateway: self.gateway.at(Priority::Bulk),
         }
-        to_hash.push_str(&timestamp.to_string());
-        to_hash.push_str(secret);
-
-        (timestamp, md5_hex(&to_hash))
-    }
-
-    /// Wait for a request slot.
-    /// The deficit is claimed under the lock and slept for outside it, so
-    /// concurrent callers queue rather than race.
-    async fn acquire(&self) {
-        let wait = {
-            let mut bucket = self.limiter.0.lock().unwrap_or_else(|e| e.into_inner());
-            let now = Instant::now();
-            let elapsed = now.duration_since(bucket.last).as_secs_f64();
-            bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(BURST);
-            bucket.last = now;
-
-            if bucket.tokens >= 1.0 {
-                bucket.tokens -= 1.0;
-                None
-            } else {
-                let deficit = (1.0 - bucket.tokens) / self.rate_per_sec;
-                bucket.tokens = 0.0;
-                bucket.last = now + Duration::from_secs_f64(deficit);
-                Some(Duration::from_secs_f64(deficit))
-            }
-        };
-
-        if let Some(wait) = wait {
-            tokio::time::sleep(wait).await;
-        }
-    }
-
-    async fn request(
-        &self,
-        endpoint: &str,
-        params: &BTreeMap<String, String>,
-        secret: Option<&str>,
-    ) -> Result<Value> {
-        const MAX_ATTEMPTS: u32 = 4;
-        let mut last_error = String::new();
-
-        for attempt in 0..MAX_ATTEMPTS {
-            let mut query: Vec<(String, String)> = params
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            query.push(("app_id".into(), self.credentials.app_id.clone()));
-
-            if let Some(secret) = secret {
-                // Re-signed per attempt: the signature carries a timestamp.
-                let (timestamp, signature) = Self::sign(endpoint, params, secret);
-                query.push(("request_ts".into(), timestamp.to_string()));
-                query.push(("request_sig".into(), signature));
-            }
-
-            let mut builder = self
-                .http
-                .get(format!("{API_BASE}/{endpoint}"))
-                .query(&query)
-                .header("X-App-Id", &self.credentials.app_id);
-            if let Some(token) = &self.auth_token {
-                builder = builder.header("X-User-Auth-Token", token);
-            }
-
-            self.acquire().await;
-
-            let response = match builder.send().await {
-                Ok(response) => response,
-                Err(err) => {
-                    last_error = err.to_string();
-                    if attempt + 1 == MAX_ATTEMPTS {
-                        return Err(err).with_context(|| format!("requesting {endpoint}"));
-                    }
-                    tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
-                    continue;
-                }
-            };
-
-            let status = response.status();
-            let retry_after = response
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            let body = response.text().await.unwrap_or_default();
-
-            if status.is_success() {
-                return serde_json::from_str(&body)
-                    .with_context(|| format!("parsing {endpoint} response"));
-            }
-
-            // Rate limited or a transient server fault: back off and retry.
-            // Anything else is the caller's problem and fails immediately.
-            let transient = status.as_u16() == 429 || status.is_server_error();
-            last_error = format!("HTTP {status}: {}", &body[..body.len().min(200)]);
-            if !transient || attempt + 1 == MAX_ATTEMPTS {
-                bail!("{endpoint} -> {last_error}");
-            }
-            let backoff = retry_after.unwrap_or(1u64 << (attempt + 1));
-            tokio::time::sleep(Duration::from_secs(backoff)).await;
-        }
-
-        bail!("{endpoint} -> exhausted retries: {last_error}")
-    }
-
-    pub async fn login(&mut self) -> Result<Value> {
-        if self.auth_token.is_some() {
-            return Ok(Value::Null);
-        }
-        let (Some(email), Some(password)) = (
-            self.credentials.email.clone(),
-            self.credentials.password_md5.clone(),
-        ) else {
-            bail!("{TOKEN_HELP}")
-        };
-
-        let params = BTreeMap::from([
-            ("email".to_string(), email),
-            ("password".to_string(), password),
-        ]);
-        let data = self.request("user/login", &params, None).await?;
-
-        let token = data
-            .get("user_auth_token")
-            .and_then(|v| v.as_str())
-            .context("login response had no user_auth_token")?;
-        self.auth_token = Some(token.to_string());
-        Ok(data.get("user").cloned().unwrap_or(Value::Null))
     }
 
     /// The signed-in account, which is also the check that the token works.
-    pub async fn user(&mut self) -> Result<Value> {
-        self.login().await?;
-        let data = self
-            .request("user/get", &BTreeMap::new(), None)
-            .await
-            .context("the token was rejected; tokens end with the web player session")?;
-        Ok(data
-            .get("user")
-            .filter(|u| u.is_object())
-            .cloned()
-            .unwrap_or(data))
-    }
-
-    // ------------------------------------------------------------- browsing
-    //
-    // Unsigned, token-authenticated reads. Only `track/getFileUrl` needs the
-    // app secret.
-
-    /// Walk a paginated list endpoint until `cap` items or the reported total.
-    async fn paginate(
-        &self,
-        endpoint: &str,
-        params: &BTreeMap<String, String>,
-        container: &str,
-        cap: usize,
-    ) -> Result<Vec<Value>> {
-        const PAGE: usize = 100;
-        let mut out: Vec<Value> = Vec::new();
-        let mut offset = 0usize;
-
-        while out.len() < cap {
-            let mut page_params = params.clone();
-            page_params.insert("limit".into(), PAGE.min(cap - out.len()).to_string());
-            page_params.insert("offset".into(), offset.to_string());
-
-            let data = self.request(endpoint, &page_params, None).await?;
-            let block = data.get(container).cloned().unwrap_or(Value::Null);
-            let items = block
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let total = block.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-            let received = items.len();
-            out.extend(items);
-            offset += received;
-
-            // A short page means the end regardless of what `total` claims.
-            if received == 0 || offset >= total {
-                break;
-            }
-        }
-
-        out.truncate(cap);
-        Ok(out)
+    pub async fn user(&self) -> Result<Value> {
+        self.gateway.send(api::user()).await
     }
 
     /// Full-catalogue search: tracks, albums and artists in one request.
-    pub async fn search(&mut self, query: &str, limit: usize) -> Result<SearchResults> {
-        self.login().await?;
-
-        let params = BTreeMap::from([
-            ("query".to_string(), query.to_string()),
-            ("limit".to_string(), limit.to_string()),
-        ]);
-        let data = self.request("catalog/search", &params, None).await?;
-
-        let items = |key: &str| -> Vec<Value> {
-            data.get(key)
-                .and_then(|block| block.get("items"))
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-        };
-
+    pub async fn search(&self, query: &str, limit: usize) -> Result<SearchResults> {
+        let data = self.gateway.send(api::search(query, limit, None)).await?;
+        let items = |key: &str| list(&data[key]["items"]);
         Ok(SearchResults {
-            tracks: items("tracks")
-                .iter()
-                .filter_map(|v| RemoteTrack::parse(v, None))
-                .collect(),
-            albums: items("albums")
-                .iter()
-                .filter_map(RemoteAlbum::parse)
-                .collect(),
-            artists: items("artists")
-                .iter()
-                .filter_map(RemoteArtist::parse)
-                .collect(),
+            tracks: items("tracks").iter().filter_map(|v| RemoteTrack::parse(v, None)).collect(),
+            albums: items("albums").iter().filter_map(RemoteAlbum::parse).collect(),
+            artists: items("artists").iter().filter_map(RemoteArtist::parse).collect(),
         })
     }
 
     /// Raw favourites, exactly as Qobuz returned them. `kind` is 'tracks',
     /// 'albums' or 'artists'. What `favourites` prints.
-    pub async fn favorites_raw(&mut self, kind: &str, cap: usize) -> Result<Vec<Value>> {
-        self.login().await?;
-        let params = BTreeMap::from([("type".to_string(), kind.to_string())]);
-        self.paginate("favorite/getUserFavorites", &params, kind, cap)
-            .await
+    pub async fn favorites_raw(&self, kind: &str, cap: usize) -> Result<Vec<Value>> {
+        Ok(self.gateway.send(api::favourites(kind, cap)).await?.items)
     }
 
-    pub async fn user_playlists(&mut self, cap: usize) -> Result<Vec<RemotePlaylist>> {
-        self.login().await?;
-        Ok(self
-            .paginate(
-                "playlist/getUserPlaylists",
-                &BTreeMap::new(),
-                "playlists",
-                cap,
-            )
-            .await?
-            .iter()
-            .filter_map(RemotePlaylist::parse)
-            .collect())
+    pub async fn user_playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
+        let page = self.gateway.send(api::playlists(cap)).await?;
+        Ok(page.items.iter().filter_map(RemotePlaylist::parse).collect())
     }
 
     /// A playlist's tracklist. These carry their own album/performer, so no
     /// parent context is needed.
-    pub async fn playlist_tracks(&mut self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
-        self.login().await?;
-
-        let mut out = Vec::new();
-        let mut offset = 0usize;
-        while out.len() < cap {
-            let params = BTreeMap::from([
-                ("playlist_id".to_string(), playlist_id.to_string()),
-                ("extra".to_string(), "tracks".to_string()),
-                ("limit".to_string(), 100.min(cap - out.len()).to_string()),
-                ("offset".to_string(), offset.to_string()),
-            ]);
-            let data = self.request("playlist/get", &params, None).await?;
-            let block = data.get("tracks").cloned().unwrap_or(Value::Null);
-            let items = block
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let total = block.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-            let received = items.len();
-            out.extend(items.iter().filter_map(|v| RemoteTrack::parse(v, None)));
-            offset += received;
-            if received == 0 || offset >= total {
-                break;
-            }
-        }
-        Ok(out)
+    pub async fn playlist_tracks(&self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
+        let page = self.gateway.send(api::playlist_tracks(&playlist_id.to_string(), cap)).await?;
+        Ok(page.items.iter().filter_map(|v| RemoteTrack::parse(v, None)).collect())
     }
 
     /// The whole `album/get` payload, tracklist included.
-    pub async fn album_raw(&mut self, album_id: &str) -> Result<Value> {
-        self.login().await?;
-        let params = BTreeMap::from([("album_id".to_string(), album_id.to_string())]);
-        self.request("album/get", &params, None).await
+    pub async fn album_raw(&self, album_id: &str) -> Result<Value> {
+        self.gateway.send(api::album(album_id)).await
     }
 
     /// The whole `track/get` payload, its album included.
-    pub async fn track_raw(&mut self, track_id: i64) -> Result<Value> {
-        self.login().await?;
-        let params = BTreeMap::from([("track_id".to_string(), track_id.to_string())]);
-        self.request("track/get", &params, None).await
+    pub async fn track_raw(&self, track_id: i64) -> Result<Value> {
+        self.gateway.send(api::track(&track_id.to_string())).await
     }
 
     /// An album and its tracklist, in one request.
-    pub async fn album_tracks(&mut self, album_id: &str) -> Result<(RemoteAlbum, Vec<RemoteTrack>)> {
+    pub async fn album_tracks(&self, album_id: &str) -> Result<(RemoteAlbum, Vec<RemoteTrack>)> {
         let data = self.album_raw(album_id).await?;
-
-        let album = RemoteAlbum::parse(&data)
-            .with_context(|| format!("album {album_id} had no usable metadata"))?;
-        let tracks = data
-            .get("tracks")
-            .and_then(|block| block.get("items"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
+        let album = RemoteAlbum::parse(&data).with_context(|| format!("album {album_id} had no usable metadata"))?;
+        let tracks = list(&data["tracks"]["items"])
             .iter()
             .filter_map(|v| RemoteTrack::parse(v, Some(&album)))
             .collect();
-
         Ok((album, tracks))
     }
 
     /// One artist on its own: name, portrait and biography, no discography.
-    pub async fn artist(&mut self, artist_id: i64) -> Result<RemoteArtist> {
+    pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
         let data = self.artist_raw(artist_id).await?;
         RemoteArtist::parse(&data).with_context(|| format!("artist {artist_id} has no id"))
     }
 
     /// The whole `artist/get` payload.
-    pub async fn artist_raw(&mut self, artist_id: i64) -> Result<Value> {
-        self.login().await?;
-        let params = BTreeMap::from([("artist_id".to_string(), artist_id.to_string())]);
-        self.request("artist/get", &params, None).await
+    pub async fn artist_raw(&self, artist_id: i64) -> Result<Value> {
+        self.gateway.send(api::artist(&artist_id.to_string())).await
     }
 
     /// Raw album objects for an artist, paginated through `artist/get`.
-    pub async fn artist_albums_raw(&mut self, artist_id: i64, cap: usize) -> Result<Vec<Value>> {
-        self.login().await?;
-
-        let mut out: Vec<Value> = Vec::new();
-        let mut offset = 0usize;
-
-        while out.len() < cap {
-            let params = BTreeMap::from([
-                ("artist_id".to_string(), artist_id.to_string()),
-                ("extra".to_string(), "albums".to_string()),
-                ("limit".to_string(), 100.min(cap - out.len()).to_string()),
-                ("offset".to_string(), offset.to_string()),
-            ]);
-            let data = self.request("artist/get", &params, None).await?;
-
-            let block = data.get("albums").cloned().unwrap_or(Value::Null);
-            let items = block
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let total = block.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-            let received = items.len();
-            out.extend(items);
-            offset += received;
-            if received == 0 || offset >= total {
-                break;
-            }
-        }
-
-        Ok(out)
+    pub async fn artist_albums_raw(&self, artist_id: i64, cap: usize) -> Result<Vec<Value>> {
+        Ok(self.gateway.send(api::artist_albums(&artist_id.to_string(), cap)).await?.items)
     }
 
     /// An artist's discography, newest first, each album marked with what
     /// sort of release it is and how they are credited on it.
-    pub async fn artist_albums(&mut self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
+    pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         // `artist/get`'s listing is the same albums without a release type,
         // so the page still loads, ungrouped, if the web player's endpoint
         // ever goes away.
@@ -596,76 +134,25 @@ impl QobuzClient {
     /// and live records. `all` would also list everyone else's covers of
     /// their songs, and for a much-covered artist those bury a year of their
     /// own releases.
-    pub async fn artist_recent_releases(&mut self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
+    pub async fn artist_recent_releases(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         let raw = self.artist_releases_raw(artist_id, "album,epSingle,live", cap).await?;
         Ok(discography(artist_id, &raw))
     }
 
     /// Raw release objects for an artist, through `artist/getReleasesList`,
-    /// what the web player builds its discography from. Unlike `artist/get`
-    /// it reports `release_type`, which is what tells an EP from an album.
-    /// Newest first. `release_type` is `all` or a comma list of the web
-    /// player's tabs: `album`, `epSingle`, `live`, `other`.
-    async fn artist_releases_raw(&mut self, artist_id: i64, release_type: &str, cap: usize) -> Result<Vec<Value>> {
-        self.login().await?;
-
-        let mut out: Vec<Value> = Vec::new();
-        while out.len() < cap {
-            let params = BTreeMap::from([
-                ("artist_id".to_string(), artist_id.to_string()),
-                ("release_type".to_string(), release_type.to_string()),
-                ("sort".to_string(), "release_date".to_string()),
-                // Each item carries the start of its tracklist; one is the least
-                // it accepts.
-                ("track_size".to_string(), "1".to_string()),
-                ("limit".to_string(), 100.min(cap - out.len()).to_string()),
-                ("offset".to_string(), out.len().to_string()),
-            ]);
-            let data = self.request("artist/getReleasesList", &params, None).await?;
-
-            let items = data
-                .get("items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let more = data.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
-
-            let received = items.len();
-            out.extend(items);
-            if received == 0 || !more {
-                break;
-            }
-        }
-
-        Ok(out)
+    /// which unlike `artist/get` reports `release_type`. Newest first.
+    async fn artist_releases_raw(&self, artist_id: i64, release_type: &str, cap: usize) -> Result<Vec<Value>> {
+        let call = api::artist_releases(&artist_id.to_string(), release_type, cap);
+        Ok(self.gateway.send(call).await?.items)
     }
 
     /// Artists Qobuz considers close to this one. The same endpoint the
     /// crawler expands the frontier with.
-    pub async fn similar_artists_raw(
-        &mut self,
-        artist_id: i64,
-        limit: usize,
-    ) -> Result<Vec<Value>> {
-        self.login().await?;
-
-        let params = BTreeMap::from([
-            ("artist_id".to_string(), artist_id.to_string()),
-            ("limit".to_string(), limit.to_string()),
-        ]);
-        let data = self
-            .request("artist/getSimilarArtists", &params, None)
-            .await?;
-
-        Ok(data
-            .get("artists")
-            .and_then(|block| block.get("items"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
+    pub async fn similar_artists_raw(&self, artist_id: i64, limit: usize) -> Result<Vec<Value>> {
+        self.gateway.send(api::similar_artists(&artist_id.to_string(), limit)).await
     }
 
-    pub async fn similar_artists(&mut self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
+    pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
         Ok(self
             .similar_artists_raw(artist_id, limit)
             .await?
@@ -674,90 +161,20 @@ impl QobuzClient {
             .collect())
     }
 
-    /// Signed stream URL. Tries each configured secret until one is accepted.
-    pub async fn file_url(&mut self, track_id: i64, format_id: u32) -> Result<String> {
-        self.login().await?;
-
-        let params = BTreeMap::from([
-            ("track_id".to_string(), track_id.to_string()),
-            ("format_id".to_string(), format_id.to_string()),
-            ("intent".to_string(), "stream".to_string()),
-        ]);
-
-        let candidates: Vec<String> = match &self.working_secret {
-            Some(secret) => vec![secret.clone()],
-            None => self.credentials.secrets.clone(),
-        };
-        if candidates.is_empty() {
-            bail!("no QOBUZ_APP_SECRET configured for request signing");
-        }
-
-        let had_working_secret = self.working_secret.is_some();
-        let mut last_error = String::new();
-        for secret in candidates {
-            match self.request("track/getFileUrl", &params, Some(&secret)).await {
-                Ok(data) => {
-                    if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                        self.working_secret = Some(secret);
-                        return Ok(url.to_string());
-                    }
-                    last_error = format!("no url in response: {data}");
-                }
-                Err(err) => last_error = err.to_string(),
-            }
-        }
-
-        // Qobuz reports delisted tracks as a signature error too, so once a
-        // secret is known to work, blame the track rather than the credentials.
-        if had_working_secret {
-            bail!("track {track_id} is not streamable (likely delisted): {last_error}")
-        }
-
-        bail!(
-            "no configured app secret produced a valid signature (it may have rotated). \
-             Run `stelly-server refresh-credentials --write`. Last error: {last_error}"
-        )
+    /// Signed stream URL.
+    pub async fn file_url(&self, track_id: i64, format_id: u32) -> Result<String> {
+        Ok(self.gateway.send(api::file_url(&track_id.to_string(), format_id)).await?.url)
     }
 
     /// Write a path out as a real Qobuz playlist. Returns the playlist id.
-    pub async fn export_playlist(&mut self, name: &str, track_ids: &[i64]) -> Result<i64> {
-        self.login().await?;
-
-        let created = self
-            .request(
-                "playlist/create",
-                &BTreeMap::from([
-                    ("name".to_string(), name.to_string()),
-                    ("is_public".to_string(), "false".to_string()),
-                    ("is_collaborative".to_string(), "false".to_string()),
-                ]),
-                None,
-            )
-            .await?;
-
-        let playlist_id = created
-            .get("id")
-            .and_then(|v| v.as_i64())
-            .context("playlist/create returned no id")?;
-
-        let ids = track_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        self.request(
-            "playlist/addTracks",
-            &BTreeMap::from([
-                ("playlist_id".to_string(), playlist_id.to_string()),
-                ("track_ids".to_string(), ids),
-            ]),
-            None,
-        )
-        .await?;
-
-        Ok(playlist_id)
+    pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {
+        let ids: Vec<String> = track_ids.iter().map(i64::to_string).collect();
+        Ok(self.gateway.send(api::create_playlist(name, &ids)).await?.id)
     }
+}
+
+fn list(value: &Value) -> Vec<Value> {
+    value.as_array().cloned().unwrap_or_default()
 }
 
 /// Repo root, inferred from the crate location.

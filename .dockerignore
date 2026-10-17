@@ -9,6 +9,8 @@ docs
 
 # Credentials. They come in as environment variables; see compose.yaml.
 .env
+.env.bak
+qobuz.env
 
 # Host build output. Copying a host target/ in would also defeat the cache
 # mount in the builder stage.

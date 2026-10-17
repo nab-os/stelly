@@ -1,0 +1,4 @@
+# stelly-qobuz is private on GitHub, fetched over SSH; Cargo's own git client
+# does not use the SSH agent, the git CLI does.
+[net]
+git-fetch-with-cli = true

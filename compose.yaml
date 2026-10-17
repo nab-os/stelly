@@ -1,7 +1,9 @@
-# An example deployment of the server. Copy it, adjust it, then:
+# An example deployment of the server and the Qobuz gateway beside it. Copy
+# it, adjust it, then:
 #
-#   cp .env.example .env                                  # Qobuz credentials
-#   docker compose pull
+#   echo "STELLY_QOBUZ_TOKEN=$(openssl rand -hex 32)" > .env  # between the two
+#   cp ~/.config/stelly-qobuz/.env qobuz.env                  # Qobuz credentials
+#   docker compose pull server
 #   docker compose run --rm server pair --name desktop --scope admin
 #   docker compose up -d
 #
@@ -27,6 +29,7 @@ services:
     #
     #   build:
     #     context: .
+    #     ssh: ["default"]   # stelly-qobuz-client is a private git dependency
 
     # Loopback inside the container would be unreachable from outside it, so
     # the bind is 0.0.0.0 and the *published* port is the one restricted to
@@ -37,11 +40,14 @@ services:
     ports:
       - "127.0.0.1:7700:7700"
 
-    # QOBUZ_APP_ID, QOBUZ_USER_AUTH_TOKEN and friends. The environment wins
-    # over any .env inside the image, so nothing needs mounting for this.
+    # Qobuz through the gateway below, which wants the shared token.
+    environment:
+      STELLY_QOBUZ_URL: http://qobuz:7710
     env_file:
       - path: .env
         required: false
+    depends_on:
+      - qobuz
 
     volumes:
       - data:/data     # corpus, space, device tokens, models, back this up
@@ -62,6 +68,29 @@ services:
       start_period: 15s
       retries: 3
 
+  # The Qobuz account, its credentials and its one request queue, for the
+  # server and anything else that talks to Qobuz. Built from its own
+  # checkout beside this one; on the compose network only, not published.
+  # Publish 127.0.0.1:7710:7710 too for stelly-mix on the host.
+  qobuz:
+    build:
+      context: ../stelly-qobuz
+    command: ["serve", "--bind", "0.0.0.0:7710"]
+    # STELLY_QOBUZ_TOKEN, which it refuses to listen past loopback without,
+    # and the account: QOBUZ_APP_ID, QOBUZ_APP_SECRETS, QOBUZ_USER_AUTH_TOKEN,
+    # as `stelly-qobuz login` wrote them on a machine with a browser. The
+    # sign-in's redirect cannot reach a container, so it is not run here.
+    env_file:
+      - path: .env
+        required: false
+      - path: qobuz.env
+        required: true
+    volumes:
+      - qobuz:/data    # the credentials `login` writes, back this up too
+    init: true
+    restart: unless-stopped
+
 volumes:
   data:
   cache:
+  qobuz:

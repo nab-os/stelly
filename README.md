@@ -25,12 +25,15 @@ area, from its own floating button.
 
 ## Shape of the system
 
-Two programs, one of each side of a socket.
+Two programs, one of each side of a socket, and Qobuz behind a third:
+[stelly-qobuz](https://github.com/nab-os/stelly-qobuz), the gateway that holds
+the account, its credentials and its one 2/s request queue, which anything
+else on the machine that talks to Qobuz, stelly-mix say, shares.
 
 ```
   stelly-server                                stelly (desktop, Android)
   ─────────────                                ─────────────────────────────
-  Qobuz credentials, ONE 2/s rate limit        neighbours · radio · path · drift
+  Qobuz through stelly-qobuz                   neighbours · radio · path · drift
   crawl       likes → similar artists            → asked of the server
   analyse     middle 90s of each track         map, library, playback
                 → CLAP (ONNX) + descriptors    caches the index, the map and
@@ -83,30 +86,22 @@ sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
 The server needs none of it: it depends on `stelly-core`, the half the two
 share, not on the app, which keeps dioxus, wry and GTK out.
 
-### Credentials
+### Qobuz
 
-Qobuz does not issue API credentials to individuals, and since April 2026 its
-API no longer serves anonymous requests, so sign-in has to happen in a browser:
-
-```sh
-cd server
-cargo run --release -- login
-```
-
-That scrapes the current app id and signing secrets from the web player, opens
-your browser to Qobuz, and writes all three into `.env` at the repo root (or
-into `STELLY_ENV_DIR`).
-
-If the browser round-trip is awkward (a headless box, a container), log in at
-<https://play.qobuz.com/>, open devtools → Application → Local Storage →
-`play.qobuz.com`, copy the `localuser.token` value, and set:
+The server asks Qobuz for nothing itself: [stelly-qobuz](https://github.com/nab-os/stelly-qobuz)
+does, for every program on the machine, from one account and one request
+queue. Signing in is its business:
 
 ```sh
-QOBUZ_USER_AUTH_TOKEN=<the token>
+cd ../stelly-qobuz
+cargo run --release -- login     # app id, secrets and a token, into its .env
+cargo run --release -- serve     # http://127.0.0.1:7710
 ```
 
-Tokens expire when the session ends. The app id and secrets rotate with web
-player releases; `refresh-credentials --write` re-scrapes those alone.
+Its README has the rest: the token by hand where a browser cannot reach,
+`refresh-credentials` when the web player's secrets rotate. Stelly finds it
+at `STELLY_QOBUZ_URL` (default `http://127.0.0.1:7710`), sending
+`STELLY_QOBUZ_TOKEN` if it is set, from the environment or `.env`.
 
 ## Running the pipeline
 
@@ -115,7 +110,7 @@ Every stage is a subcommand of the server, and also a button in the app's
 
 ```sh
 cd server
-cargo run --release -- whoami                   # verify credentials
+cargo run --release -- whoami                   # verify the gateway's credentials
 cargo run --release -- crawl --max-tracks 2000  # likes, then similar artists
 cargo run --release -- analyse                  # fetch excerpts, extract features
 cargo run --release -- build-space              # assemble vectors
@@ -152,9 +147,11 @@ stelly-server crawl --artist 43840      # one discography, queued
 stelly-server crawl --album 0634904077969
 ```
 
-Requests are limited to 2/s with retry-and-backoff on 429s, one account pays
-for every call, and the crawl, `analyse` and every client's browsing share that
-one budget, so browsing during a crawl is slower, not blocked.
+Requests are limited to 2/s with retry-and-backoff on 429s, at the gateway:
+one account pays for every call, and the crawl, `analyse`, every client's
+browsing and whatever else uses the gateway share that one budget. The crawl
+and `analyse` queue as bulk, so browsing goes ahead of them rather than
+waiting its turn behind a backlog.
 
 ## Running the app
 
@@ -262,8 +259,8 @@ it tries to be.
 Each person has their own devices, their own queue and their own likes. The
 speaker in the living room only answers to the queue it was picked from, and
 nobody sees anyone else's likes. What is shared is the Qobuz account and its
-2 requests a second, which means one person's crawl slows everyone's
-browsing, its playlists, and the space, which the crawl grows from the whole
+2 requests a second, though browsing goes ahead of a crawl in its queue,
+its playlists, and the space, which the crawl grows from the whole
 family's likes. Playlists exported from the app are named after whoever
 exported them.
 
@@ -313,10 +310,11 @@ loopback property above: the bind has to be `0.0.0.0` to be reachable across
 the container boundary at all, so it is the *published* port that is
 restricted.
 
-Credentials never enter the image, `.env` is in `.dockerignore`, and they
-come in as environment variables. The corpus, the space, the device tokens, the
-model weights and any `.env` that `login` writes all live in the `/data`
-volume, which is the only thing here worth a backup.
+Qobuz credentials are not this image's at all: the gateway holds them, in an
+image of its own, and [`compose.yaml`](compose.yaml) runs the two side by
+side. The corpus, the space, the device tokens and the model weights all live
+in the `/data` volume, which is the only thing here worth a backup, with the
+gateway's own.
 
 ## Android
 

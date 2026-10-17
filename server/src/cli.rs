@@ -1,7 +1,7 @@
 //! The pipeline and the account, from the command line, as subcommands of
-//! the server binary:
+//! the server binary. Signing in to Qobuz is the gateway's: `stelly-qobuz
+//! login`.
 //!
-//!   stelly-server login              sign in through the browser
 //!   stelly-server crawl --max-tracks 5000
 //!   stelly-server analyse --album ID
 //!   stelly-server build-space
@@ -12,42 +12,20 @@
 //! from the structs below; `main` gathers them with its own into `Command`.
 
 use crate::pipeline::{analyse, assemble, demo, layout, models, Job, Paths};
-use crate::qobuz::{Credentials, QobuzClient, DEFAULT_RATE_PER_SEC};
+use crate::qobuz::QobuzClient;
 use crate::schema::{albums, artists, layout as layout_table, tracks};
-use crate::{crawl, db, login, stages, Command};
+use crate::{crawl, db, stages, Command};
 use anyhow::{bail, Context, Result};
 use argh::FromArgs;
 use diesel::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
 use stelly_core::api::Target;
 
 // ---------------------------------------------------------------- arguments
 
-/// Sign in through the browser; the token goes into .env.
-#[derive(FromArgs)]
-#[argh(subcommand, name = "login")]
-pub struct Login {
-    /// seconds to wait for the sign-in to finish (default 300)
-    #[argh(option, default = "300")]
-    timeout: u64,
-    /// print the sign-in URL rather than opening a browser
-    #[argh(switch)]
-    no_browser: bool,
-}
-
-/// Re-scrape the app id and secrets from the web player.
-#[derive(FromArgs)]
-#[argh(subcommand, name = "refresh-credentials")]
-pub struct RefreshCredentials {
-    /// update .env in place rather than printing the values
-    #[argh(switch)]
-    write: bool,
-}
-
-/// Check the credentials.
+/// Check that the gateway has working credentials.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "whoami")]
 pub struct Whoami {}
@@ -104,9 +82,6 @@ pub struct Crawl {
     /// how many similar-artist hops from a like to follow (default 2)
     #[argh(option, default = "stelly_core::api::DEFAULT_MAX_DISTANCE")]
     max_distance: i64,
-    /// requests per second to Qobuz (default 2)
-    #[argh(option, default = "DEFAULT_RATE_PER_SEC")]
-    rate: f64,
     /// skip seeding from the likes
     #[argh(switch)]
     no_seed: bool,
@@ -249,8 +224,6 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
     };
 
     match command {
-        Command::Login(args) => block(Box::pin(login_command(args, paths))),
-        Command::RefreshCredentials(args) => block(Box::pin(refresh_credentials(args, paths))),
         Command::Whoami(_) => block(Box::pin(whoami(paths))),
         Command::Favourites(args) => block(Box::pin(favourites(args, paths))),
         Command::Crawl(args) => block(Box::pin(crawl_command(args, paths))),
@@ -278,12 +251,8 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
 
 // ------------------------------------------------------------------ account
 
-fn client(paths: &Paths, rate: f64) -> Result<QobuzClient> {
-    Ok(QobuzClient::new(Credentials::from_env(&paths.env_dir)?).with_rate(rate))
-}
-
 async fn whoami(paths: &Paths) -> Result<()> {
-    let user = client(paths, DEFAULT_RATE_PER_SEC)?.user().await?;
+    let user = QobuzClient::from_env(&paths.env_dir).user().await?;
     let field = |key: &str| user.get(key).and_then(|v| v.as_str()).unwrap_or("?").to_string();
     let credential = user.get("credential").cloned().unwrap_or_default();
     let subscription = credential
@@ -298,46 +267,10 @@ async fn whoami(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-async fn login_command(args: Login, paths: &Paths) -> Result<()> {
-    eprintln!("fetching the Qobuz web player bundle…");
-    let bundle = login::fetch_bundle().await?;
-    let timeout = Duration::from_secs(args.timeout);
-    let token = login::browser_login(&bundle, timeout, !args.no_browser).await?;
-    login::update_env(
-        &paths.env_dir,
-        &[
-            ("QOBUZ_APP_ID", bundle.app_id.clone()),
-            ("QOBUZ_APP_SECRETS", bundle.secrets.join(",")),
-            ("QOBUZ_USER_AUTH_TOKEN", token),
-        ],
-    )?;
-    println!("logged in; token saved to {}", paths.env_dir.join(".env").display());
-    whoami(paths).await
-}
-
-async fn refresh_credentials(args: RefreshCredentials, paths: &Paths) -> Result<()> {
-    eprintln!("fetching the Qobuz web player bundle…");
-    let bundle = login::fetch_bundle().await?;
-    let joined = bundle.secrets.join(",");
-    if !args.write {
-        println!("\nAdd these to your .env:\n");
-        println!("QOBUZ_APP_ID={}", bundle.app_id);
-        println!("QOBUZ_APP_SECRETS={joined}");
-        println!("\n(re-run with --write to update the file in place)");
-        return Ok(());
-    }
-    login::update_env(
-        &paths.env_dir,
-        &[("QOBUZ_APP_ID", bundle.app_id.clone()), ("QOBUZ_APP_SECRETS", joined)],
-    )?;
-    println!("updated .env with the app id and {} candidate secrets", bundle.secrets.len());
-    Ok(())
-}
-
 async fn favourites(args: Favourites, paths: &Paths) -> Result<()> {
     let kind = args.kind;
     let cap = if args.limit == 0 { usize::MAX } else { args.limit };
-    let items = client(paths, DEFAULT_RATE_PER_SEC)?.favorites_raw(kind.as_str(), cap).await?;
+    let items = QobuzClient::from_env(&paths.env_dir).favorites_raw(kind.as_str(), cap).await?;
 
     let name = |v: &serde_json::Value, key: &str, field: &str| -> String {
         v.get(key)
@@ -368,8 +301,8 @@ async fn favourites(args: Favourites, paths: &Paths) -> Result<()> {
 
 async fn crawl_command(args: Crawl, paths: &Paths) -> Result<()> {
     let conn = &mut db::open_for_write(&paths.db_path)?;
-    let mut client = client(paths, args.rate)?;
-    client.login().await.context("signing in to Qobuz")?;
+    // How fast is the gateway's to say, for the whole account.
+    let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
 
     if !args.no_seed {
         eprintln!("seeding from the family's likes…");
@@ -417,13 +350,12 @@ async fn analyse_command(args: Analyse, paths: &Paths) -> Result<()> {
     .into_iter()
     .flatten()
     .collect();
-    let limiter = client(paths, DEFAULT_RATE_PER_SEC)?.rate_limit();
     match targets.as_slice() {
         [] => {
-            analyse::run(paths, limiter, &options, &Job::stderr()).await?;
+            analyse::run(paths, &options, &Job::stderr()).await?;
         }
         [target] => {
-            stages::analyse_target(target, paths, limiter, options, &Job::stderr()).await?;
+            stages::analyse_target(target, paths, options, &Job::stderr()).await?;
         }
         _ => bail!("one of --track, --album and --artist at a time"),
     }
