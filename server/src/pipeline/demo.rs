@@ -8,9 +8,9 @@
 use super::audio::Pcm;
 use super::clap::AudioEncoder;
 use super::{analyse, assemble, layout, models, Job, Paths};
+use crate::provider::{RemoteAlbum, RemoteTrack};
 use crate::{crawl, db};
 use anyhow::Result;
-use serde_json::json;
 
 const RATE: u32 = 44_100;
 const SECONDS: usize = 25;
@@ -96,27 +96,28 @@ pub fn populate(conn: &mut diesel::SqliteConnection) -> Result<Vec<(i64, usize)>
     let mut tracks = Vec::new();
     let mut track_id = 1000;
     for (index, (title, ..)) in ALBUMS.iter().enumerate() {
-        let artist = json!({"id": 100 + index, "name": format!("Artist {index}")});
-        let album_id = format!("album-{index}");
-        crawl::upsert_album(
-            conn,
-            &json!({
-                "id": album_id,
-                "title": title,
-                "artist": artist,
-                "release_date_original": format!("{}-01-01", 1990 + index * 4),
-                "genre": {"name": title.split(' ').next()},
-            }),
-        )?;
+        let artist_id = 100 + index as i64;
+        let album = RemoteAlbum {
+            id: format!("album-{index}"),
+            title: title.to_string(),
+            artist: format!("Artist {index}"),
+            artist_id: Some(artist_id),
+            released: Some(format!("{}-01-01", 1990 + index * 4)),
+            genre: title.split(' ').next().map(str::to_string),
+            ..Default::default()
+        };
+        crawl::upsert_album(conn, &album, true)?;
         for n in 0..TRACKS_PER_ALBUM {
             track_id += 1;
-            crawl::upsert_track(
-                conn,
-                &json!({"id": track_id, "title": format!("{title} {}", n + 1), "duration": SECONDS}),
-                Some(&album_id),
-                Some(100 + index as i64),
-                0,
-            )?;
+            let track = RemoteTrack {
+                id: track_id,
+                title: format!("{title} {}", n + 1),
+                duration: Some(SECONDS as i64),
+                album: album.title.clone(),
+                album_id: Some(album.id.clone()),
+                ..Default::default()
+            };
+            crawl::upsert_track(conn, &track, Some(artist_id), 0)?;
             tracks.push((track_id, index));
         }
     }

@@ -11,7 +11,7 @@ use super::tour::TourRow;
 use super::{icons, Blocklist, Me, Space};
 use crate::app::{normalise_address, pinned_by_env, Pairing};
 use crate::backend::{backend, is_bad_address, is_unauthorised, is_unreachable, Remote};
-use crate::qobuz::{FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
+use crate::catalogue::Quality;
 use crate::ServerConfig;
 use dioxus::prelude::*;
 
@@ -268,15 +268,15 @@ fn PlaybackRow() -> Element {
         section { class: "panel setting",
             h2 { "Playback" }
             div { class: "setting-fields",
-                for format_id in [FORMAT_MP3_320, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES] {
+                for choice in Quality::ALL {
                     button {
-                        key: "{format_id}",
-                        class: if quality == format_id { "chip active" } else { "chip" },
+                        key: "{choice.as_str()}",
+                        class: if quality == choice { "chip active" } else { "chip" },
                         onclick: move |_| {
-                            player.quality.set(format_id);
-                            prefs::update(|prefs| prefs.quality = Some(format_id));
+                            player.quality.set(choice);
+                            prefs::update(|prefs| prefs.quality = Some(choice));
                         },
-                        "{quality_label(format_id)}"
+                        "{quality_label(choice)}"
                     }
                 }
                 span { class: "muted", "applies from the next track" }

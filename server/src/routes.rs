@@ -18,7 +18,7 @@ use stelly_core::api::{
     Target, TrackMeta, TracksRequest, User, Word,
 };
 use stelly_core::session::{Command, Session, Update};
-use stelly_core::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::time::Duration;
@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         // --------------------------------------------------------- browsing
         .route("/api/search", get(search))
+        .route("/api/capabilities", get(capabilities))
         .route("/api/favourites/tracks", get(favourite_tracks))
         .route("/api/favourites/albums", get(favourite_albums))
         .route("/api/favourites/artists", get(favourite_artists))
@@ -148,13 +149,21 @@ fn default_days() -> u32 {
 }
 
 #[derive(Deserialize)]
-struct FormatQuery {
-    #[serde(default = "default_format")]
-    format: u32,
+struct QualityQuery {
+    quality: Option<Quality>,
+    /// What apps before 1.2 send instead: the format ids of Qobuz, the only
+    /// provider there was.
+    format: Option<u32>,
 }
 
-fn default_format() -> u32 {
-    stelly_core::qobuz::FORMAT_MP3_320
+impl QualityQuery {
+    fn quality(&self) -> Quality {
+        self.quality.unwrap_or(match self.format {
+            Some(6) => Quality::Lossless,
+            Some(7 | 27) => Quality::Hires,
+            _ => Quality::Lossy,
+        })
+    }
 }
 
 // ----------------------------------------------------------------- browsing
@@ -259,18 +268,23 @@ struct StreamUrl {
     url: String,
 }
 
-/// Mint a signed Qobuz URL. The client streams it from Qobuz's CDN; audio
-/// never proxies through here. If their URLs turn out to be IP-bound, this is
-/// the route that has to start proxying.
+/// Where the provider says a track's audio is. The client streams it from
+/// there; audio never proxies through here. A provider whose URLs only this
+/// machine can reach is the case that would have to start proxying.
 async fn file_url(
     State(state): State<AppState>,
     _: PlayAuth,
     Path(id): Path<i64>,
-    Query(query): Query<FormatQuery>,
+    Query(query): Query<QualityQuery>,
 ) -> Reply<StreamUrl> {
     Ok(Json(StreamUrl {
-        url: state.hub.file_url(id, query.format).await?,
+        url: state.hub.file_url(id, query.quality()).await?,
     }))
+}
+
+/// What the music provider is and can do, so the app offers only that.
+async fn capabilities(State(state): State<AppState>, _: PlayAuth) -> Reply<Capabilities> {
+    Ok(Json(state.hub.capabilities().await?))
 }
 
 // ------------------------------------------------------------------ session

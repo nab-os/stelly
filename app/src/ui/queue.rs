@@ -10,7 +10,7 @@ use super::player::{clear_queue, move_to, play_at, remove_at, set_upcoming, Play
 use super::{album_link, artist_link, icons, Cover, Library};
 use crate::api::OrderRequest;
 use crate::backend::backend;
-use crate::qobuz::RemoteTrack;
+use crate::catalogue::RemoteTrack;
 use dioxus::prelude::*;
 
 /// Reorder what follows the current track so each step through the space is as

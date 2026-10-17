@@ -50,7 +50,7 @@ pub use side::{GeneratePanel, PathPill};
 use dioxus::prelude::*;
 use crate::api::{BlockedArtist, Device, SpaceIndex, SpaceInfo, TrackMeta};
 use crate::backend::backend;
-use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
+use crate::catalogue::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -164,6 +164,7 @@ pub(crate) fn glimpse(track: &RemoteTrack) {
             genre: String::new(),
             artist_id: track.artist_id.unwrap_or(-1),
             album_id: track.album_id.clone().unwrap_or_default(),
+            image: track.image.clone(),
             bpm: None,
             seed_distance: 0,
             isrc: track.isrc.clone(),
@@ -271,11 +272,11 @@ pub(crate) fn open_remote_track(library: Library, mut selection: Signal<Option<i
 }
 
 /// The album a track sits on, as much of it as the track knows. The album page
-/// fetches the tracklist itself; the cover is assembled from the id.
+/// fetches the tracklist itself; the cover is the track's, which is the album's.
 pub(crate) fn album_of(track: &RemoteTrack) -> Option<RemoteAlbum> {
     let id = track.album_id.clone()?;
     Some(RemoteAlbum {
-        image: crate::qobuz::cover_url(&id).or_else(|| track.image.clone()),
+        image: track.image.clone(),
         id,
         title: track.album.clone(),
         artist: track.artist.clone(),
@@ -365,9 +366,7 @@ impl MapView {
     }
 }
 
-/// A track in the analysed space, reduced to what a row needs. Carries
-/// `album_id` because a space track has no stored art and its cover is
-/// derived from that id.
+/// A track in the analysed space, reduced to what a row needs.
 #[derive(Clone, PartialEq)]
 pub struct SpaceRow {
     pub track_id: i64,
@@ -378,6 +377,8 @@ pub struct SpaceRow {
     /// The album's title, for sorting by it.
     pub album: String,
     pub album_id: String,
+    /// The album's cover, when the provider gave one.
+    pub image: Option<String>,
 }
 
 /// Open an artist's page from just the id and name a row already carries. The
@@ -471,6 +472,24 @@ pub struct Blocklist {
 #[derive(Clone, Copy)]
 pub struct Me(pub Signal<Option<Device>>);
 
+/// The server's music provider, what it is called and what it can do; none
+/// until the server has said, or from a server before 1.2, which only ever
+/// had Qobuz behind it.
+#[derive(Clone, Copy)]
+pub struct Provider(pub Signal<Option<crate::catalogue::Capabilities>>);
+
+impl Provider {
+    /// What to call the catalogue behind the server.
+    pub fn title(&self) -> String {
+        self.0.read().as_ref().map_or_else(|| "Catalogue".to_string(), |c| c.title.clone())
+    }
+
+    /// Whether it can write a playlist of its own; assumed so until it says.
+    pub fn exports(&self) -> bool {
+        self.0.read().as_ref().is_none_or(|c| c.export)
+    }
+}
+
 impl Blocklist {
     pub fn contains(&self, artist_id: i64) -> bool {
         self.artists
@@ -490,13 +509,14 @@ impl Blocklist {
 
 /// Artwork, as a background rather than an `<img>`.
 ///
-/// Deliberate: a URL that 404s, and `qobuz::cover_url` guesses some of them,
-/// leaves the placeholder showing instead of a broken-image glyph, with no
+/// Deliberate: a URL that 404s, and a provider's guessed covers sometimes
+/// do, leaves the placeholder showing instead of a broken-image glyph, with no
 /// `onerror` handler to install. Sizing is the caller's, via `class`.
 #[component]
 pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
-    // Single quotes and parens would break out of `url('…')`. Qobuz sends
-    // neither, so a URL containing one is corrupt rather than merely unusual.
+    // Single quotes and parens would break out of `url('…')`. A provider's
+    // cover URL has neither, so one containing one is corrupt rather than
+    // merely unusual.
     let art = url.filter(|u| !u.contains(['\'', '(', ')']));
     let class = class.unwrap_or_default();
 
@@ -507,7 +527,7 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
     // stops being smooth.
     //
     // An `<img loading="lazy">` would get the laziness for free but not the
-    // failure behaviour: `cover_url` *guesses* the album art path, so a 404 is
+    // failure behaviour: a provider may guess an album's art path, so a 404 is
     // expected, and a background leaves the placeholder tint where an `<img>`
     // shows a broken glyph. Recovering that would need an `onerror` hook per
     // cover, thousands per shelf.

@@ -15,13 +15,13 @@ anyhow.workspace = true
 # Mixing: a whole track's beats, bars, phrases and phrase embeddings, and the
 # ways from one track into another.
 stelly-mix = { git = "https://github.com/nab-os/stelly-mix", tag = "v0.2.0" }
-# Qobuz, through the gateway that holds the account and its request queue.
-stelly-qobuz-client = { git = "https://github.com/nab-os/stelly-qobuz-client", tag = "v0.1.0", features = ["async"] }
+# The music provider, through the protocol every provider answers.
+stelly-provider = { workspace = true, features = ["async"] }
 argh = "0.1.19"
 axum = "0.8"
 bytemuck.workspace = true
 futures-util.workspace = true
-# In-memory cache of Qobuz browse responses, so repeat visits skip the 2/s budget.
+# In-memory cache of the provider's browse responses, so repeat visits skip its budget.
 moka = { version = "0.12", features = ["future"] }
 rand = "0.9"
 # `stream` for fetching model weights without holding 500MB in memory.

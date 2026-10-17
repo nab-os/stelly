@@ -44,22 +44,42 @@ struct Found {
 
 /// Bring an older database up to `schema.sql`.
 ///
-/// The one migration so far: `features` as the Python pipeline wrote it, with
-/// Essentia's descriptors and EffNet embeddings. None of it is comparable with
-/// what the Rust analyser produces, and every row would be re-analysed anyway
-/// for its extractor version, so the table is dropped and made again.
+/// `features` as the Python pipeline wrote it, with Essentia's descriptors
+/// and EffNet embeddings: none of it is comparable with what the Rust
+/// analyser produces, and every row would be re-analysed anyway for its
+/// extractor version, so the table is dropped and made again.
+///
+/// The catalogue from before providers, which kept each item as Qobuz
+/// described it in `qobuz_json`: that is the provider's own shape, so it
+/// becomes `legacy_json`, for `import` to convert, beside an empty
+/// `meta_json`. Albums gain their cover.
 fn migrate(conn: &mut SqliteConnection) -> Result<()> {
-    let python_features = diesel::sql_query(
-        "SELECT COUNT(*) AS n FROM pragma_table_info('features') WHERE name = 'essentia_json'",
-    )
-    .get_result::<Found>(conn)?
-    .n
-        > 0;
-    if python_features {
+    if has_column(conn, "features", "essentia_json")? {
         conn.batch_execute("DROP TABLE features")
             .context("dropping the Python-era features table")?;
     }
+    for table in ["artists", "albums", "tracks"] {
+        if has_column(conn, table, "qobuz_json")? {
+            conn.batch_execute(&format!(
+                "ALTER TABLE {table} RENAME COLUMN qobuz_json TO legacy_json;
+                 ALTER TABLE {table} ADD COLUMN meta_json TEXT;"
+            ))
+            .with_context(|| format!("moving {table}'s stored items aside for import"))?;
+        }
+    }
+    if has_column(conn, "albums", "title")? && !has_column(conn, "albums", "image")? {
+        conn.batch_execute("ALTER TABLE albums ADD COLUMN image TEXT")?;
+    }
     Ok(())
+}
+
+/// Whether `table` exists and has `column`.
+pub fn has_column(conn: &mut SqliteConnection, table: &str, column: &str) -> Result<bool> {
+    let found = diesel::sql_query(format!(
+        "SELECT COUNT(*) AS n FROM pragma_table_info('{table}') WHERE name = '{column}'"
+    ))
+    .get_result::<Found>(conn)?;
+    Ok(found.n > 0)
 }
 
 /// Open the database, waiting up to `busy` for a lock another connection
@@ -284,8 +304,8 @@ mod tests {
     use super::*;
     use crate::pipeline::analyse;
     use crate::pipeline::descriptors::Descriptors;
+    use crate::provider::{RemoteAlbum, RemoteTrack};
     use crate::{crawl, stages};
-    use serde_json::json;
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
@@ -304,15 +324,69 @@ mod tests {
         analyse::store(conn, track, &descriptors, &[0.5; 512]).unwrap();
     }
 
+    /// A database from before providers keeps what it stored, aside, for
+    /// `import`; likes included, whose old column could not be empty.
+    #[test]
+    fn the_catalogue_from_before_providers_is_kept_for_import() {
+        use crate::auth::AuthStore;
+        use diesel::connection::SimpleConnection;
+
+        let dir = scratch("before-providers");
+        let db_path = dir.join("stelly.db");
+        {
+            let conn = &mut connect(&db_path, Duration::from_secs(1)).unwrap();
+            conn.batch_execute(
+                "CREATE TABLE artists (id INTEGER PRIMARY KEY, name TEXT NOT NULL, qobuz_json TEXT, similar_fetched_at TEXT);
+                 CREATE TABLE albums (id TEXT PRIMARY KEY, artist_id INTEGER, title TEXT NOT NULL, release_date TEXT,
+                                      label TEXT, genre TEXT, qobuz_json TEXT);
+                 CREATE TABLE tracks (id INTEGER PRIMARY KEY, album_id TEXT, artist_id INTEGER, title TEXT NOT NULL,
+                                      duration INTEGER, isrc TEXT, qobuz_json TEXT, seed_distance INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO albums (id, title, qobuz_json) VALUES ('a1', 'A', '{\"id\":\"a1\"}');
+                 CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+                 INSERT INTO users (name, created_at) VALUES ('sam', 'now');
+                 CREATE TABLE likes (user_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL, ref_id TEXT NOT NULL,
+                                     qobuz_json TEXT NOT NULL, liked_at INTEGER NOT NULL, PRIMARY KEY (user_id, kind, ref_id));
+                 INSERT INTO likes VALUES (1, 'track', '5', '{\"id\":5}', 10);",
+            )
+            .unwrap();
+        }
+        let conn = &mut open_for_write(&db_path).unwrap();
+        AuthStore::new(&db_path).unwrap();
+
+        let (legacy, meta, image): (Option<String>, Option<String>, Option<String>) = albums::table
+            .find("a1")
+            .select((albums::legacy_json, albums::meta_json, albums::image))
+            .first(conn)
+            .unwrap();
+        assert_eq!((legacy.as_deref(), meta, image), (Some("{\"id\":\"a1\"}"), None, None));
+        assert!(crate::import::pending(conn).unwrap());
+        // Not listed until imported, and new likes need no legacy at all.
+        let listed: Vec<(crate::provider::RemoteTrack, i64)> = crate::likes::list(&db_path, 1, "track", 10).unwrap();
+        assert!(listed.is_empty());
+        let track = crate::likes::Liked::Track(RemoteTrack { id: 6, ..Default::default() });
+        crate::likes::record(&db_path, 1, "6", &track, 20).unwrap();
+        assert_eq!(crate::likes::list::<RemoteTrack>(&db_path, 1, "track", 10).unwrap().len(), 1);
+
+        // And all of it again is nothing.
+        ensure_schema(conn).unwrap();
+        AuthStore::new(&db_path).unwrap();
+    }
+
     /// Catalogued is not enough to skip an album: only analysed or given up on.
     #[test]
     fn an_album_is_known_once_analysed_or_failed() {
         let dir = scratch("album-known");
         let conn = &mut open_for_write(&dir.join("stelly.db")).unwrap();
-        let track = |id, album| json!({"id": id, "title": "T", "album": {"id": album, "title": "A"}});
-        crawl::upsert_track(conn, &track(1, "fresh"), None, None, 0).unwrap();
-        crawl::upsert_track(conn, &track(2, "done"), None, None, 0).unwrap();
-        crawl::upsert_track(conn, &track(3, "broken"), None, None, 0).unwrap();
+        let track = |id, album: &str| RemoteTrack {
+            id,
+            title: "T".into(),
+            album: "A".into(),
+            album_id: Some(album.into()),
+            ..Default::default()
+        };
+        crawl::upsert_track(conn, &track(1, "fresh"), None, 0).unwrap();
+        crawl::upsert_track(conn, &track(2, "done"), None, 0).unwrap();
+        crawl::upsert_track(conn, &track(3, "broken"), None, 0).unwrap();
         analysed(conn, 2);
         diesel::insert_into(failures::table)
             .values((failures::track_id.eq(3), failures::stage.eq("analyse")))
@@ -333,27 +407,41 @@ mod tests {
         let db_path = dir.join("stelly.db");
         let conn = &mut open_for_write(&db_path).unwrap();
 
-        let album = json!({
-            "id": "a1", "title": "A", "genre": {"name": "Jazz"},
-            "artist": {"id": 7, "name": "Seven"},
-        });
-        let full = json!({
-            "id": 1, "title": "One", "isrc": "X", "duration": 200,
-            "album": album, "performer": {"id": 7, "name": "Seven"},
-        });
-        crawl::upsert_track(conn, &full, None, None, 2).unwrap();
+        let album = RemoteAlbum {
+            id: "a1".into(),
+            title: "A".into(),
+            genre: Some("Jazz".into()),
+            artist: "Seven".into(),
+            artist_id: Some(7),
+            image: Some("https://covers/a1.jpg".into()),
+            ..Default::default()
+        };
+        crawl::upsert_album(conn, &album, true).unwrap();
+        let full = RemoteTrack {
+            id: 1,
+            title: "One".into(),
+            isrc: Some("X".into()),
+            duration: Some(200),
+            album: "A".into(),
+            album_id: Some("a1".into()),
+            artist: "Seven".into(),
+            artist_id: Some(7),
+            ..Default::default()
+        };
+        crawl::upsert_track(conn, &full, None, 2).unwrap();
         // Sparser and closer, then fuller but further: stored values survive
-        // a payload without them, and the shortest distance wins.
-        crawl::upsert_track(conn, &json!({"id": 1, "title": "One"}), None, None, 1).unwrap();
-        crawl::upsert_track(conn, &full, None, None, 3).unwrap();
-        crawl::upsert_track(
-            conn,
-            &json!({"id": 2, "title": "Two", "performer": {"id": 8, "name": "Eight"}}),
-            None,
-            None,
-            0,
-        )
-        .unwrap();
+        // a description without them, and the shortest distance wins.
+        let sparse = RemoteTrack { id: 1, title: "One".into(), ..Default::default() };
+        crawl::upsert_track(conn, &sparse, None, 1).unwrap();
+        crawl::upsert_track(conn, &full, None, 3).unwrap();
+        let two = RemoteTrack {
+            id: 2,
+            title: "Two".into(),
+            artist: "Eight".into(),
+            artist_id: Some(8),
+            ..Default::default()
+        };
+        crawl::upsert_track(conn, &two, None, 0).unwrap();
 
         let one: (Option<String>, Option<String>, Option<i64>, Option<i64>, i64) = tracks::table
             .find(1)
@@ -367,8 +455,11 @@ mod tests {
             .first(conn)
             .unwrap();
         assert_eq!(one, (Some("X".into()), Some("a1".into()), Some(7), Some(200), 1));
-        let genre: Option<String> = albums::table.find("a1").select(albums::genre).first(conn).unwrap();
+        // A track's stub of its album keeps what the whole album said.
+        let (genre, image): (Option<String>, Option<String>) =
+            albums::table.find("a1").select((albums::genre, albums::image)).first(conn).unwrap();
         assert_eq!(genre.as_deref(), Some("Jazz"));
+        assert_eq!(image.as_deref(), Some("https://covers/a1.jpg"));
 
         crawl::enqueue(conn, "artist", "7", 2).unwrap();
         crawl::enqueue(conn, "artist", "7", 1).unwrap();

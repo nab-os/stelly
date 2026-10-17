@@ -8,10 +8,15 @@
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
+-- Ids are the music provider's own. `meta_json` is the item as the provider
+-- described it, in `stelly_core::catalogue`'s shape. `legacy_json` is what an
+-- earlier Stelly stored instead, in the provider's own shape, until `import`
+-- has the provider convert it; then it is NULL.
 CREATE TABLE IF NOT EXISTS artists (
     id                  INTEGER PRIMARY KEY,
     name                TEXT NOT NULL,
-    qobuz_json          TEXT,
+    meta_json           TEXT,
+    legacy_json         TEXT,
     similar_fetched_at  TEXT
 );
 
@@ -22,7 +27,10 @@ CREATE TABLE IF NOT EXISTS albums (
     release_date  TEXT,
     label         TEXT,
     genre         TEXT,
-    qobuz_json    TEXT
+    -- The cover's URL, what the space's rows show.
+    image         TEXT,
+    meta_json     TEXT,
+    legacy_json   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tracks (
@@ -32,7 +40,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     title          TEXT NOT NULL,
     duration       INTEGER,
     isrc           TEXT,
-    qobuz_json     TEXT,
+    meta_json      TEXT,
+    legacy_json    TEXT,
     -- Hops from a favourited item. 0 = the user's own library.
     seed_distance  INTEGER NOT NULL DEFAULT 0
 );

@@ -157,7 +157,7 @@ impl AuthStore {
              );
              CREATE INDEX IF NOT EXISTS devices_token ON devices(token_hash);",
         )?;
-        conn.batch_execute(crate::likes::SCHEMA)?;
+        crate::likes::ensure_schema(conn)?;
 
         let has_owner = diesel::sql_query(
             "SELECT COUNT(*) AS n FROM pragma_table_info('devices') WHERE name = 'user_id'",

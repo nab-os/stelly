@@ -17,7 +17,7 @@ use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, Player};
 use super::{artist_link, open_track, space_row_or_glimpse, Cover, MapView, Selection, Space, Weights};
 use crate::backend::backend;
-use crate::qobuz::RemoteTrack;
+use crate::catalogue::RemoteTrack;
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
@@ -37,6 +37,7 @@ fn label_for(id: Option<i64>) -> String {
 
 #[component]
 pub fn GeneratePanel() -> Element {
+    let provider = use_context::<super::Provider>();
     let generator = use_context::<Generator>();
     let player = use_context::<Player>();
     let library = use_context::<Library>();
@@ -261,6 +262,7 @@ pub fn GeneratePanel() -> Element {
                     },
                     "Queue"
                 }
+                if provider.exports() {
                 button {
                     disabled: empty,
                     onclick: move |_| {
@@ -285,6 +287,7 @@ pub fn GeneratePanel() -> Element {
                         });
                     },
                     "Export"
+                }
                 }
                 button {
                     disabled: empty,

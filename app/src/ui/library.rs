@@ -1,4 +1,4 @@
-//! Browsing and searching Qobuz, and the shelf of results.
+//! Browsing and searching the provider's catalogue, and the shelf of results.
 //!
 //! Navigation is explicit rather than reactive: every move sets the view and
 //! spawns its own load. One `Shelf` holds whatever the view returned.
@@ -17,7 +17,7 @@ use super::{
 use dioxus::prelude::*;
 use crate::api::Target;
 use crate::backend::backend;
-use crate::qobuz::{RemoteAlbum, RemoteArtist, RemoteTrack};
+use crate::catalogue::{RemoteAlbum, RemoteArtist, RemoteTrack};
 
 /// How many space rows the list opens with. Enough to fill the column on any
 /// screen; "show more" triples it.
@@ -168,12 +168,12 @@ pub enum View {
     Releases,
 }
 
-/// Where a search looks: the analysed space, or the whole Qobuz catalogue.
-/// One or the other, never both at once.
+/// Where a search looks: the analysed space, or the provider's whole
+/// catalogue. One or the other, never both at once.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
     Space,
-    Qobuz,
+    Catalogue,
 }
 
 impl View {
@@ -274,12 +274,12 @@ pub enum Grouping {
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Shelf {
     pub tracks: Vec<RemoteTrack>,
-    pub albums: Vec<crate::qobuz::RemoteAlbum>,
-    pub artists: Vec<crate::qobuz::RemoteArtist>,
-    pub playlists: Vec<crate::qobuz::RemotePlaylist>,
+    pub albums: Vec<crate::catalogue::RemoteAlbum>,
+    pub artists: Vec<crate::catalogue::RemoteArtist>,
+    pub playlists: Vec<crate::catalogue::RemotePlaylist>,
     /// Shown under an artist: the same hop the crawl takes when it expands
     /// the frontier, so you can see where analysis would go next.
-    pub similar: Vec<crate::qobuz::RemoteArtist>,
+    pub similar: Vec<crate::catalogue::RemoteArtist>,
 }
 
 #[derive(Clone, Copy)]
@@ -379,7 +379,7 @@ impl Library {
             layouts: Signal::new(prefs.layouts),
             grouping: Signal::new(prefs.grouping),
             liked_only: Signal::new(false),
-            source: Signal::new(Source::Qobuz),
+            source: Signal::new(Source::Catalogue),
             liked: Signal::new(None),
             epoch: Signal::new(0),
             kept: Signal::new(Vec::new()),
@@ -936,7 +936,7 @@ async fn space_groups(query: &str) -> anyhow::Result<(Vec<RemoteAlbum>, Vec<Remo
         .albums
         .into_iter()
         .map(|album| RemoteAlbum {
-            image: crate::qobuz::cover_url(&album.id),
+            image: album.image,
             id: album.id,
             title: album.title,
             artist: album.artist,
@@ -1092,6 +1092,7 @@ pub fn MainScreen() -> Element {
 fn SearchBar() -> Element {
     let library = use_context::<Library>();
     let search = use_context::<Search>();
+    let provider_title = use_context::<super::Provider>().title();
     let mut query = search.text;
     let source = *library.source.read();
 
@@ -1155,10 +1156,10 @@ fn SearchBar() -> Element {
                     "space"
                 }
                 button {
-                    class: if source == Source::Qobuz { "active" } else { "" },
-                    title: "the whole Qobuz catalogue",
-                    onclick: move |_| pick(Source::Qobuz),
-                    "qobuz"
+                    class: if source == Source::Catalogue { "active" } else { "" },
+                    title: "the whole {provider_title} catalogue",
+                    onclick: move |_| pick(Source::Catalogue),
+                    "{provider_title.to_lowercase()}"
                 }
             }
         }
@@ -1190,27 +1191,27 @@ fn BrowseScreen() -> Element {
     // tracks, including ones the space section happens to be showing.
     let shelf_tracks = shelf.visible_tracks(&blocklist);
     let (liked_only, liked) = library.liked_state();
-    let tracks = qobuz_only(shelf_tracks.clone(), &space_ids(&library, &space));
+    let tracks = catalogue_only(shelf_tracks.clone(), &space_ids(&library, &space));
     let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
         tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
     } else {
         tracks
     };
     let albums = shelf.visible_albums(&blocklist);
-    let albums: Vec<crate::qobuz::RemoteAlbum> = if liked_only {
+    let albums: Vec<crate::catalogue::RemoteAlbum> = if liked_only {
         albums.into_iter().filter(|a| liked.albums.contains(&a.id)).collect()
     } else {
         albums
     };
     let artists = shelf.visible_artists(&blocklist, false);
-    let artists: Vec<crate::qobuz::RemoteArtist> = if liked_only {
+    let artists: Vec<crate::catalogue::RemoteArtist> = if liked_only {
         artists.into_iter().filter(|a| liked.artists.contains(&a.id)).collect()
     } else {
         artists
     };
-    let nothing_from_qobuz =
+    let nothing_from_catalogue =
         tracks.is_empty() && albums.is_empty() && artists.is_empty() && shelf.playlists.is_empty();
-    let nothing_visible = nothing_from_qobuz && (!show_space || space.0.read().1 == 0);
+    let nothing_visible = nothing_from_catalogue && (!show_space || space.0.read().1 == 0);
     let empty_search = matches!(&view, View::Search { query, .. } if query.trim().is_empty());
 
     rsx! {
@@ -1313,7 +1314,7 @@ fn BrowseScreen() -> Element {
                 }
 
                 if mixed {
-                    if !nothing_from_qobuz || space_only {
+                    if !nothing_from_catalogue || space_only {
                         MixedRows {}
                     }
                 } else {
@@ -1502,6 +1503,7 @@ impl Item {
 /// other sort interleaves them, unless split by kind, see `Grouping`.
 #[component]
 fn MixedRows() -> Element {
+    let provider_title = use_context::<super::Provider>().title();
     let library = use_context::<Library>();
     let player = use_context::<Player>();
     let local = use_context::<LocalIds>();
@@ -1537,7 +1539,7 @@ fn MixedRows() -> Element {
                 .map(|(index, album)| Item::Album(index, album)),
         );
         items.extend(
-            qobuz_only(shelf.visible_tracks(&blocklist), &space_ids(&library, &matches))
+            catalogue_only(shelf.visible_tracks(&blocklist), &space_ids(&library, &matches))
                 .into_iter()
                 .filter(|(_, t)| !liked_only || liked.tracks.contains(&t.id))
                 .map(|(index, track)| Item::Track(index, track)),
@@ -1676,7 +1678,7 @@ fn MixedRows() -> Element {
                         }
                     },
                     Cover {
-                        url: crate::qobuz::cover_url(&row.album_id),
+                        url: row.image.clone(),
                         class: if grid { String::new() } else { "thumb".to_string() },
                     }
                     if grid {
@@ -1718,7 +1720,7 @@ fn MixedRows() -> Element {
         // where each came from. Home is all Qobuz, and a space-only search
         // is all space, so neither needs it.
         if searching && !space_only {
-            h3 { class: "shelf-head source-head", "Qobuz" }
+            h3 { class: "shelf-head source-head", "{provider_title}" }
         }
         for (heading, items) in sections {
             if !heading.is_empty() {
@@ -1750,7 +1752,7 @@ fn space_ids(library: &Library, matches: &SpaceMatches) -> std::collections::Has
 /// is what keeps it correct, renumbering after would point every menu at a
 /// different track, which is the bug `visible_tracks` itself was introduced to
 /// fix.
-fn qobuz_only(
+fn catalogue_only(
     tracks: Vec<RemoteTrack>,
     in_space: &std::collections::HashSet<i64>,
 ) -> Vec<(usize, RemoteTrack)> {
@@ -1842,11 +1844,8 @@ fn SpaceRows() -> Element {
                             open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
                         }
                     },
-                    // The space stores no art, so this is derived from the
-                    // album id. A guess that misses leaves the placeholder
-                    // tint, which is why it is worth guessing at all.
                     Cover {
-                        url: crate::qobuz::cover_url(&row.album_id),
+                        url: row.image.clone(),
                         class: if grid { String::new() } else { "thumb".to_string() },
                     }
                     // Tiles read top-down as title-then-artist everywhere
@@ -1922,7 +1921,7 @@ impl Shelf {
             .collect()
     }
 
-    pub fn visible_albums(&self, blocked: &Blocklist) -> Vec<crate::qobuz::RemoteAlbum> {
+    pub fn visible_albums(&self, blocked: &Blocklist) -> Vec<crate::catalogue::RemoteAlbum> {
         self.albums
             .iter()
             .filter(|album| !album.artist_id.is_some_and(|id| blocked.contains(id)))
@@ -1934,7 +1933,7 @@ impl Shelf {
         &self,
         blocked: &Blocklist,
         similar: bool,
-    ) -> Vec<crate::qobuz::RemoteArtist> {
+    ) -> Vec<crate::catalogue::RemoteArtist> {
         let source = if similar { &self.similar } else { &self.artists };
         source
             .iter()
@@ -1960,7 +1959,7 @@ fn TrackRows() -> Element {
     // reach. A different release of the same song stays, because fetching
     // that one is a real thing to want.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
-    let tracks = qobuz_only(tracks, &space_ids(&library, &matches));
+    let tracks = catalogue_only(tracks, &space_ids(&library, &matches));
     let (liked_only, liked) = library.liked_state();
     let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
         tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
@@ -2050,10 +2049,10 @@ fn AlbumRows() -> Element {
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let (liked_only, liked) = library.liked_state();
-    // Enumerated before filtering, same as `qobuz_only`: `index` is this
+    // Enumerated before filtering, same as `catalogue_only`: `index` is this
     // row's address into `visible_albums`, and filtering after numbering
     // would point the menu at whatever slid into a dropped row's place.
-    let albums: Vec<(usize, crate::qobuz::RemoteAlbum)> = library
+    let albums: Vec<(usize, crate::catalogue::RemoteAlbum)> = library
         .shelf
         .read()
         .visible_albums(&blocklist)
@@ -2104,8 +2103,8 @@ fn AlbumRows() -> Element {
 }
 
 /// The badge on a new release, none for a plain album.
-fn release_kind(album: &crate::qobuz::RemoteAlbum) -> Option<&'static str> {
-    use crate::qobuz::ReleaseKind;
+fn release_kind(album: &crate::catalogue::RemoteAlbum) -> Option<&'static str> {
+    use crate::catalogue::ReleaseKind;
     match album.kind? {
         ReleaseKind::Album => None,
         ReleaseKind::Ep => Some("ep"),
@@ -2125,7 +2124,7 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
     // Never for "similar artists": that section's entire point is showing
     // who you have *not* already reached, so filtering it by what is already
     // liked would just empty it.
-    let artists: Vec<(usize, crate::qobuz::RemoteArtist)> = library
+    let artists: Vec<(usize, crate::catalogue::RemoteArtist)> = library
         .shelf
         .read()
         .visible_artists(&blocklist, similar)

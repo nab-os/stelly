@@ -6027,6 +6027,7 @@ dependencies = [
  "memmap2",
  "serde",
  "serde_json",
+ "stelly-provider",
 ]
 
 [[package]]
@@ -6049,9 +6050,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "stelly-qobuz-client"
+name = "stelly-provider"
 version = "0.1.0"
-source = "git+https://github.com/nab-os/stelly-qobuz-client?tag=v0.1.0#fc732b93f93d42b9e92d8bb78df7e90cafa8d61e"
+source = "git+https://github.com/nab-os/stelly-provider?branch=main#0fcae51555f24236923fa40373ff67bed49f74d8"
 dependencies = [
  "anyhow",
  "reqwest 0.13.5",
@@ -6082,7 +6083,7 @@ dependencies = [
  "stelly-audio",
  "stelly-core",
  "stelly-mix",
- "stelly-qobuz-client",
+ "stelly-provider",
  "tokenizers",
  "tokio",
  "tokio-stream",

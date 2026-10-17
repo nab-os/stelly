@@ -71,8 +71,8 @@ RUN set -eu; \
 
 # The corpus, the space, the device tokens and the model weights all live in
 # /data, it is the only thing here worth a backup. /cache holds fetched
-# excerpts, evicted as analyse runs. Qobuz credentials are the stelly-qobuz
-# gateway's, in its own image.
+# excerpts, evicted as analyse runs. Catalogue credentials are the music
+# provider's, in its own image.
 ENV HOME=/home/stelly \
     STELLY_DATA_DIR=/data \
     STELLY_ENV_DIR=/data \

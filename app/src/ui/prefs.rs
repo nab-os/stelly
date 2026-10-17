@@ -8,8 +8,8 @@
 
 use super::library::{Grouping, TracksView, ViewKind};
 use crate::client_data_dir;
-use crate::qobuz::{FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
-use serde::{Deserialize, Serialize};
+use crate::catalogue::Quality;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -18,7 +18,8 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Prefs {
-    pub quality: Option<u32>,
+    #[serde(deserialize_with = "quality")]
+    pub quality: Option<Quality>,
     pub layouts: HashMap<ViewKind, TracksView>,
     /// Mixed views in one list, or split by kind.
     pub grouping: Grouping,
@@ -47,11 +48,9 @@ impl Prefs {
             .unwrap_or_default()
     }
 
-    /// The stored quality, if it is one this build can still ask for.
-    pub fn quality(&self) -> u32 {
-        self.quality
-            .filter(|q| [FORMAT_MP3_320, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES].contains(q))
-            .unwrap_or(FORMAT_MP3_320)
+    /// The stored quality, lossy if none.
+    pub fn quality(&self) -> Quality {
+        self.quality.unwrap_or_default()
     }
 
     pub fn checks_releases(&self) -> bool {
@@ -80,6 +79,22 @@ pub fn update(change: impl FnOnce(&mut Prefs)) {
     }
 }
 
+/// A quality by name, or as builds before 1.2 stored it: the format ids of
+/// Qobuz, the only provider there was. Anything else is none, rather than a
+/// file that fails to load.
+fn quality<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Quality>, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(n) => match n.as_u64() {
+            Some(5) => Some(Quality::Lossy),
+            Some(6) => Some(Quality::Lossless),
+            Some(7 | 27) => Some(Quality::Hires),
+            _ => None,
+        },
+        serde_json::Value::String(name) => name.parse().ok(),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,7 +102,7 @@ mod tests {
     #[test]
     fn round_trips_through_json() {
         let mut prefs = Prefs {
-            quality: Some(FORMAT_FLAC_CD),
+            quality: Some(Quality::Lossless),
             ..Prefs::default()
         };
         prefs.layouts.insert(ViewKind::Mixed, TracksView::List);
@@ -101,17 +116,18 @@ mod tests {
     #[test]
     fn partial_file_keeps_defaults() {
         let prefs: Prefs = serde_json::from_str(r#"{"layouts":{"albums":"list"}}"#).unwrap();
-        assert_eq!(prefs.quality(), FORMAT_MP3_320);
+        assert_eq!(prefs.quality(), Quality::Lossy);
         assert_eq!(prefs.layouts.get(&ViewKind::Albums), Some(&TracksView::List));
         assert_eq!(prefs.grouping, Grouping::Mixed);
     }
 
     #[test]
-    fn unknown_quality_falls_back() {
-        let prefs = Prefs {
-            quality: Some(99),
-            ..Prefs::default()
-        };
-        assert_eq!(prefs.quality(), FORMAT_MP3_320);
+    fn older_and_unknown_qualities_load() {
+        let quality = |text: &str| serde_json::from_str::<Prefs>(text).unwrap().quality();
+        assert_eq!(quality(r#"{"quality":6}"#), Quality::Lossless);
+        assert_eq!(quality(r#"{"quality":7}"#), Quality::Hires);
+        assert_eq!(quality(r#"{"quality":"hires"}"#), Quality::Hires);
+        assert_eq!(quality(r#"{"quality":99}"#), Quality::Lossy);
+        assert_eq!(quality(r#"{"quality":null}"#), Quality::Lossy);
     }
 }

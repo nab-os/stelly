@@ -11,7 +11,7 @@ use super::clap::{self, AudioEncoder};
 use super::descriptors::{self, Descriptors};
 use super::{models, Job, Paths};
 use crate::db::{self, not_blocked, utc_now};
-use crate::qobuz::{QobuzClient, FORMAT_MP3_320};
+use crate::provider::{Provider, Quality};
 use crate::schema::{failures, features, tracks};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
@@ -261,7 +261,7 @@ fn cpus() -> usize {
 
 /// Fetch one excerpt, from the cache when it is there.
 async fn fetch(
-    client: &QobuzClient,
+    client: &Provider,
     http: &reqwest::Client,
     cache: &AudioCache,
     track: &Pending,
@@ -272,10 +272,20 @@ async fn fetch(
     if let Some(seconds) = track.duration.filter(|&d| d < audio::MIN_TRACK_SECONDS) {
         anyhow::bail!("track too short to analyse ({seconds}s)");
     }
-    // Only the signed URL costs a request against the account; the excerpt
-    // itself comes from the CDN.
-    let url = client.file_url(track.id, FORMAT_MP3_320).await?;
-    let bytes = audio::fetch_excerpt(http, &url, track.duration).await?;
+    // Only the URL costs a request against the account; the audio itself
+    // comes from wherever it points.
+    let file = client.file(track.id, Quality::Lossy).await?;
+    let mp3 = file.mime_type.as_deref().is_none_or(|mime| mime.contains("mpeg") || mime.contains("mp3"));
+    let bytes = if file.constant_bitrate.is_some() && mp3 {
+        // A byte range is a time range: only the middle is fetched.
+        audio::fetch_excerpt(http, &file.url, track.duration).await?
+    } else {
+        let whole = audio::fetch_whole(http, &file.url).await?;
+        let mime = file.mime_type.clone();
+        tokio::task::spawn_blocking(move || audio::excerpt_of_whole(whole, mime.as_deref()))
+            .await
+            .context("cutting the excerpt")??
+    };
     cache.put(track.id, &bytes)?;
     Ok(bytes)
 }
@@ -308,7 +318,7 @@ pub async fn run(paths: &Paths, options: &Options, job: &Job) -> Result<Stats> {
     ));
 
     // Behind browsing at the gateway: a search goes ahead of the backlog.
-    let client = QobuzClient::from_env(&paths.env_dir).bulk();
+    let client = Provider::from_env(&paths.env_dir).bulk();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()?;

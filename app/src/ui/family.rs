@@ -146,7 +146,7 @@ pub fn FamilyRow() -> Element {
             }
             p { class: "muted",
                 if admin && has_people {
-                    "Each person has their own devices, queue and likes; the Qobuz account and the space are everyone's. "
+                    "Each person has their own devices, queue and likes; the music account and the space are everyone's. "
                 }
                 "Every device has its own token, so one can be revoked without re-pairing the rest."
             }

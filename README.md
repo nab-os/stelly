@@ -5,8 +5,9 @@ distance approximates perceptual similarity, so recommendation becomes geometry:
 the nearest neighbours of a track, a path that morphs from A to B, or a drift in
 a direction you describe in words.
 
-Qobuz's API returns metadata only (no BPM, no key, no energy), so the acoustic
-half of every vector is computed from the audio itself.
+A music catalogue's metadata stops at titles, credits and genres (no BPM, no
+key, no energy), so the acoustic half of every vector is computed from the
+audio itself.
 
 ![Favourites in the Stelly desktop app](docs/favourites.png)
 
@@ -25,18 +26,18 @@ area, from its own floating button.
 
 ## Shape of the system
 
-Two programs, one of each side of a socket, and Qobuz behind a third:
-stelly-qobuz, the gateway that holds the account, its credentials and its
-one 2/s request queue, which anything else on the machine that talks to
-Qobuz, stelly-mix say, shares. Its code is private; its image is
-[`stellymusic/stelly-qobuz`](https://hub.docker.com/r/stellymusic/stelly-qobuz),
-and the client Stelly talks to it with is
-[public](https://github.com/nab-os/stelly-qobuz-client).
+Two programs, one of each side of a socket, and the music behind a third: a
+**provider**, a small service in front of a catalogue that answers the
+[provider protocol](https://github.com/nab-os/stelly-provider): search, a
+track, an album, an artist and their discography, and where a track's audio
+is. Stelly asks those and never learns what is behind them. A provider holds
+whatever account its catalogue needs, and rations requests to it for
+everything on the machine.
 
 ```
   stelly-server                                stelly (desktop, Android)
   ─────────────                                ─────────────────────────────
-  Qobuz through stelly-qobuz                   neighbours · radio · path · drift
+  the music through a provider                 neighbours · radio · path · drift
   crawl       likes → similar artists            → asked of the server
   analyse     middle 90s of each track         map, library, playback
                 → CLAP (ONNX) + descriptors    caches the index, the map and
@@ -94,22 +95,21 @@ sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
 The server needs none of it: it depends on `stelly-core`, the half the two
 share, not on the app, which keeps dioxus, wry and GTK out.
 
-### Qobuz
+### The provider
 
-The server asks Qobuz for nothing itself: the stelly-qobuz gateway does, for
-every program on the machine, from one account and one request queue.
-Signing in is its business, on a machine with a browser:
+The server asks a catalogue for nothing itself: its provider does, for every
+program on the machine. Stelly finds it at `STELLY_PROVIDER_URL` (default
+`http://127.0.0.1:7710`), sending `STELLY_PROVIDER_TOKEN` if it is set, from
+the environment or `.env`; `stelly-server whoami` says what it found.
+`compose.yaml` runs one beside the server.
 
-```sh
-docker run --rm -it --network host -v stelly-qobuz:/data stellymusic/stelly-qobuz:v0.1.0 login
-docker run -d --network host -v stelly-qobuz:/data stellymusic/stelly-qobuz:v0.1.0 serve   # http://127.0.0.1:7710
-```
+A provider says what it can do: similar artists, which the crawl expands
+through, the account's own playlists, writing a playlist back, following new
+releases. What it cannot, Stelly does without, and the app does not offer.
 
-`compose.yaml` runs it beside the server. `refresh-credentials --write`
-re-scrapes the app secrets when the web player rotates them; a token by
-hand, where a browser cannot reach, is the web player's `localuser.token`. Stelly finds it
-at `STELLY_QOBUZ_URL` (default `http://127.0.0.1:7710`), sending
-`STELLY_QOBUZ_TOKEN` if it is set, from the environment or `.env`.
+A database from before providers kept items in Qobuz's own shapes; the
+server has the provider convert them at start, once (`stelly-server
+import` does it by hand).
 
 ## Running the pipeline
 
@@ -143,9 +143,8 @@ and rebuild, no re-analysis.
 
 ### Crawling
 
-Seeds from everyone's likes, then expands outward through
-`artist/getSimilarArtists`. The likes keep the Qobuz objects they were made
-from, so seeding costs no requests; the app's crawl button seeds too, so a
+Seeds from everyone's likes, then expands outward through the provider's
+similar artists. The likes keep the items they were made from, so seeding costs no requests; the app's crawl button seeds too, so a
 like made since the last crawl is in it.
 
 ```sh
@@ -173,7 +172,7 @@ what is asked, never the whole catalogue:
 ```sh
 stelly-server mix-analyse --album <id>                   # catalogued first if need be
 stelly-server mix-analyse --artist <id>                  # or --track <id>
-stelly-server mix-analyse --playlist <id>                # a Qobuz playlist's tracks
+stelly-server mix-analyse --playlist <id>                # a provider playlist's tracks
 stelly-server mix-analyse --favourites                   # the family's liked tracks and albums
 stelly-server mix-analyse --mood "dark rolling techno" --count 200
 stelly-server mix-analyse --around <track id> --count 50 # a track and its nearest in the space
@@ -215,7 +214,7 @@ address and token once and remembers them.
 
 Two views, switched from the header, over a transport bar that stays put.
 
-**Explore** is three columns: Qobuz live on the left, the map in the middle, the
+**Explore** is three columns: the catalogue live on the left, the map in the middle, the
 analysed space on the right. Clicking a track plays it and makes the list you
 clicked in the queue. **in space** selects an analysed track on the map;
 **fetch** pulls an album's tracklist, or an artist's discography, into the
@@ -238,10 +237,10 @@ sliders change which tracks are near each other, not where the dots sit.
 log. A stage started from a client **outlives that client**, start `analyse`
 from a phone and walk away, so **stop** is the only thing that ends one early.
 
-**Playback** offers MP3 320, FLAC 16/44 or FLAC hi-res, streamed from Qobuz
-straight to the device.
+**Playback** offers lossy, CD quality or hi-res, as far as the provider
+has them, streamed from wherever it says straight to the device.
 
-To try the app without Qobuz, build a synthetic corpus, eight fake albums run
+To try the app without a provider, build a synthetic corpus, eight fake albums run
 through the real pipeline, and serve that:
 
 ```sh
@@ -272,7 +271,7 @@ Hiding filters rather than deletes, which is what lets a block take effect
 immediately and be undone. `block --purge` deletes the tracks, features and
 albums instead; re-run `build-space` and `layout` afterwards.
 
-The match is on `artists.id`, so a featured credit that Qobuz files under a
+The match is on `artists.id`, so a featured credit that the provider files under a
 different artist id can still surface, block those ids too. An ambiguous name
 refuses to act rather than guessing.
 
@@ -297,18 +296,18 @@ stelly-server revoke 3
 ### A family
 
 One server is sized for a family: a few people who trust each other, sharing
-the one Qobuz account. It is not meant to be a public server, and nothing in
+the one music account. It is not meant to be a public server, and nothing in
 it tries to be.
 
 Each person has their own devices, their own queue and their own likes. The
 speaker in the living room only answers to the queue it was picked from, and
-nobody sees anyone else's likes. What is shared is the Qobuz account and its
+nobody sees anyone else's likes. What is shared is the music account and its
 2 requests a second, though browsing goes ahead of a crawl in its queue,
 its playlists, and the space, which the crawl grows from the whole
 family's likes. Playlists exported from the app are named after whoever
 exported them.
 
-Likes are kept by Stelly and never written to Qobuz, and start empty: the
+Likes are kept by Stelly and never written to the provider, and start empty: the
 account's own favourites are not brought in.
 
 ```sh
@@ -354,11 +353,11 @@ loopback property above: the bind has to be `0.0.0.0` to be reachable across
 the container boundary at all, so it is the *published* port that is
 restricted.
 
-Qobuz credentials are not this image's at all: the gateway holds them, in an
-image of its own, and [`compose.yaml`](compose.yaml) runs the two side by
+Catalogue credentials are not this image's at all: the provider holds them,
+in an image of its own, and [`compose.yaml`](compose.yaml) runs the two side by
 side. The corpus, the space, the device tokens and the model weights all live
 in the `/data` volume, which is the only thing here worth a backup, with the
-gateway's own.
+provider's own.
 
 ## Android
 

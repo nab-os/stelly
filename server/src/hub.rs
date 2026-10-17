@@ -1,5 +1,5 @@
-//! Everything the server does on its own disk and account: Qobuz, the block
-//! list, the crawl loop and the pipeline driver. The routes are a thin skin
+//! Everything the server does on its own disk and account: the music
+//! provider, the block list, the crawl loop and the pipeline driver. The routes are a thin skin
 //! over this.
 //!
 //! The crawl and the stages publish a status that clients poll, because a
@@ -7,7 +7,7 @@
 
 use crate::cache::Cache;
 use crate::pipeline::{progress_of, Job, Paths, ProgressSlot};
-use crate::qobuz::{QobuzClient, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use crate::provider::{Capabilities, Provider, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
@@ -34,7 +34,7 @@ fn released_within(albums: Vec<RemoteAlbum>, days: u32) -> Vec<RemoteAlbum> {
         .as_secs();
     let since = db::utc_at(now.saturating_sub(u64::from(days) * 86_400));
     let until = db::utc_at(now);
-    stelly_core::qobuz::recent_releases(albums, &since[..10], &until[..10])
+    stelly_core::catalogue::recent_releases(albums, &since[..10], &until[..10])
 }
 
 /// Every liked artist counts towards recent releases, however many.
@@ -48,18 +48,18 @@ pub struct Hub {
     env_dir: PathBuf,
     db_path: PathBuf,
     model_dir: PathBuf,
-    /// Built on first use. The gateway holds the account; without it,
-    /// browsing the space still works, and only reaching for Qobuz fails.
-    client: OnceLock<QobuzClient>,
+    /// Built on first use. The provider holds the account; without it,
+    /// browsing the space still works, and only reaching for it fails.
+    client: OnceLock<Provider>,
     /// Albums, artists, discographies: they change on the scale of weeks.
     catalogue: Cache,
     /// Short, since the same words find new releases.
     searches: Cache,
-    /// Playlists, which the account can change from any Qobuz client.
+    /// Playlists, which the account can change from anywhere else.
     /// Cleared on our own writes, and short for everyone else's.
     account: Cache,
     /// Each liked artist's newest releases. Outlives the background check's
-    /// interval, which overwrites it, so a client never waits on Qobuz for an
+    /// interval, which overwrites it, so a client never waits on the provider for an
     /// artist that check has seen.
     releases: Cache,
     /// Loaded on first use and kept. `None` inside means the tower has not
@@ -167,18 +167,48 @@ impl Hub {
         &self.space
     }
 
-    /// The gateway's client, built on first reach. Clones share it; the
-    /// gateway queues every device's requests on the account's one budget.
-    fn qobuz(&self) -> QobuzClient {
-        self.client.get_or_init(|| QobuzClient::from_env(&self.env_dir)).clone()
+    /// The provider's client, built on first reach. Clones share it; the
+    /// provider queues every device's requests on the account's one budget.
+    fn provider(&self) -> Provider {
+        self.client.get_or_init(|| Provider::from_env(&self.env_dir)).clone()
     }
 
     /// The client for a device's reads, which queue as interactive.
-    async fn session(&self) -> Result<QobuzClient> {
-        Ok(self.qobuz())
+    async fn session(&self) -> Result<Provider> {
+        Ok(self.provider())
     }
 
     // -------------------------------------------------------------- browsing
+
+    /// Convert what an earlier Stelly stored in the provider's own shapes,
+    /// in the background: a few minutes on a large catalogue, once. Until it
+    /// is done, likes from before it are missing and the space has fewer
+    /// covers. On a thread of its own, since it holds the database across
+    /// requests to the provider.
+    pub fn import_legacy(self: &Arc<Self>) {
+        let hub = self.clone();
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+            let report = |line: String| hub.log.push(line);
+            match runtime.block_on(crate::import::run(&hub.db_path, &hub.provider().bulk(), &report)) {
+                Ok(done) if done.converted > 0 => {
+                    hub.log.push(format!("imported {} stored items, {} dropped", done.converted, done.dropped));
+                    if let Err(err) = hub.space.reload() {
+                        hub.log.push(format!("reloading the space after the import failed: {err:#}"));
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => hub.log.push(format!("importing stored items failed, retried at the next start: {err:#}")),
+            }
+        });
+    }
+
+    /// What the provider is and can do; it does not change while it runs.
+    pub async fn capabilities(&self) -> Result<Capabilities> {
+        self.catalogue
+            .get_or("capabilities".to_string(), async { self.provider().capabilities().await })
+            .await
+    }
 
     pub async fn search(&self, query: &str, limit: usize) -> Result<SearchResults> {
         let key = format!("search:{limit}:{query}");
@@ -188,14 +218,13 @@ impl Hub {
     }
 
     /// One person's likes, from the database alone. Named favourites on the
-    /// wire, which is what they were when they were Qobuz's.
+    /// wire, which is what they were when they were the account's.
     pub async fn favourite_tracks(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
         Ok(likes::list(&self.db_path, user_id, "track", cap)?
             .into_iter()
-            .filter_map(|(item, liked_at)| {
-                let mut track = RemoteTrack::parse(&item, None)?;
+            .map(|(mut track, liked_at): (RemoteTrack, i64)| {
                 track.liked_at = Some(liked_at);
-                Some(track)
+                track
             })
             .collect())
     }
@@ -203,10 +232,9 @@ impl Hub {
     pub async fn favourite_albums(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         Ok(likes::list(&self.db_path, user_id, "album", cap)?
             .into_iter()
-            .filter_map(|(item, liked_at)| {
-                let mut album = RemoteAlbum::parse(&item)?;
+            .map(|(mut album, liked_at): (RemoteAlbum, i64)| {
                 album.liked_at = Some(liked_at);
-                Some(album)
+                album
             })
             .collect())
     }
@@ -214,10 +242,9 @@ impl Hub {
     pub async fn favourite_artists(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteArtist>> {
         Ok(likes::list(&self.db_path, user_id, "artist", cap)?
             .into_iter()
-            .filter_map(|(item, liked_at)| {
-                let mut artist = RemoteArtist::parse(&item)?;
+            .map(|(mut artist, liked_at): (RemoteArtist, i64)| {
                 artist.liked_at = Some(liked_at);
-                Some(artist)
+                artist
             })
             .collect())
     }
@@ -257,7 +284,7 @@ impl Hub {
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         self.catalogue
             .get_or(format!("artist_albums:{artist_id}:{cap}"), async {
-                Ok(self.session().await?.artist_albums(artist_id, cap).await?)
+                self.session().await?.artist_albums(artist_id, cap).await
             })
             .await
     }
@@ -288,8 +315,10 @@ impl Hub {
         let liked = likes::family(&mut db::connect(&self.db_path, Duration::from_secs(5))?)?;
         let artists = liked
             .into_iter()
-            .filter(|(kind, _)| kind == "artist")
-            .filter_map(|(_, item)| Some(RemoteArtist::parse(&item)?.id))
+            .filter_map(|liked| match liked {
+                likes::Liked::Artist(artist) => Some(artist.id),
+                _ => None,
+            })
             .collect();
         let artists = self.unblocked(artists)?;
         let checked = artists.len();
@@ -375,8 +404,8 @@ impl Hub {
     // -------------------------------------------------------------- playback
 
     /// Never cached, the URL is signed and expires.
-    pub async fn file_url(&self, track_id: i64, format_id: u32) -> Result<String> {
-        self.qobuz().file_url(track_id, format_id).await
+    pub async fn file_url(&self, track_id: i64, quality: Quality) -> Result<String> {
+        self.provider().file_url(track_id, quality).await
     }
 
     /// Under the name of whoever made it, so the account's playlist list
@@ -391,28 +420,22 @@ impl Hub {
     // ------------------------------------------------------------ likes
 
     /// Fetch the item once, so the like can be listed and crawled without
-    /// asking Qobuz again. An album's tracklist is left out: the crawl
-    /// fetches it when it expands the album.
+    /// asking the provider again. An album's tracklist is left out: the
+    /// crawl fetches it when it expands the album.
     pub async fn favorite_add(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
         let item = match kind {
             "track" => {
                 let track_id = id.parse().with_context(|| format!("“{id}” is not a track id"))?;
-                self.session().await?.track_raw(track_id).await?
+                likes::Liked::Track(self.session().await?.track(track_id).await?)
             }
-            "album" => {
-                let mut album = self.session().await?.album_raw(id).await?;
-                if let Some(object) = album.as_object_mut() {
-                    object.remove("tracks");
-                }
-                album
-            }
+            "album" => likes::Liked::Album(self.session().await?.album(id).await?.album),
             "artist" => {
                 let artist_id = id.parse().with_context(|| format!("“{id}” is not an artist id"))?;
-                self.session().await?.artist_raw(artist_id).await?
+                likes::Liked::Artist(self.session().await?.artist(artist_id).await?)
             }
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };
-        likes::record(&self.db_path, user_id, kind, id, &item, likes::now())
+        likes::record(&self.db_path, user_id, id, &item, likes::now())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
@@ -787,7 +810,7 @@ async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance
     // This thread's own connection and client: a client's connections belong
     // to the runtime that made them.
     let mut conn = db::open_for_write(db_path).context("opening the database")?;
-    let mut client = QobuzClient::from_env(env_dir).bulk();
+    let mut client = Provider::from_env(env_dir).bulk();
 
     // From the database alone, so likes made since the last crawl are in
     // the frontier before it carries on.

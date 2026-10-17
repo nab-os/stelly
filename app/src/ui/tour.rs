@@ -27,7 +27,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "Home and search",
-        body: "Home is everything you have liked. The magnifier searches the whole Qobuz \
+        body: "Home is everything you have liked. The magnifier searches the whole \
                catalogue, or only what is already in your space, and keeps your recent \
                searches for when the box is empty.",
         targets: &[".topbar"],

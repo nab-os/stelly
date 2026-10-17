@@ -1,17 +1,17 @@
 //! Catalogue crawler.
 //!
 //! Seeds from the family's likes at seed_distance 0, then expands through
-//! `artist/getSimilarArtists`. The frontier lives in SQLite, so the crawl is
-//! interruptible.
+//! the provider's similar artists. The frontier lives in SQLite, so the
+//! crawl is interruptible.
 
 use crate::db::{coalesce, least};
 use crate::pipeline::Job;
-use crate::qobuz::QobuzClient;
+use crate::likes::Liked;
+use crate::provider::{Provider, RemoteAlbum, RemoteArtist, RemoteTrack};
 use crate::schema::{albums, artists, blocked_artists, frontier, tracks};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
 use diesel::upsert::excluded;
-use serde_json::Value;
 use std::collections::HashSet;
 use stelly_core::api::Target;
 
@@ -29,74 +29,58 @@ fn now() -> String {
     crate::db::utc_now()
 }
 
-fn text(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn as_i64(value: &Value, key: &str) -> Option<i64> {
-    match value.get(key) {
-        Some(Value::Number(n)) => n.as_i64(),
-        Some(Value::String(s)) => s.parse().ok(),
-        _ => None,
-    }
-}
-
-fn as_id_string(value: &Value, key: &str) -> Option<String> {
-    match value.get(key) {
-        Some(Value::Number(n)) => Some(n.to_string()),
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    }
-}
-
 // ------------------------------------------------------------------ upserts
 //
-// COALESCE keeps stored values when a sparser payload for the same entity
-// arrives, a stub artist inside a track versus a full artist/get.
+// COALESCE keeps stored values when a sparser description of the same
+// entity arrives: an artist named inside a track, against one fetched whole.
 
-pub fn upsert_artist(conn: &mut SqliteConnection, artist: &Value) -> Result<Option<i64>> {
-    let Some(id) = as_i64(artist, "id") else {
-        return Ok(None);
-    };
+fn meta(value: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_string(value).ok()
+}
+
+/// An artist, whole when `full`, or only an id and a name.
+pub fn upsert_artist(conn: &mut SqliteConnection, artist: &RemoteArtist, full: bool) -> Result<i64> {
     diesel::insert_into(artists::table)
         .values((
-            artists::id.eq(id),
-            artists::name.eq(text(artist, "name").unwrap_or_else(|| "Unknown Artist".into())),
-            artists::qobuz_json.eq(artist.to_string()),
+            artists::id.eq(artist.id),
+            artists::name.eq(&artist.name),
+            artists::meta_json.eq(full.then(|| meta(artist)).flatten()),
         ))
         .on_conflict(artists::id)
         .do_update()
         .set((
             artists::name.eq(excluded(artists::name)),
-            artists::qobuz_json.eq(coalesce(excluded(artists::qobuz_json), artists::qobuz_json)),
+            artists::meta_json.eq(coalesce(excluded(artists::meta_json), artists::meta_json)),
         ))
         .execute(conn)?;
-    Ok(Some(id))
+    Ok(artist.id)
 }
 
-pub fn upsert_album(conn: &mut SqliteConnection, album: &Value) -> Result<Option<String>> {
-    let Some(id) = as_id_string(album, "id") else {
-        return Ok(None);
-    };
-    let artist_id = match album.get("artist") {
-        Some(artist) => upsert_artist(conn, artist)?,
-        None => None,
-    };
+/// The artist a track or an album names, if it names one.
+fn named_artist(conn: &mut SqliteConnection, id: Option<i64>, name: &str) -> Result<Option<i64>> {
+    match id {
+        Some(id) => {
+            let name = if name.is_empty() { "Unknown Artist" } else { name };
+            let stub = RemoteArtist { id, name: name.to_string(), ..Default::default() };
+            Ok(Some(upsert_artist(conn, &stub, false)?))
+        }
+        None => Ok(None),
+    }
+}
 
+/// An album, whole when `full`, or only what a track says of it.
+pub fn upsert_album(conn: &mut SqliteConnection, album: &RemoteAlbum, full: bool) -> Result<()> {
+    let artist_id = named_artist(conn, album.artist_id, &album.artist)?;
     diesel::insert_into(albums::table)
         .values((
-            albums::id.eq(&id),
+            albums::id.eq(&album.id),
             albums::artist_id.eq(artist_id),
-            albums::title.eq(text(album, "title").unwrap_or_else(|| "Unknown Album".into())),
-            albums::release_date
-                .eq(text(album, "release_date_original").or_else(|| text(album, "released_at"))),
-            albums::label.eq(album.get("label").and_then(|l| l.get("name")).and_then(|v| v.as_str())),
-            albums::genre.eq(album.get("genre").and_then(|g| g.get("name")).and_then(|v| v.as_str())),
-            albums::qobuz_json.eq(album.to_string()),
+            albums::title.eq(&album.title),
+            albums::release_date.eq(&album.released),
+            albums::label.eq(&album.label),
+            albums::genre.eq(&album.genre),
+            albums::image.eq(&album.image),
+            albums::meta_json.eq(full.then(|| meta(album)).flatten()),
         ))
         .on_conflict(albums::id)
         .do_update()
@@ -106,49 +90,46 @@ pub fn upsert_album(conn: &mut SqliteConnection, album: &Value) -> Result<Option
             albums::release_date.eq(coalesce(excluded(albums::release_date), albums::release_date)),
             albums::label.eq(coalesce(excluded(albums::label), albums::label)),
             albums::genre.eq(coalesce(excluded(albums::genre), albums::genre)),
-            albums::qobuz_json.eq(coalesce(excluded(albums::qobuz_json), albums::qobuz_json)),
+            albums::image.eq(coalesce(excluded(albums::image), albums::image)),
+            albums::meta_json.eq(coalesce(excluded(albums::meta_json), albums::meta_json)),
         ))
         .execute(conn)?;
-    Ok(Some(id))
+    Ok(())
 }
 
+/// A track, its album with it if the catalogue has none yet. `artist_id`,
+/// when given, is the album's artist, which a track in an album's tracklist
+/// is filed under; otherwise it is the track's own performer.
 pub fn upsert_track(
     conn: &mut SqliteConnection,
-    track: &Value,
-    album_id: Option<&str>,
+    track: &RemoteTrack,
     artist_id: Option<i64>,
     seed_distance: i64,
-) -> Result<Option<i64>> {
-    let Some(id) = as_i64(track, "id") else {
-        return Ok(None);
-    };
-
-    let album_id = match (album_id, track.get("album")) {
-        (Some(given), _) => Some(given.to_string()),
-        (None, Some(album)) => upsert_album(conn, album)?,
-        (None, None) => None,
-    };
-
+) -> Result<i64> {
+    if let Some(album_id) = &track.album_id {
+        let stub = RemoteAlbum {
+            id: album_id.clone(),
+            title: if track.album.is_empty() { "Unknown Album".into() } else { track.album.clone() },
+            released: track.released.clone(),
+            image: track.image.clone(),
+            ..Default::default()
+        };
+        upsert_album(conn, &stub, false)?;
+    }
     let artist_id = match artist_id {
         Some(given) => Some(given),
-        None => {
-            let performer = track.get("performer").or_else(|| track.get("artist"));
-            match performer {
-                Some(value) => upsert_artist(conn, value)?,
-                None => None,
-            }
-        }
+        None => named_artist(conn, track.artist_id, &track.artist)?,
     };
 
     diesel::insert_into(tracks::table)
         .values((
-            tracks::id.eq(id),
-            tracks::album_id.eq(album_id),
+            tracks::id.eq(track.id),
+            tracks::album_id.eq(&track.album_id),
             tracks::artist_id.eq(artist_id),
-            tracks::title.eq(text(track, "title").unwrap_or_else(|| "Unknown Track".into())),
-            tracks::duration.eq(as_i64(track, "duration")),
-            tracks::isrc.eq(text(track, "isrc")),
-            tracks::qobuz_json.eq(track.to_string()),
+            tracks::title.eq(&track.title),
+            tracks::duration.eq(track.duration),
+            tracks::isrc.eq(&track.isrc),
+            tracks::meta_json.eq(meta(track)),
             tracks::seed_distance.eq(seed_distance),
         ))
         .on_conflict(tracks::id)
@@ -159,12 +140,12 @@ pub fn upsert_track(
             tracks::title.eq(excluded(tracks::title)),
             tracks::duration.eq(coalesce(excluded(tracks::duration), tracks::duration)),
             tracks::isrc.eq(coalesce(excluded(tracks::isrc), tracks::isrc)),
-            tracks::qobuz_json.eq(coalesce(excluded(tracks::qobuz_json), tracks::qobuz_json)),
+            tracks::meta_json.eq(coalesce(excluded(tracks::meta_json), tracks::meta_json)),
             // Keep the shortest known distance to a like.
             tracks::seed_distance.eq(least(tracks::seed_distance, excluded(tracks::seed_distance))),
         ))
         .execute(conn)?;
-    Ok(Some(id))
+    Ok(track.id)
 }
 
 // ----------------------------------------------------------------- frontier
@@ -242,37 +223,33 @@ fn is_blocked(conn: &mut SqliteConnection, kind: &str, ref_id: &str, blocked: &H
 
 /// Load everything the family likes into the catalogue at seed_distance 0.
 ///
-/// The likes keep the Qobuz objects they were made from, so this asks Qobuz
+/// The likes keep the items they were made from, so this asks the provider
 /// for nothing; the frontier it fills is what does.
 pub fn seed(conn: &mut SqliteConnection) -> Result<Stats> {
     let mut stats = Stats::default();
 
-    for (kind, item) in crate::likes::family(conn)? {
-        match kind.as_str() {
-            "track" => {
-                if upsert_track(conn, &item, None, None, 0)?.is_some() {
-                    stats.tracks_added += 1;
-                    if let Some(id) = item.get("performer").and_then(|p| as_i64(p, "id")) {
-                        enqueue(conn, "artist", &id.to_string(), 0)?;
-                    }
-                }
-            }
-            "album" => {
-                if let Some(album_id) = upsert_album(conn, &item)? {
-                    stats.albums_expanded += 1;
-                    enqueue(conn, "album", &album_id, 0)?;
-                    if let Some(id) = item.get("artist").and_then(|a| as_i64(a, "id")) {
-                        enqueue(conn, "artist", &id.to_string(), 0)?;
-                    }
-                }
-            }
-            "artist" => {
-                if let Some(id) = upsert_artist(conn, &item)? {
-                    stats.artists_expanded += 1;
+    for liked in crate::likes::family(conn)? {
+        match liked {
+            Liked::Track(track) => {
+                upsert_track(conn, &track, None, 0)?;
+                stats.tracks_added += 1;
+                if let Some(id) = track.artist_id {
                     enqueue(conn, "artist", &id.to_string(), 0)?;
                 }
             }
-            _ => {}
+            Liked::Album(album) => {
+                upsert_album(conn, &album, true)?;
+                stats.albums_expanded += 1;
+                enqueue(conn, "album", &album.id, 0)?;
+                if let Some(id) = album.artist_id {
+                    enqueue(conn, "artist", &id.to_string(), 0)?;
+                }
+            }
+            Liked::Artist(artist) => {
+                upsert_artist(conn, &artist, true)?;
+                stats.artists_expanded += 1;
+                enqueue(conn, "artist", &artist.id.to_string(), 0)?;
+            }
         }
     }
 
@@ -284,15 +261,14 @@ pub fn seed(conn: &mut SqliteConnection) -> Result<Stats> {
 /// Pull an artist's albums, and enqueue their similar artists one hop further out.
 pub async fn expand_artist(
     conn: &mut SqliteConnection,
-    client: &mut QobuzClient,
+    client: &mut Provider,
     artist_id: i64,
     distance: i64,
     max_distance: i64,
 ) -> Result<()> {
-    for album in client.artist_albums_raw(artist_id, 1000).await? {
-        if let Some(album_id) = upsert_album(conn, &album)? {
-            enqueue(conn, "album", &album_id, distance)?;
-        }
+    for album in client.artist_albums(artist_id, 1000).await? {
+        upsert_album(conn, &album, true)?;
+        enqueue(conn, "album", &album.id, distance)?;
     }
 
     diesel::update(artists::table.find(artist_id))
@@ -301,13 +277,12 @@ pub async fn expand_artist(
 
     if distance < max_distance {
         let blocked = blocked_ids(conn)?;
-        for similar in client.similar_artists_raw(artist_id, 50).await? {
-            if let Some(id) = upsert_artist(conn, &similar)? {
-                // A blocked artist is a dead end, not just a hidden one:
-                // following them would pull their whole neighbourhood in.
-                if !blocked.contains(&id) {
-                    enqueue(conn, "artist", &id.to_string(), distance + 1)?;
-                }
+        for similar in client.similar_artists(artist_id, 50).await? {
+            let id = upsert_artist(conn, &similar, true)?;
+            // A blocked artist is a dead end, not just a hidden one:
+            // following them would pull their whole neighbourhood in.
+            if !blocked.contains(&id) {
+                enqueue(conn, "artist", &id.to_string(), distance + 1)?;
             }
         }
     }
@@ -318,28 +293,16 @@ pub async fn expand_artist(
 /// Pull an album's tracklist. Returns how many tracks were written.
 pub async fn expand_album(
     conn: &mut SqliteConnection,
-    client: &mut QobuzClient,
+    client: &mut Provider,
     album_id: &str,
     distance: i64,
 ) -> Result<usize> {
-    let album = client.album_raw(album_id).await?;
-    upsert_album(conn, &album)?;
-    let artist_id = album.get("artist").and_then(|a| as_i64(a, "id"));
-
-    let mut written = 0;
-    let tracks = album
-        .get("tracks")
-        .and_then(|block| block.get("items"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
+    let (album, tracks) = client.album_tracks(album_id).await?;
+    upsert_album(conn, &album, true)?;
     for track in &tracks {
-        if upsert_track(conn, track, Some(album_id), artist_id, distance)?.is_some() {
-            written += 1;
-        }
+        upsert_track(conn, track, album.artist_id, distance)?;
     }
-    Ok(written)
+    Ok(tracks.len())
 }
 
 /// The outcome of one unit of crawl work.
@@ -360,7 +323,7 @@ pub enum StepResult {
 /// browse: the caller takes the client for one step and gives it back.
 pub async fn step(
     conn: &mut SqliteConnection,
-    client: &mut QobuzClient,
+    client: &mut Provider,
     max_tracks: i64,
     max_distance: i64,
 ) -> Result<StepResult> {
@@ -440,7 +403,7 @@ pub type Progress<'a> = &'a (dyn Fn(&Stats, i64) + Send + Sync);
 /// Work the frontier until the track budget or the distance limit is reached.
 pub async fn crawl(
     conn: &mut SqliteConnection,
-    client: &mut QobuzClient,
+    client: &mut Provider,
     max_tracks: i64,
     max_distance: i64,
     progress: Option<Progress<'_>>,
@@ -482,7 +445,7 @@ pub async fn crawl(
 /// similar-artist hop from them.
 pub async fn catalogue_target(
     conn: &mut SqliteConnection,
-    client: &mut QobuzClient,
+    client: &mut Provider,
     target: &Target,
     job: &Job,
 ) -> Result<Vec<i64>> {
@@ -497,12 +460,11 @@ pub async fn catalogue_target(
             if known.is_none() {
                 // The album first: once the track has a row, the album would
                 // look catalogued and the rest of it would never be.
-                let track = client.track_raw(*track_id).await?;
-                if let Some(album_id) = track.get("album").and_then(|a| as_id_string(a, "id")) {
-                    catalogue_album(conn, client, &album_id).await?;
+                let track = client.track(*track_id).await?;
+                if let Some(album_id) = &track.album_id {
+                    catalogue_album(conn, client, album_id).await?;
                 }
-                upsert_track(conn, &track, None, None, 0)?
-                    .with_context(|| format!("track {track_id} has no id"))?;
+                upsert_track(conn, &track, None, 0)?;
             }
             let title: String = tracks::table.find(track_id).select(tracks::title).first(conn)?;
             job.log(format!("  {title}"));
@@ -520,31 +482,25 @@ pub async fn catalogue_target(
         Target::Artist(artist_id) => {
             // Their own releases, not every album that credits them, the
             // same ones the artist page counts for its in-space badge.
-            let own: Vec<Value> = client
-                .artist_albums_raw(*artist_id, 1000)
+            let own: Vec<RemoteAlbum> = client
+                .artist_albums(*artist_id, 1000)
                 .await?
                 .into_iter()
-                .filter(|album| {
-                    album
-                        .get("artist")
-                        .and_then(|a| as_i64(a, "id"))
-                        .is_none_or(|id| id == *artist_id)
-                })
+                .filter(|album| album.artist_id.is_none_or(|id| id == *artist_id))
                 .collect();
 
             let mut album_ids = Vec::with_capacity(own.len());
             let total = own.len() as u64;
             for (n, album) in own.iter().enumerate() {
                 job.advance("catalogue", n as u64, total);
-                let Some(album_id) = upsert_album(conn, album)? else { continue };
+                upsert_album(conn, album, true)?;
                 // A region-locked album must not lose the rest.
-                if let Err(err) = catalogue_album(conn, client, &album_id).await {
-                    job.log(format!("  ! album {album_id}: {err:#}"));
+                if let Err(err) = catalogue_album(conn, client, &album.id).await {
+                    job.log(format!("  ! album {}: {err:#}", album.id));
                     continue;
                 }
-                let title = text(album, "title").unwrap_or_default();
-                job.log(format!("  {}/{} {title}", n + 1, own.len()));
-                album_ids.push(album_id);
+                job.log(format!("  {}/{} {}", n + 1, own.len(), album.title));
+                album_ids.push(album.id.clone());
             }
             enqueue(conn, "artist", &artist_id.to_string(), 0)?;
 
@@ -557,7 +513,7 @@ pub async fn catalogue_target(
 }
 
 /// An album's tracklist, unless the catalogue already has it.
-async fn catalogue_album(conn: &mut SqliteConnection, client: &mut QobuzClient, album_id: &str) -> Result<()> {
+async fn catalogue_album(conn: &mut SqliteConnection, client: &mut Provider, album_id: &str) -> Result<()> {
     if album_tracks(conn, &[album_id.to_string()])?.is_empty() {
         expand_album(conn, client, album_id, 0).await?;
     }

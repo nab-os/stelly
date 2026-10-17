@@ -20,4 +20,7 @@ diesel = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+# The catalogue's types, which the provider protocol defines. Its clients
+# stay off: only the server talks to a provider.
+stelly-provider.workspace = true
 libsqlite3-sys = { workspace = true, optional = true }

@@ -17,7 +17,7 @@ use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list
 use super::{glimpse, open_remote_track, space_track, Blocklist, LocalIds, MapView, Selection};
 use crate::api::Target;
 use crate::backend::backend;
-use crate::qobuz::RemoteTrack;
+use crate::catalogue::RemoteTrack;
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 

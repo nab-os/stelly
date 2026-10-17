@@ -448,7 +448,7 @@ button.danger:hover:not(:disabled),
 
 /* ------------------------------------------------------------------ covers
    Artwork is a background rather than an <img>, so a URL that 404s, and
-   `qobuz::cover_url` guesses some of them, leaves the placeholder tint
+   a provider's guessed covers sometimes do, leaves the placeholder tint
    instead of a broken-image glyph. Sizing is the caller's. */
 
 .cover {
