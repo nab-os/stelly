@@ -6031,8 +6031,8 @@ dependencies = [
 
 [[package]]
 name = "stelly-mix"
-version = "0.1.0"
-source = "git+https://github.com/nab-os/stelly-mix?tag=v0.1.0#ecd221a6d50ee8d3e62ee210e4c2cea2ebd3519e"
+version = "0.2.0"
+source = "git+https://github.com/nab-os/stelly-mix?tag=v0.2.0#5cbbf5ce0c3c5ccbedb98ec9b1c2f9c957e00504"
 dependencies = [
  "anyhow",
  "argh",

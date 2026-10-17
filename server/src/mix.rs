@@ -15,13 +15,13 @@ use crate::space::SpaceService;
 use anyhow::{bail, Context, Result};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Nullable, Text};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use stelly_core::logbuffer::LogBuffer;
 use stelly_core::api::{GenerateRequest, Recipe, Target};
+use stelly_mix::api::{JobStatus, Selection, Stats};
 use stelly_mix::library::Track;
 use stelly_mix::mix::Mix;
 use stelly_mix::source::{Item, Origin};
@@ -29,39 +29,15 @@ use stelly_mix::source::{Item, Origin};
 /// What a stored row was made with; rows with another are redone.
 pub const VERSION: u32 = stelly_mix::library::VERSION;
 /// Neighbours of each seed, unless asked otherwise.
-pub const AROUND: usize = 20;
+pub const AROUND: usize = stelly_mix::api::AROUND;
+/// The most tracks a playlist brings in.
+const PLAYLIST_CAP: usize = 2000;
 /// A full track at 320kbps is ~10MB; a slow CDN response gets this long.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// One worker per this many hardware threads, at most `MAX_WORKERS`: each
 /// holds an ONNX session and a whole decoded track.
 const CORES_PER_WORKER: usize = 2;
 const MAX_WORKERS: usize = 6;
-
-/// What to mix-analyse.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "pick", rename_all = "kebab-case")]
-pub enum Selection {
-    /// A track, album or artist, catalogued first if need be.
-    Target { target: Target },
-    /// A track and its nearest `count` in the space.
-    Around { seed: i64, count: usize },
-    /// Every track in the space credited to `name`, and the nearest `count`
-    /// of each.
-    ArtistName { name: String, count: usize },
-    /// The space's tracks whose genre holds any of `genres`, at most `limit`.
-    Space { genres: Vec<String>, limit: usize },
-}
-
-impl std::fmt::Display for Selection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Selection::Target { target } => write!(f, "{target}"),
-            Selection::Around { seed, count } => write!(f, "track {seed} and its {count} nearest"),
-            Selection::ArtistName { name, count } => write!(f, "{name}'s tracks and their {count} nearest"),
-            Selection::Space { genres, limit } => write!(f, "the space's {} (at most {limit})", genres.join(", ")),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -70,22 +46,59 @@ pub struct Options {
     pub retry_failed: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Stats {
-    pub total: usize,
-    pub done: usize,
-    pub failed: usize,
-}
-
 // --------------------------------------------------------------- selecting
 
 /// The catalogued tracks `selection` comes to.
 pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<Vec<i64>> {
+    let target = match selection {
+        Selection::Track { id } => Some(Target::Track(*id)),
+        Selection::Album { id } => Some(Target::Album(id.clone())),
+        Selection::Artist { id } => Some(Target::Artist(*id)),
+        _ => None,
+    };
     match selection {
-        Selection::Target { target } => {
+        Selection::Track { .. } | Selection::Album { .. } | Selection::Artist { .. } => {
             let conn = &mut crate::db::open_for_write(&paths.db_path)?;
             let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
-            crate::crawl::catalogue_target(conn, &mut client, target, job).await
+            crate::crawl::catalogue_target(conn, &mut client, &target.expect("a target"), job).await
+        }
+        Selection::Playlist { id } => {
+            let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+            let tracks = client.playlist_tracks(*id, PLAYLIST_CAP).await?;
+            job.log(format!("{} tracks in playlist {id}", tracks.len()));
+            catalogue_each(paths, &mut client, tracks.iter().map(|t| Target::Track(t.id)).collect(), job).await
+        }
+        Selection::Favourites => {
+            let likes = {
+                let conn = &mut crate::db::open_for_write(&paths.db_path)?;
+                crate::likes::family(conn)?
+            };
+            // Tracks and albums, whole; an artist liked is a whole discography,
+            // which is `artist/<id>` to ask for on its own.
+            let targets: Vec<Target> = likes
+                .iter()
+                .filter_map(|(kind, item)| match kind.as_str() {
+                    "track" => item["id"].as_i64().map(Target::Track),
+                    "album" => item["id"].as_str().map(|id| Target::Album(id.to_string())),
+                    _ => None,
+                })
+                .collect();
+            job.log(format!("{} liked tracks and albums", targets.len()));
+            let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+            catalogue_each(paths, &mut client, targets, job).await
+        }
+        Selection::Mood { phrase, count } => {
+            let encoder = crate::text::TextEncoder::load(&paths.model_dir)?;
+            let mut encoder = encoder.context("a mood wants the text tower: stelly-server models")?;
+            let embedding = encoder.embed(phrase)?;
+            let space = load_space(paths)?;
+            let request = GenerateRequest {
+                recipe: Recipe::Mood { phrase: phrase.clone() },
+                count: *count,
+                penalty: 0.0,
+                weights: Default::default(),
+            };
+            Ok(space.generate(&request, Some(&embedding)).unwrap_or_default().into_iter().map(|s| s.track.track_id).collect())
         }
         Selection::Around { seed, count } => {
             let space = load_space(paths)?;
@@ -116,6 +129,24 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
                 .collect())
         }
     }
+}
+
+/// Catalogue each of `targets`, those already known costing nothing, and
+/// the tracks they come to, each once; one that fails is told and passed.
+async fn catalogue_each(paths: &Paths, client: &mut QobuzClient, targets: Vec<Target>, job: &Job) -> Result<Vec<i64>> {
+    let conn = &mut crate::db::open_for_write(&paths.db_path)?;
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for target in targets {
+        if job.cancelled() {
+            break;
+        }
+        match crate::crawl::catalogue_target(conn, client, &target, job).await {
+            Ok(found) => ids.extend(found.into_iter().filter(|id| seen.insert(*id))),
+            Err(err) => job.log(format!("{target}: {err:#}")),
+        }
+    }
+    Ok(ids)
 }
 
 fn load_space(paths: &Paths) -> Result<SpaceService> {
@@ -248,16 +279,6 @@ pub struct MixService {
     job: Arc<Mutex<JobStatus>>,
     cancel: Arc<AtomicBool>,
     log: Arc<LogBuffer>,
-}
-
-/// What the background analysis is doing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct JobStatus {
-    pub running: bool,
-    pub selection: Option<String>,
-    pub last: Option<String>,
-    /// How the last run went, once it has.
-    pub stats: Option<Stats>,
 }
 
 impl MixService {
@@ -451,15 +472,6 @@ fn default_workers() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn selections_cross_the_wire_by_name() {
-        let around = Selection::Around { seed: 42, count: 20 };
-        let json = serde_json::to_value(&around).unwrap();
-        assert_eq!(json, serde_json::json!({ "pick": "around", "seed": 42, "count": 20 }));
-        let artist: Selection = serde_json::from_value(serde_json::json!({ "pick": "artist-name", "name": "Lun", "count": 5 })).unwrap();
-        assert_eq!(artist, Selection::ArtistName { name: "Lun".into(), count: 5 });
-    }
 
     #[test]
     fn names_compare_without_case_or_punctuation() {

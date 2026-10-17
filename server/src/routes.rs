@@ -894,20 +894,20 @@ async fn mix_find(
     Ok(Json(mix.find(&description, &baseline, query.limit)))
 }
 
-async fn mix_job(State(state): State<AppState>, _: AdminAuth) -> Reply<crate::mix::JobStatus> {
+async fn mix_job(State(state): State<AppState>, _: AdminAuth) -> Reply<stelly_mix::api::JobStatus> {
     Ok(Json(state.hub.mix().status()))
 }
 
 async fn mix_analyse(
     State(state): State<AppState>,
     _: AdminAuth,
-    Json(selection): Json<crate::mix::Selection>,
-) -> Reply<crate::mix::JobStatus> {
+    Json(selection): Json<stelly_mix::api::Selection>,
+) -> Reply<stelly_mix::api::JobStatus> {
     state.hub.mix().start(selection)?;
     Ok(Json(state.hub.mix().status()))
 }
 
-async fn mix_stop(State(state): State<AppState>, _: AdminAuth) -> Reply<crate::mix::JobStatus> {
+async fn mix_stop(State(state): State<AppState>, _: AdminAuth) -> Reply<stelly_mix::api::JobStatus> {
     state.hub.mix().stop();
     Ok(Json(state.hub.mix().status()))
 }

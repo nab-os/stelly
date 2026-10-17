@@ -79,6 +79,15 @@ pub struct MixAnalyse {
     /// this track
     #[argh(option)]
     track: Option<i64>,
+    /// a Qobuz playlist's tracks
+    #[argh(option)]
+    playlist: Option<i64>,
+    /// the family's liked tracks and albums
+    #[argh(switch)]
+    favourites: bool,
+    /// the tracks in the space nearest this description, --count of them
+    #[argh(option)]
+    mood: Option<String>,
     /// this album, catalogued first if need be
     #[argh(option)]
     album: Option<String>,
@@ -94,7 +103,8 @@ pub struct MixAnalyse {
     /// the space's tracks of these genres, comma-separated
     #[argh(option)]
     genre: Option<String>,
-    /// how many nearest to each, with --around or --artist-name (default 20)
+    /// how many nearest to each with --around or --artist-name, or in all
+    /// with --mood (default 20)
     #[argh(option, default = "crate::mix::AROUND")]
     count: usize,
     /// with --genre, at most this many; 0 for all (default 0)
@@ -400,11 +410,14 @@ async fn analyse_command(args: Analyse, paths: &Paths) -> Result<()> {
 }
 
 async fn mix_analyse_command(args: MixAnalyse, paths: &Paths) -> Result<()> {
-    use crate::mix::Selection;
+    use stelly_mix::api::Selection;
     let mut picks: Vec<Selection> = Vec::new();
-    picks.extend(args.track.map(|id| Selection::Target { target: Target::Track(id) }));
-    picks.extend(args.album.map(|id| Selection::Target { target: Target::Album(id) }));
-    picks.extend(args.artist.map(|id| Selection::Target { target: Target::Artist(id) }));
+    picks.extend(args.track.map(|id| Selection::Track { id }));
+    picks.extend(args.album.map(|id| Selection::Album { id }));
+    picks.extend(args.artist.map(|id| Selection::Artist { id }));
+    picks.extend(args.playlist.map(|id| Selection::Playlist { id }));
+    picks.extend(args.favourites.then_some(Selection::Favourites));
+    picks.extend(args.mood.map(|phrase| Selection::Mood { phrase, count: args.count }));
     picks.extend(args.around.map(|seed| Selection::Around { seed, count: args.count }));
     picks.extend(args.artist_name.map(|name| Selection::ArtistName { name, count: args.count }));
     picks.extend(args.genre.map(|genres| Selection::Space {
@@ -412,7 +425,7 @@ async fn mix_analyse_command(args: MixAnalyse, paths: &Paths) -> Result<()> {
         limit: args.limit,
     }));
     let [selection] = picks.as_slice() else {
-        bail!("one of --track, --album, --artist, --around, --artist-name and --genre at a time");
+        bail!("one of --track, --album, --artist, --playlist, --favourites, --mood, --around, --artist-name and --genre at a time");
     };
     let job = Job::stderr();
     job.log(format!("choosing {selection}"));
