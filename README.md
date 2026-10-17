@@ -26,9 +26,12 @@ area, from its own floating button.
 ## Shape of the system
 
 Two programs, one of each side of a socket, and Qobuz behind a third:
-[stelly-qobuz](https://github.com/nab-os/stelly-qobuz), the gateway that holds
-the account, its credentials and its one 2/s request queue, which anything
-else on the machine that talks to Qobuz, stelly-mix say, shares.
+stelly-qobuz, the gateway that holds the account, its credentials and its
+one 2/s request queue, which anything else on the machine that talks to
+Qobuz, stelly-mix say, shares. Its code is private; its image is
+[`stellymusic/stelly-qobuz`](https://hub.docker.com/r/stellymusic/stelly-qobuz),
+and the client Stelly talks to it with is
+[public](https://github.com/nab-os/stelly-qobuz-client).
 
 ```
   stelly-server                                stelly (desktop, Android)
@@ -88,18 +91,18 @@ share, not on the app, which keeps dioxus, wry and GTK out.
 
 ### Qobuz
 
-The server asks Qobuz for nothing itself: [stelly-qobuz](https://github.com/nab-os/stelly-qobuz)
-does, for every program on the machine, from one account and one request
-queue. Signing in is its business:
+The server asks Qobuz for nothing itself: the stelly-qobuz gateway does, for
+every program on the machine, from one account and one request queue.
+Signing in is its business, on a machine with a browser:
 
 ```sh
-cd ../stelly-qobuz
-cargo run --release -- login     # app id, secrets and a token, into its .env
-cargo run --release -- serve     # http://127.0.0.1:7710
+docker run --rm -it --network host -v stelly-qobuz:/data stellymusic/stelly-qobuz:v0.1.0 login
+docker run -d --network host -v stelly-qobuz:/data stellymusic/stelly-qobuz:v0.1.0 serve   # http://127.0.0.1:7710
 ```
 
-Its README has the rest: the token by hand where a browser cannot reach,
-`refresh-credentials` when the web player's secrets rotate. Stelly finds it
+`compose.yaml` runs it beside the server. `refresh-credentials --write`
+re-scrapes the app secrets when the web player rotates them; a token by
+hand, where a browser cannot reach, is the web player's `localuser.token`. Stelly finds it
 at `STELLY_QOBUZ_URL` (default `http://127.0.0.1:7710`), sending
 `STELLY_QOBUZ_TOKEN` if it is set, from the environment or `.env`.
 

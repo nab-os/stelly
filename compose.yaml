@@ -68,12 +68,11 @@ services:
       retries: 3
 
   # The Qobuz account, its credentials and its one request queue, for the
-  # server and anything else that talks to Qobuz. Built from its own
-  # checkout beside this one; on the compose network only, not published.
-  # Publish 127.0.0.1:7710:7710 too for stelly-mix on the host.
+  # server and anything else that talks to Qobuz. Pinned like the server, and
+  # bumped with it; on the compose network only, not published. Publish
+  # 127.0.0.1:7710:7710 too for stelly-mix on the host.
   qobuz:
-    build:
-      context: ../stelly-qobuz
+    image: stellymusic/stelly-qobuz:v0.1.0
     command: ["serve", "--bind", "0.0.0.0:7710"]
     # STELLY_QOBUZ_TOKEN, which it refuses to listen past loopback without,
     # and the account: QOBUZ_APP_ID, QOBUZ_APP_SECRETS, QOBUZ_USER_AUTH_TOKEN,
