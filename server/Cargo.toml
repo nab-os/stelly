@@ -8,6 +8,7 @@ name = "stelly-server"
 path = "src/main.rs"
 
 [dependencies]
+stelly-audio.workspace = true
 stelly-core = { workspace = true, features = ["engine"] }
 
 anyhow.workspace = true
@@ -36,14 +37,10 @@ tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["compression-zstd"] }
 
 # CLAP's two towers, for text steering and the whole of `analyse`.
-ort = { version = "2.0.0-rc.13", features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 
-# The rest of the pipeline: MP3 decoding for excerpts, the STFT behind CLAP's
-# mel front end and the descriptors, EBU R128 loudness and the PCA's
+# The rest of the pipeline, past what stelly-audio does: the PCA's
 # eigensolver.
-symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
-realfft = "3.5.0"
-ebur128 = "0.1.10"
 nalgebra = "0.35.0"
 

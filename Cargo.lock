@@ -5801,6 +5801,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "stelly-audio"
+version = "0.1.0"
+source = "git+https://github.com/nab-os/stelly-audio#7f486ffa6805dd9f5bde330a69fe44b4b76bdc01"
+dependencies = [
+ "anyhow",
+ "ebur128",
+ "ort",
+ "realfft",
+ "serde",
+ "symphonia",
+]
+
+[[package]]
 name = "stelly-core"
 version = "1.1.0"
 dependencies = [
@@ -5834,21 +5847,19 @@ dependencies = [
  "axum",
  "bytemuck",
  "diesel",
- "ebur128",
  "futures-util",
  "moka",
  "nalgebra",
  "ort",
  "rand 0.9.5",
- "realfft",
  "reqwest 0.13.5",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
+ "stelly-audio",
  "stelly-core",
  "stelly-qobuz-client",
- "symphonia",
  "tokenizers",
  "tokio",
  "tokio-stream",
