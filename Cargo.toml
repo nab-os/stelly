@@ -12,7 +12,7 @@ edition = "2021"
 [workspace.dependencies]
 # Decoding, the descriptors and CLAP's audio tower, in their own open
 # repository, shared with stelly-mix.
-stelly-audio = { git = "https://github.com/nab-os/stelly-audio" }
+stelly-audio = { git = "https://github.com/nab-os/stelly-audio", tag = "v0.1.0" }
 stelly-core = { path = "core" }
 
 anyhow = "1"

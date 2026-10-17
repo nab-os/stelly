@@ -17,9 +17,10 @@ ARG DEBIAN_SUITE=trixie
 
 FROM rust:${RUST_VERSION}-${DEBIAN_SUITE} AS builder
 
-# SQLite is `bundled` and tokenizers brings onig, so both want a C compiler.
+# SQLite is `bundled` and tokenizers brings onig, so both want a C compiler;
+# Signalsmith Stretch, stelly-mix's keylock, is C++ bound through libclang.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential pkg-config \
+ && apt-get install -y --no-install-recommends build-essential pkg-config clang libclang-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

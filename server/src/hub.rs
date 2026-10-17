@@ -71,6 +71,8 @@ pub struct Hub {
     crawl: Arc<CrawlJob>,
     pipeline: Arc<PipelineJob>,
     log: Arc<LogBuffer>,
+    /// Whole tracks analysed for mixing, and the job that adds to them.
+    mix: Arc<crate::mix::MixService>,
     /// The loaded space, which every client's navigation runs against.
     space: Arc<SpaceService>,
 }
@@ -135,7 +137,9 @@ impl Queue {
 
 impl Hub {
     pub fn new(paths: Paths) -> Self {
+        let log = Arc::new(LogBuffer::default());
         Self {
+            mix: Arc::new(crate::mix::MixService::new(paths.clone(), log.clone())),
             space: Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone())),
             env_dir: paths.env_dir.clone(),
             db_path: paths.db_path.clone(),
@@ -151,8 +155,12 @@ impl Hub {
             vocabulary: tokio::sync::Mutex::new(None),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
-            log: Arc::new(LogBuffer::default()),
+            log,
         }
+    }
+
+    pub fn mix(&self) -> &Arc<crate::mix::MixService> {
+        &self.mix
     }
 
     pub fn space(&self) -> &Arc<SpaceService> {
