@@ -12,12 +12,12 @@
 pub mod analyse;
 pub mod assemble;
 pub mod audio;
-pub mod clap;
 pub mod demo;
-pub mod descriptors;
 pub mod labels;
 pub mod layout;
 pub mod models;
+
+pub use stelly_audio::{clap, descriptors};
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -8,14 +8,13 @@ name = "stelly-server"
 path = "src/main.rs"
 
 [dependencies]
+stelly-audio.workspace = true
 stelly-core = { workspace = true, features = ["engine"] }
 
 anyhow.workspace = true
 # Mixing: a whole track's beats, bars, phrases and phrase embeddings, and the
-# ways from one track into another; and stelly-audio, to name the decoder and
-# the audio tower it analyses with.
+# ways from one track into another.
 stelly-mix = { git = "https://github.com/nab-os/stelly-mix", tag = "v0.2.0" }
-stelly-audio = { git = "https://github.com/nab-os/stelly-audio", tag = "v0.1.0" }
 # Qobuz, through the gateway that holds the account and its request queue.
 stelly-qobuz-client = { git = "https://github.com/nab-os/stelly-qobuz-client", tag = "v0.1.0", features = ["async"] }
 argh = "0.1.19"
@@ -46,11 +45,7 @@ tower-http = { version = "0.6", features = ["compression-zstd"] }
 ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 
-# The rest of the pipeline: MP3 decoding for excerpts, the STFT behind CLAP's
-# mel front end and the descriptors, EBU R128 loudness and the PCA's
+# The rest of the pipeline, past what stelly-audio does: the PCA's
 # eigensolver.
-symphonia = { version = "0.6.1", default-features = false, features = ["mp3"] }
-realfft = "3.5.0"
-ebur128 = "0.1.10"
 nalgebra = "0.35.0"
 
