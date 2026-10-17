@@ -16,7 +16,7 @@ stelly-audio = { git = "https://github.com/nab-os/stelly-audio", tag = "v0.1.0" 
 stelly-core = { path = "core" }
 # The provider protocol: the catalogue's types, and the client the server
 # asks its music provider through.
-stelly-provider = { git = "https://github.com/nab-os/stelly-provider", branch = "main" }
+stelly-provider = { git = "https://github.com/nab-os/stelly-provider", tag = "v0.1.0" }
 
 anyhow = "1"
 bytemuck = "1"

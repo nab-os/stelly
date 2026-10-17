@@ -103,6 +103,15 @@ program on the machine. Stelly finds it at `STELLY_PROVIDER_URL` (default
 the environment or `.env`; `stelly-server whoami` says what it found.
 `compose.yaml` runs one beside the server.
 
+Two exist:
+[stelly-qobuz](https://hub.docker.com/r/stellymusic/stelly-qobuz), in
+front of a Qobuz account, and [stelly-local](https://github.com/nab-os/stelly-local),
+in front of a folder of music files:
+
+```sh
+stelly-local serve ~/Music          # http://127.0.0.1:7710
+```
+
 A provider says what it can do: similar artists, which the crawl expands
 through, the account's own playlists, writing a playlist back, following new
 releases. What it cannot, Stelly does without, and the app does not offer.

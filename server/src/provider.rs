@@ -12,7 +12,7 @@ use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use stelly_provider::{api, AlbumTracks, Client, Config, FileUrl, Kind, Priority};
+use stelly_provider::{api, AlbumTracks, Client, Config, FileUrl, Kind, Priority, ProviderError};
 
 pub use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 pub use stelly_provider::Account;
@@ -112,9 +112,13 @@ impl Provider {
     }
 
     /// Artists the provider considers close to this one. The same call the
-    /// crawler expands the frontier with.
+    /// crawler expands the frontier with. A provider that cannot say answers
+    /// 404, which is none.
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
-        self.client.send(api::similar_artists(artist_id, limit)).await
+        match self.client.send(api::similar_artists(artist_id, limit)).await {
+            Err(err) if err.downcast_ref::<ProviderError>().is_some_and(|e| e.status == 404) => Ok(Vec::new()),
+            answer => answer,
+        }
     }
 
     /// Where a track's audio is, in up to `quality`, and what is there.

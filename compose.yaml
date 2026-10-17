@@ -67,6 +67,18 @@ services:
       start_period: 15s
       retries: 3
 
+  # A music folder instead, in place of the service below:
+  #
+  #   qobuz:
+  #     build: https://github.com/nab-os/stelly-local.git#v0.1.0
+  #     environment:
+  #       PUBLIC_URL: http://<this-host>:7710   # how devices reach the files
+  #       STELLY_PROVIDER_TOKEN: ${STELLY_QOBUZ_TOKEN}   # the shared one
+  #     volumes:
+  #       - /srv/music:/music:ro
+  #     ports:
+  #       - "127.0.0.1:7710:7710"
+  #
   # The Qobuz account, its credentials and its one request queue, for the
   # server and anything else that talks to Qobuz. Pinned like the server, and
   # bumped with it; on the compose network only, not published. Publish
