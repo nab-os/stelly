@@ -1,5 +1,5 @@
 # The build context is the repo root, but the image only needs the workspace
-# manifests, core/, audio/, app/, server/ and schema.sql, everything below would
+# manifests, core/, app/, server/ and schema.sql, everything below would
 # either bloat it or leak into it.
 
 .git

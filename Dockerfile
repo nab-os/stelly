@@ -6,7 +6,7 @@
 # needs them, or up front with `stelly-server models`.
 #
 # Build from the repo root; the context needs the workspace manifests, core/,
-# audio/, app/, server/ and schema.sql.
+# app/, server/ and schema.sql.
 #
 #   docker build -t stelly-server .
 
@@ -25,7 +25,6 @@ RUN apt-get update \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core
-COPY audio ./audio
 COPY app ./app
 COPY server ./server
 # `db.rs` embeds it with include_str!, so it is a build input, not data.

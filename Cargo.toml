@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "audio", "app", "server"]
+members = ["core", "app", "server"]
 resolver = "2"
 
 # One version for every crate, bumped here.
@@ -10,7 +10,9 @@ edition = "2021"
 # Versions only. Features that one crate needs stay in that crate's manifest,
 # next to the reason for them.
 [workspace.dependencies]
-stelly-audio = { path = "audio" }
+# Decoding, the descriptors and CLAP's audio tower, in their own open
+# repository, shared with stelly-mix.
+stelly-audio = { git = "https://github.com/nab-os/stelly-audio" }
 stelly-core = { path = "core" }
 
 anyhow = "1"
@@ -46,9 +48,6 @@ lto = true
 # a crawl. Dependencies are optimised for everyone, so the app and the server
 # share one build of them; only the app's own code stays debug.
 [profile.dev.package."*"]
-opt-level = 3
-
-[profile.dev.package.stelly-audio]
 opt-level = 3
 
 [profile.dev.package.stelly-core]
