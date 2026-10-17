@@ -72,6 +72,42 @@ impl FromStr for Kind {
     }
 }
 
+/// Analyse whole tracks for mixing: beats, bars, phrases, phrase embeddings.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "mix-analyse")]
+pub struct MixAnalyse {
+    /// this track
+    #[argh(option)]
+    track: Option<i64>,
+    /// this album, catalogued first if need be
+    #[argh(option)]
+    album: Option<String>,
+    /// this artist's releases, catalogued first if need be
+    #[argh(option)]
+    artist: Option<i64>,
+    /// this track and its nearest in the space
+    #[argh(option)]
+    around: Option<i64>,
+    /// every track in the space credited to this name, and their nearest
+    #[argh(option)]
+    artist_name: Option<String>,
+    /// the space's tracks of these genres, comma-separated
+    #[argh(option)]
+    genre: Option<String>,
+    /// how many nearest to each, with --around or --artist-name (default 20)
+    #[argh(option, default = "crate::mix::AROUND")]
+    count: usize,
+    /// with --genre, at most this many; 0 for all (default 0)
+    #[argh(option, default = "0")]
+    limit: usize,
+    /// analysis workers; 0 picks from the cores (default 0)
+    #[argh(option, default = "0")]
+    workers: usize,
+    /// try tracks that failed before, too
+    #[argh(switch)]
+    retry_failed: bool,
+}
+
 /// Grow the catalogue from the family's likes outwards.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "crawl")]
@@ -228,6 +264,7 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
         Command::Favourites(args) => block(Box::pin(favourites(args, paths))),
         Command::Crawl(args) => block(Box::pin(crawl_command(args, paths))),
         Command::Analyse(args) => block(Box::pin(analyse_command(args, paths))),
+        Command::MixAnalyse(args) => block(Box::pin(mix_analyse_command(args, paths))),
         Command::BuildSpace(args) => block(Box::pin(assemble::run(paths, args.weights, &Job::stderr()))),
         Command::Layout(args) => layout_command(args, paths),
         Command::Models(_) => block(Box::pin(async {
@@ -359,6 +396,35 @@ async fn analyse_command(args: Analyse, paths: &Paths) -> Result<()> {
         }
         _ => bail!("one of --track, --album and --artist at a time"),
     }
+    Ok(())
+}
+
+async fn mix_analyse_command(args: MixAnalyse, paths: &Paths) -> Result<()> {
+    use crate::mix::Selection;
+    let mut picks: Vec<Selection> = Vec::new();
+    picks.extend(args.track.map(|id| Selection::Target { target: Target::Track(id) }));
+    picks.extend(args.album.map(|id| Selection::Target { target: Target::Album(id) }));
+    picks.extend(args.artist.map(|id| Selection::Target { target: Target::Artist(id) }));
+    picks.extend(args.around.map(|seed| Selection::Around { seed, count: args.count }));
+    picks.extend(args.artist_name.map(|name| Selection::ArtistName { name, count: args.count }));
+    picks.extend(args.genre.map(|genres| Selection::Space {
+        genres: genres.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect(),
+        limit: args.limit,
+    }));
+    let [selection] = picks.as_slice() else {
+        bail!("one of --track, --album, --artist, --around, --artist-name and --genre at a time");
+    };
+    let job = Job::stderr();
+    job.log(format!("choosing {selection}"));
+    let ids = crate::mix::select(paths, selection, &job).await?;
+    let options = crate::mix::Options {
+        workers: args.workers,
+        retry_failed: args.retry_failed,
+    };
+    let paths = paths.clone();
+    // Its workers block; off the runtime it was asked from.
+    let stats = tokio::task::spawn_blocking(move || crate::mix::run(&paths, &ids, &options, &job)).await??;
+    println!("{} mix-analysed, {} failed, of {}", stats.done, stats.failed, stats.total);
     Ok(())
 }
 
