@@ -12,7 +12,7 @@ stelly-core = { workspace = true, features = ["engine"] }
 
 anyhow.workspace = true
 # Qobuz, through the gateway that holds the account and its request queue.
-stelly-qobuz-client = { git = "ssh://git@github.com/nab-os/stelly-qobuz.git", features = ["async"] }
+stelly-qobuz-client = { git = "https://github.com/nab-os/stelly-qobuz", features = ["async"] }
 argh = "0.1.19"
 axum = "0.8"
 bytemuck.workspace = true

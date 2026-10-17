@@ -29,7 +29,6 @@ services:
     #
     #   build:
     #     context: .
-    #     ssh: ["default"]   # stelly-qobuz-client is a private git dependency
 
     # Loopback inside the container would be unreachable from outside it, so
     # the bind is 0.0.0.0 and the *published* port is the one restricted to

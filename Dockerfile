@@ -6,10 +6,9 @@
 # needs them, or up front with `stelly-server models`.
 #
 # Build from the repo root; the context needs the workspace manifests, core/,
-# app/, server/ and schema.sql. stelly-qobuz-client comes from a private
-# repo over SSH, so the build borrows the host's SSH agent:
+# app/, server/ and schema.sql.
 #
-#   docker build --ssh default -t stelly-server .
+#   docker build -t stelly-server .
 
 ARG RUST_VERSION=1.96.0
 ARG DEBIAN_SUITE=trixie
@@ -23,12 +22,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
-# GitHub's host key, for the private git dependency.
-RUN mkdir -p -m 0700 /root/.ssh \
- && ssh-keyscan -t ed25519 github.com >> /root/.ssh/known_hosts
-
 WORKDIR /app
-COPY .cargo ./.cargo
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core
 COPY app ./app
@@ -44,8 +38,7 @@ COPY schema.sql ./schema.sql
 # network. Whatever it leaves behind gets carried into the runtime image; the
 # cache mount means the target directory is gone by the time the layer lands,
 # hence the copy into /out inside the same step.
-RUN --mount=type=ssh \
-    --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     set -eu; \

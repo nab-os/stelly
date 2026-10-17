@@ -5816,7 +5816,7 @@ dependencies = [
 [[package]]
 name = "stelly-qobuz-client"
 version = "0.1.0"
-source = "git+ssh://git@github.com/nab-os/stelly-qobuz.git#bf484b52f6ddda4b35e6f9a0372f43aac25930a8"
+source = "git+https://github.com/nab-os/stelly-qobuz#bf484b52f6ddda4b35e6f9a0372f43aac25930a8"
 dependencies = [
  "anyhow",
  "reqwest 0.13.5",
