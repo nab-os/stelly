@@ -89,3 +89,22 @@ CREATE TABLE IF NOT EXISTS blocked_artists (
     reason      TEXT,
     blocked_at  TEXT NOT NULL
 );
+
+-- Each track's whole-length analysis for mixing, from stelly-mix: its beats,
+-- bars, phrases and each phrase's CLAP embedding, as stelly-mix's library
+-- entry. Beside `features`, the 90s excerpt the space is built from.
+CREATE TABLE IF NOT EXISTS mix (
+    track_id     INTEGER PRIMARY KEY REFERENCES tracks(id),
+    -- stelly_mix::library::VERSION; rows with another are redone.
+    version      INTEGER NOT NULL,
+    entry_json   TEXT NOT NULL,
+    analysed_at  TEXT NOT NULL
+);
+
+-- Tracks the mix analysis failed on, apart from `failures`, which stops
+-- `analyse` retrying: a track can fail one and not the other.
+CREATE TABLE IF NOT EXISTS mix_failures (
+    track_id   INTEGER PRIMARY KEY,
+    reason     TEXT,
+    failed_at  TEXT
+);

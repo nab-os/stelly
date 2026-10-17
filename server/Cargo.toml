@@ -12,6 +12,9 @@ stelly-audio.workspace = true
 stelly-core = { workspace = true, features = ["engine"] }
 
 anyhow.workspace = true
+# Mixing: a whole track's beats, bars, phrases and phrase embeddings, and the
+# ways from one track into another.
+stelly-mix = { git = "https://github.com/nab-os/stelly-mix", tag = "v0.2.0" }
 # Qobuz, through the gateway that holds the account and its request queue.
 stelly-qobuz-client = { git = "https://github.com/nab-os/stelly-qobuz-client", tag = "v0.1.0", features = ["async"] }
 argh = "0.1.19"
@@ -36,7 +39,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["compression-zstd"] }
 
-# CLAP's two towers, for text steering and the whole of `analyse`.
+# CLAP's two towers, for text steering and the whole of `analyse`. Exact, and
+# the same as stelly-audio's, where the pin lives: only one ort can link into
+# a build, and a pre-release requirement would take any later pre-release.
 ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 

@@ -161,6 +161,42 @@ browsing and whatever else uses the gateway share that one budget. The crawl
 and `analyse` queue as bulk, so browsing goes ahead of them rather than
 waiting its turn behind a backlog.
 
+### Mixing
+
+Beside the space's 90s excerpts, the server holds what
+[stelly-mix](https://github.com/nab-os/stelly-mix) makes of whole tracks:
+their beats, bars, eight-bar phrases and each phrase's CLAP embedding, which
+is what mixing from one track into another is chosen and rendered from. A
+whole track is ten times an excerpt's download and CPU, so it is analysed on
+what is asked, never the whole catalogue:
+
+```sh
+stelly-server mix-analyse --album <id>                   # catalogued first if need be
+stelly-server mix-analyse --artist <id>                  # or --track <id>
+stelly-server mix-analyse --playlist <id>                # a Qobuz playlist's tracks
+stelly-server mix-analyse --favourites                   # the family's liked tracks and albums
+stelly-server mix-analyse --mood "dark rolling techno" --count 200
+stelly-server mix-analyse --around <track id> --count 50 # a track and its nearest in the space
+stelly-server mix-analyse --artist-name "Lun"            # an artist's tracks in the space, and theirs
+stelly-server mix-analyse --genre techno,house --limit 5000
+```
+
+An admin device can start the same with `POST /api/mix/analyse`
+(`{"pick": "artist-name", "name": "Lun", "count": 20}`, `stelly_mix::api::Selection`;
+`stelly-mix server-analyse "artist-name/Lun"` sends it), follow it with
+`GET /api/mix/analyse` and stop it with `POST /api/mix/analyse/stop`. The
+whole track comes as MP3 320 through the gateway and is dropped once
+analysed; the analysis goes in the `mix` table.
+
+Clients read it with `play` devices: `/api/mix/library`, `/api/mix/tracks`
+(several at once, for a client mirroring the library), `/api/mix/next/<id>`,
+`POST /api/mix/set` and `/api/mix/find?q=`, in `stelly_mix::api`'s shapes.
+`stelly-mix sync` mirrors the library into stelly-mix's own, and its app does
+at start, given `STELLY_SERVER` and `STELLY_TOKEN`.
+
+The server builds stelly-mix's renderer, Signalsmith Stretch, from C++: the
+build wants `clang` and `libclang-dev` besides the rest.
+
 ## Running the app
 
 Start the server, pair a device, and point the app at it:

@@ -27,6 +27,7 @@ mod crawl;
 mod db;
 mod hub;
 mod likes;
+mod mix;
 mod pipeline;
 mod playback;
 mod qobuz;
@@ -164,6 +165,7 @@ pub enum Command {
 
     Crawl(cli::Crawl),
     Analyse(cli::Analyse),
+    MixAnalyse(cli::MixAnalyse),
     BuildSpace(cli::BuildSpace),
     Layout(cli::Layout),
     Models(cli::Models),

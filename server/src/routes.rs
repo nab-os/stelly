@@ -85,6 +85,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/space/generate", post(space_generate))
         .route("/api/space/order", post(space_order))
         .route("/api/space/describe/{id}", get(space_describe))
+        .route("/api/mix/status", get(mix_status))
+        .route("/api/mix/library", get(mix_library).layer(CompressionLayer::new()))
+        .route("/api/mix/tracks", post(mix_tracks).layer(CompressionLayer::new()))
+        .route("/api/mix/tracks/{id}", get(mix_track).layer(CompressionLayer::new()))
+        .route("/api/mix/next/{id}", get(mix_next))
+        .route("/api/mix/set", post(mix_set))
+        .route("/api/mix/find", get(mix_find))
+        .route("/api/mix/analyse", get(mix_job).post(mix_analyse))
+        .route("/api/mix/analyse/stop", post(mix_stop))
         // ---------------------------------------------------------- devices
         .route("/api/devices", get(devices).post(pair_device))
         .route("/api/devices/{id}", delete(revoke_device))
@@ -774,4 +783,131 @@ async fn add_user(
 /// listening, which is what a health check is for.
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "service": "stelly-server" }))
+}
+
+// ---------------------------------------------------------------------- mix
+//
+// Whole tracks analysed for mixing: what stelly-mix's clients ask, in the
+// shapes `stelly_mix::api` gives them. Reading is `play`; starting an
+// analysis, hours of downloading and CPU, is `admin`.
+
+async fn mix_status(State(state): State<AppState>, _: PlayAuth) -> Reply<stelly_mix::api::Status> {
+    let mix = state.hub.mix().mix().await?;
+    Ok(Json(stelly_mix::api::Status { tracks: mix.len(), version: crate::mix::VERSION }))
+}
+
+async fn mix_library(State(state): State<AppState>, _: PlayAuth) -> Reply<Vec<stelly_mix::api::TrackSummary>> {
+    let mix = state.hub.mix().mix().await?;
+    Ok(Json(tokio::task::spawn_blocking(move || mix.summaries()).await.map_err(anyhow::Error::from)?))
+}
+
+/// Several entries at once, the ones the library holds of those asked: what a
+/// client mirroring the library fetches, a few hundred a request.
+async fn mix_tracks(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<stelly_mix::api::EntriesRequest>,
+) -> Reply<Vec<stelly_mix::api::Entry>> {
+    let mix = state.hub.mix().mix().await?;
+    let entries = body
+        .ids
+        .iter()
+        .filter_map(|&id| Some(stelly_mix::api::Entry { id, track: mix.track(id)?.clone() }))
+        .collect();
+    Ok(Json(entries))
+}
+
+async fn mix_track(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_mix::library::Track> {
+    let mix = state.hub.mix().mix().await?;
+    let track = mix.track(id).cloned().ok_or_else(|| Failure::not_found(format!("track {id} has no mix analysis")))?;
+    Ok(Json(track))
+}
+
+#[derive(Deserialize)]
+struct NextQuery {
+    #[serde(default = "default_stretch")]
+    stretch: f64,
+    #[serde(default = "default_ways")]
+    limit: usize,
+}
+
+fn default_stretch() -> f64 {
+    6.0
+}
+
+fn default_ways() -> usize {
+    30
+}
+
+async fn mix_next(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Path(id): Path<i64>,
+    Query(query): Query<NextQuery>,
+) -> Reply<Vec<stelly_mix::api::Way>> {
+    let mix = state.hub.mix().mix().await?;
+    if mix.track(id).is_none() {
+        return Err(Failure::not_found(format!("track {id} has no mix analysis")));
+    }
+    let ways = tokio::task::spawn_blocking(move || mix.next(id, query.stretch, query.limit))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(ways))
+}
+
+/// A set, its description, if any, embedded by the server's own text tower.
+async fn mix_set(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(request): Json<stelly_mix::api::SetRequest>,
+) -> Reply<stelly_mix::api::SetPlan> {
+    let mix = state.hub.mix().mix().await?;
+    let like = match request.like.as_deref().filter(|d| !d.trim().is_empty()) {
+        Some(description) => {
+            let query = state.hub.embed(description).await?;
+            let baseline = state.hub.embed(stelly_mix::text::BASELINE).await?;
+            Some(mix.likeness(&query, &baseline))
+        }
+        None => None,
+    };
+    let plan = tokio::task::spawn_blocking(move || mix.set(&request, like))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(plan))
+}
+
+#[derive(Deserialize)]
+struct FindQuery {
+    q: String,
+    #[serde(default = "default_ways")]
+    limit: usize,
+}
+
+async fn mix_find(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Query(query): Query<FindQuery>,
+) -> Reply<Vec<stelly_mix::api::Match>> {
+    let mix = state.hub.mix().mix().await?;
+    let description = state.hub.embed(&query.q).await?;
+    let baseline = state.hub.embed(stelly_mix::text::BASELINE).await?;
+    Ok(Json(mix.find(&description, &baseline, query.limit)))
+}
+
+async fn mix_job(State(state): State<AppState>, _: AdminAuth) -> Reply<stelly_mix::api::JobStatus> {
+    Ok(Json(state.hub.mix().status()))
+}
+
+async fn mix_analyse(
+    State(state): State<AppState>,
+    _: AdminAuth,
+    Json(selection): Json<stelly_mix::api::Selection>,
+) -> Reply<stelly_mix::api::JobStatus> {
+    state.hub.mix().start(selection)?;
+    Ok(Json(state.hub.mix().status()))
+}
+
+async fn mix_stop(State(state): State<AppState>, _: AdminAuth) -> Reply<stelly_mix::api::JobStatus> {
+    state.hub.mix().stop();
+    Ok(Json(state.hub.mix().status()))
 }
