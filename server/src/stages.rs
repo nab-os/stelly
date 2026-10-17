@@ -8,7 +8,7 @@
 //! first, so a single album reaches the space without the backlog.
 
 use crate::pipeline::{analyse, assemble, layout, Job, Paths};
-use crate::qobuz::{Credentials, QobuzClient, RateLimit};
+use crate::qobuz::QobuzClient;
 use crate::schema::{failures, features, frontier, tracks};
 use crate::{crawl, db};
 use anyhow::{bail, Result};
@@ -18,14 +18,14 @@ use stelly_core::api::{Corpus, Stage, Target};
 
 /// Run one terminating stage to completion. Analyse holds a blocking database
 /// connection across awaits, so drive it on a thread of its own.
-pub async fn run(stage: Stage, target: Option<&Target>, paths: &Paths, limiter: RateLimit, job: &Job) -> Result<()> {
+pub async fn run(stage: Stage, target: Option<&Target>, paths: &Paths, job: &Job) -> Result<()> {
     match (stage, target) {
         (Stage::Crawl, _) => bail!("the crawl runs from its own loop, not as a stage"),
         (Stage::Analyse, Some(target)) => {
-            analyse_target(target, paths, limiter, analyse::Options::default(), job).await?;
+            analyse_target(target, paths, analyse::Options::default(), job).await?;
         }
         (Stage::Analyse, None) => {
-            analyse::run(paths, limiter, &analyse::Options::default(), job).await?;
+            analyse::run(paths, &analyse::Options::default(), job).await?;
         }
         (Stage::BuildSpace, _) => {
             assemble::run(paths, None, job).await?;
@@ -40,18 +40,11 @@ pub async fn run(stage: Stage, target: Option<&Target>, paths: &Paths, limiter: 
 /// Catalogue one target, then analyse its tracks and nothing else. Past
 /// failures are retried: asking by name is asking again. An error when none
 /// of it could be analysed, so the caller does not wait for it on the map.
-pub async fn analyse_target(
-    target: &Target,
-    paths: &Paths,
-    limiter: RateLimit,
-    options: analyse::Options,
-    job: &Job,
-) -> Result<analyse::Stats> {
+pub async fn analyse_target(target: &Target, paths: &Paths, options: analyse::Options, job: &Job) -> Result<analyse::Stats> {
     job.log(format!("cataloguing {target}"));
     let ids = {
         let conn = &mut db::open_for_write(&paths.db_path)?;
-        let credentials = Credentials::from_env(&paths.env_dir)?;
-        let mut client = QobuzClient::sharing(credentials, limiter.clone());
+        let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
         crawl::catalogue_target(conn, &mut client, target, job).await?
     };
     if ids.is_empty() {
@@ -63,7 +56,7 @@ pub async fn analyse_target(
         retry_failed: true,
         ..options
     };
-    let stats = analyse::run(paths, limiter, &options, job).await?;
+    let stats = analyse::run(paths, &options, job).await?;
     if stats.total > 0 && stats.done == 0 && !job.cancelled() {
         bail!("none of {target} could be analysed");
     }

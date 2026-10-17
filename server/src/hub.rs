@@ -48,9 +48,9 @@ pub struct Hub {
     env_dir: PathBuf,
     db_path: PathBuf,
     model_dir: PathBuf,
-    /// Built on first use: browsing the space needs no credentials, so a
-    /// missing .env should only bite when you reach for Qobuz.
-    client: OnceLock<Arc<tokio::sync::Mutex<QobuzClient>>>,
+    /// Built on first use. The gateway holds the account; without it,
+    /// browsing the space still works, and only reaching for Qobuz fails.
+    client: OnceLock<QobuzClient>,
     /// Albums, artists, discographies: they change on the scale of weeks.
     catalogue: Cache,
     /// Short, since the same words find new releases.
@@ -159,24 +159,15 @@ impl Hub {
         &self.space
     }
 
-    /// The shared Qobuz client, built on first reach.
-    fn qobuz(&self) -> Result<Arc<tokio::sync::Mutex<QobuzClient>>> {
-        if let Some(existing) = self.client.get() {
-            return Ok(existing.clone());
-        }
-        let built = QobuzClient::from_repo(&self.env_dir)?;
-        let _ = self.client.set(Arc::new(tokio::sync::Mutex::new(built)));
-        Ok(self.client.get().expect("just set").clone())
+    /// The gateway's client, built on first reach. Clones share it; the
+    /// gateway queues every device's requests on the account's one budget.
+    fn qobuz(&self) -> QobuzClient {
+        self.client.get_or_init(|| QobuzClient::from_env(&self.env_dir)).clone()
     }
 
-    /// A logged-in copy of the shared client, for reads. The lock is held only
-    /// while copying, so one device's request never waits out another's turn
-    /// at the rate limiter; they still queue on the same budget.
+    /// The client for a device's reads, which queue as interactive.
     async fn session(&self) -> Result<QobuzClient> {
-        let client = self.qobuz()?;
-        let mut shared = client.lock().await;
-        shared.login().await?;
-        Ok(shared.clone())
+        Ok(self.qobuz())
     }
 
     // -------------------------------------------------------------- browsing
@@ -286,7 +277,6 @@ impl Hub {
     /// unless `add_days` is 0, whatever came out in the last `add_days` and
     /// is not in the space yet is added to it.
     pub async fn check_releases(&self, add_days: u32) -> Result<()> {
-        self.qobuz()?;
         let liked = likes::family(&mut db::connect(&self.db_path, Duration::from_secs(5))?)?;
         let artists = liked
             .into_iter()
@@ -376,10 +366,9 @@ impl Hub {
 
     // -------------------------------------------------------------- playback
 
-    /// Never cached, the URL is signed and expires. Under the lock rather than
-    /// on a session, because it is where the client learns which secret works.
+    /// Never cached, the URL is signed and expires.
     pub async fn file_url(&self, track_id: i64, format_id: u32) -> Result<String> {
-        self.qobuz()?.lock().await.file_url(track_id, format_id).await
+        self.qobuz().file_url(track_id, format_id).await
     }
 
     /// Under the name of whoever made it, so the account's playlist list
@@ -504,16 +493,13 @@ impl Hub {
     /// Start a crawl on a thread of its own.
     ///
     /// Not `tokio::spawn`: `crawl::step` holds its SQLite connection across
-    /// awaits and blocks on it; see `off_thread`. Its own client, but the same
-    /// `RateLimit`, the account is what 2/s protects, not the socket.
+    /// awaits and blocks on it; see `off_thread`. Its requests queue as bulk
+    /// at the gateway, behind browsing.
     pub async fn crawl_start(&self, max_distance: i64) -> Result<()> {
         if self.crawl.status.lock().unwrap().running {
             return Ok(());
         }
 
-        // Built here, on purpose: a missing .env should fail the button press
-        // rather than a thread nobody is watching.
-        let limit = self.qobuz()?.lock().await.rate_limit();
         let env_dir = self.env_dir.clone();
         let db_path = self.db_path.clone();
         let job = self.crawl.clone();
@@ -542,7 +528,7 @@ impl Hub {
                 };
 
                 runtime.block_on(async {
-                    if let Err(err) = crawl_loop(&job, &env_dir, limit, &db_path, max_distance).await
+                    if let Err(err) = crawl_loop(&job, &env_dir, &db_path, max_distance).await
                     {
                         job.status.lock().unwrap().last = Some(format!("{err:#}"));
                     }
@@ -628,13 +614,6 @@ impl Hub {
             (stage, target)
         };
 
-        // The account's budget, for analyse to share with browsing. Only
-        // analyse talks to Qobuz: without credentials build-space and layout
-        // still run, and analyse says what is missing in the log.
-        let limit = match self.qobuz() {
-            Ok(client) => client.lock().await.rate_limit(),
-            Err(_) => crate::qobuz::RateLimit::new(),
-        };
         let job = self.pipeline.clone();
         let log = self.log.clone();
         let paths = self.paths.clone();
@@ -657,9 +636,9 @@ impl Hub {
                 *job.progress.lock().unwrap() = None;
                 let reporter = Job::new(move |line| sink.push(line), job.cancel.clone())
                     .reporting(job.progress.clone());
-                let (stage_paths, limit, scope) = (paths.clone(), limit.clone(), target.clone());
+                let (stage_paths, scope) = (paths.clone(), target.clone());
                 let outcome = off_thread(move || async move {
-                    stages::run(stage, scope.as_ref(), &stage_paths, limit, &reporter).await
+                    stages::run(stage, scope.as_ref(), &stage_paths, &reporter).await
                 })
                 .await;
 
@@ -770,19 +749,7 @@ impl Hub {
 // Crawl and analyse futures hold a SQLite connection across awaits and make
 // blocking calls on it, which a worker of the shared runtime must not do.
 // Rather than restructure them, the work moves to a thread with its own
-// runtime. The client is separate but the budget is shared, see
-// `qobuz::RateLimit`.
-
-/// A connection and a client, both belonging to the calling thread.
-fn worker_parts(
-    env_dir: &Path,
-    db_path: &Path,
-    limit: crate::qobuz::RateLimit,
-) -> Result<(diesel::SqliteConnection, QobuzClient)> {
-    let conn = db::open_for_write(db_path).context("opening the database")?;
-    let credentials = crate::qobuz::Credentials::from_env(env_dir)?;
-    Ok((conn, QobuzClient::sharing(credentials, limit)))
-}
+// runtime.
 
 /// Drive a `!Send` future to completion somewhere it is allowed to live. `job`
 /// is `Send`; the future it produces need not be.
@@ -805,19 +772,14 @@ where
 
 // ------------------------------------------------------------- the crawl loop
 
-/// Run the frontier until it empties, the budget is hit, or stop is asked. The
-/// Qobuz client is released around each step, so search and playback never wait
-/// longer than one item.
-async fn crawl_loop(
-    job: &CrawlJob,
-    env_dir: &Path,
-    limit: crate::qobuz::RateLimit,
-    db_path: &Path,
-    max_distance: i64,
-) -> Result<()> {
-    // This thread's own connection and client, but not its own budget, both
-    // halves talk to one account. See `qobuz::RateLimit`.
-    let (mut conn, mut client) = worker_parts(env_dir, db_path, limit)?;
+/// Run the frontier until it empties, the budget is hit, or stop is asked.
+/// Its requests queue as bulk, so search and playback go ahead of it at the
+/// gateway.
+async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance: i64) -> Result<()> {
+    // This thread's own connection and client: a client's connections belong
+    // to the runtime that made them.
+    let mut conn = db::open_for_write(db_path).context("opening the database")?;
+    let mut client = QobuzClient::from_env(env_dir).bulk();
 
     // From the database alone, so likes made since the last crawl are in
     // the frontier before it carries on.

@@ -1,22 +1,24 @@
 //! `stelly-server`: everything but the screen.
 //!
-//! Holds the Qobuz token, the shared rate limit, the database, the CLAP
-//! models, the whole pipeline, crawl, analyse, build-space, layout, and the
-//! loaded space every client navigates. Clients ask for all of it over HTTP.
+//! Holds the database, the CLAP models, the whole pipeline, crawl, analyse,
+//! build-space, layout, and the loaded space every client navigates. Clients
+//! ask for all of it over HTTP. Qobuz is reached through stelly-qobuz's
+//! gateway, which holds the account, its credentials and its one request
+//! queue, shared with anything else on the machine that talks to Qobuz.
 //!
 //! Sized for a family: a few people on the one Qobuz account, each with their
 //! own devices, play session and likes, sharing the space.
 //!
 //! ```sh
-//! stelly-server login                                    # Qobuz, once
+//! stelly-qobuz login && stelly-qobuz serve               # the gateway, apart
 //! stelly-server pair --name desktop --scope admin     # first device
 //! stelly-server user add sam                             # someone else
 //! stelly-server pair --name phone --user sam             # and their phone
 //! stelly-server serve                                    # 127.0.0.1:7700
 //! ```
 //!
-//! Plain HTTP, loopback by default. The token and the signed stream URLs are
-//! credentials in flight, so anything further belongs behind a VPN or TLS.
+//! Plain HTTP, loopback by default. Device tokens and the signed stream URLs
+//! are credentials in flight, so anything further belongs behind a VPN or TLS.
 
 mod auth;
 mod cache;
@@ -25,7 +27,6 @@ mod crawl;
 mod db;
 mod hub;
 mod likes;
-mod login;
 mod pipeline;
 mod playback;
 mod qobuz;
@@ -132,13 +133,15 @@ impl IntoResponse for Failure {
 /// stelly-server: everything in Stelly but the screen.
 #[derive(FromArgs)]
 #[argh(
-    example = "{command_name} login\n{command_name} pair --name desktop --scope admin\n{command_name} serve",
+    example = "{command_name} pair --name desktop --scope admin\n{command_name} serve",
     note = "Users and devices are stored in the same database as the catalogue. A token
 is shown once, at pairing, and only its hash is kept.
 
 STELLY_DATA_DIR, STELLY_MODEL_DIR and STELLY_CACHE_DIR move the corpus,
-the model weights and the excerpt cache; STELLY_ENV_DIR, the .env holding
-the Qobuz credentials. The environment itself wins over any .env."
+the model weights and the excerpt cache; STELLY_ENV_DIR, the .env. Qobuz is
+the stelly-qobuz gateway's, at STELLY_QOBUZ_URL (default
+http://127.0.0.1:7710) with STELLY_QOBUZ_TOKEN if it wants one. The
+environment itself wins over any .env."
 )]
 struct Cli {
     #[argh(subcommand)]
@@ -156,8 +159,6 @@ pub enum Command {
     Devices(Devices),
     Revoke(Revoke),
 
-    Login(cli::Login),
-    RefreshCredentials(cli::RefreshCredentials),
     Whoami(cli::Whoami),
     Favourites(cli::Favourites),
 

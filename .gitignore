@@ -1,4 +1,6 @@
 .env
+.env.bak
+qobuz.env
 data/
 cache/
 target/

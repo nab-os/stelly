@@ -2,7 +2,7 @@
 //!
 //! The work splits in two. Fetching is network-bound and spends the account's
 //! one request budget, so it runs as futures on the stage's own thread,
-//! sharing one rate-limited client. Extraction is CPU-bound, a CLAP pass
+//! sharing one client of the gateway that keeps that budget. Extraction is CPU-bound, a CLAP pass
 //! over nine 10s windows plus the descriptors, and runs on worker threads,
 //! each with its own ONNX session. Only the stage thread writes to SQLite.
 
@@ -11,7 +11,7 @@ use super::clap::{self, AudioEncoder};
 use super::descriptors::{self, Descriptors};
 use super::{models, Job, Paths};
 use crate::db::{self, not_blocked, utc_now};
-use crate::qobuz::{Credentials, QobuzClient, RateLimit, FORMAT_MP3_320};
+use crate::qobuz::{QobuzClient, FORMAT_MP3_320};
 use crate::schema::{failures, features, tracks};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
@@ -261,7 +261,7 @@ fn cpus() -> usize {
 
 /// Fetch one excerpt, from the cache when it is there.
 async fn fetch(
-    client: &tokio::sync::Mutex<QobuzClient>,
+    client: &QobuzClient,
     http: &reqwest::Client,
     cache: &AudioCache,
     track: &Pending,
@@ -273,8 +273,8 @@ async fn fetch(
         anyhow::bail!("track too short to analyse ({seconds}s)");
     }
     // Only the signed URL costs a request against the account; the excerpt
-    // itself comes from the CDN, so the lock is held for just that.
-    let url = client.lock().await.file_url(track.id, FORMAT_MP3_320).await?;
+    // itself comes from the CDN.
+    let url = client.file_url(track.id, FORMAT_MP3_320).await?;
     let bytes = audio::fetch_excerpt(http, &url, track.duration).await?;
     cache.put(track.id, &bytes)?;
     Ok(bytes)
@@ -285,7 +285,7 @@ async fn fetch(
 ///
 /// The future holds a blocking SQLite connection across awaits: run it on
 /// a thread of its own, as `stages` does.
-pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job) -> Result<Stats> {
+pub async fn run(paths: &Paths, options: &Options, job: &Job) -> Result<Stats> {
     let mut conn = db::open_for_write(&paths.db_path)?;
     let todo = pending_tracks(&mut conn, options)?;
     if todo.is_empty() {
@@ -307,12 +307,8 @@ pub async fn run(paths: &Paths, limiter: RateLimit, options: &Options, job: &Job
         todo.len()
     ));
 
-    let credentials = Credentials::from_env(&paths.env_dir)?;
-    let mut client = QobuzClient::sharing(credentials, limiter);
-    // Once, here: the fetches share this client and would otherwise race to
-    // log in on their first call.
-    client.login().await?;
-    let client = tokio::sync::Mutex::new(client);
+    // Behind browsing at the gateway: a search goes ahead of the backlog.
+    let client = QobuzClient::from_env(&paths.env_dir).bulk();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()?;

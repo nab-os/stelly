@@ -445,7 +445,6 @@ pub async fn crawl(
     max_distance: i64,
     progress: Option<Progress<'_>>,
 ) -> Result<Stats> {
-    client.login().await?;
     let mut stats = Stats::default();
     let start_count = track_count(conn)?;
     let mut since_report = 0;
@@ -487,7 +486,6 @@ pub async fn catalogue_target(
     target: &Target,
     job: &Job,
 ) -> Result<Vec<i64>> {
-    client.login().await?;
     job.advance("catalogue", 0, 1);
     match target {
         Target::Track(track_id) => {
