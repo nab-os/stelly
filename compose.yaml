@@ -1,11 +1,13 @@
-# An example deployment of the server and a music provider beside it, here
-# the Qobuz gateway. Copy it, adjust it, then:
+# An example deployment of the server and two music providers beside it:
+# the Qobuz gateway and YouTube Music. Copy it, adjust it, then:
 #
-#   echo "STELLY_QOBUZ_TOKEN=$(openssl rand -hex 32)" > .env  # between the two
-#   cp ~/.config/stelly-qobuz/.env qobuz.env                  # Qobuz credentials
-#   docker compose pull server
+#   echo "STELLY_PROVIDER_TOKEN=$(openssl rand -hex 32)" > .env  # shared by all
+#   echo "YTMUSIC_PUBLIC_URL=http://<this-host>:7712" >> .env    # see ytmusic
+#   cp ~/.config/stelly-qobuz/.env qobuz.env                     # Qobuz credentials
+#   docker compose pull
 #   docker compose run --rm server pair --name desktop --scope admin
 #   docker compose up -d
+#   docker compose cp ~/.config/stelly-ytmusic/browser.json ytmusic:/data/  # then restart it
 #
 # Pairing prints a token once. Point a client at it with:
 #
@@ -17,7 +19,7 @@ services:
   server:
     # Pinned rather than `latest`, so that `compose pull` on a bad day cannot
     # swap the running server for a release nobody here has tried.
-    image: stellymusic/stelly:v1.2.0
+    image: stellymusic/stelly:v2.0.0
 
     # The whole pipeline is in this one image. The CLAP weights (~620MB) are
     # fetched into the data volume on first use, or up front with:
@@ -39,20 +41,17 @@ services:
     ports:
       - "127.0.0.1:7700:7700"
 
-    # The music through the provider below, which wants the shared token.
-    # Several, most preferred first, a token where one is wanted as the URL's
-    # user, are STELLY_PROVIDERS instead:
-    #
-    #   STELLY_PROVIDERS: http://local:7710,http://qobuz:7710,http://ytmusic:7712
+    # The music, through the providers below, most preferred first; each
+    # wants the shared STELLY_PROVIDER_TOKEN, from .env. Keep the Qobuz
+    # gateway among them: a catalogue from before 2.0 is its.
     environment:
-      STELLY_PROVIDER_URL: http://qobuz:7710
-      # The token the gateway below listens with, sent to it.
-      STELLY_PROVIDER_TOKEN: ${STELLY_QOBUZ_TOKEN}
+      STELLY_PROVIDERS: http://qobuz:7710,http://ytmusic:7712
     env_file:
       - path: .env
         required: false
     depends_on:
       - qobuz
+      - ytmusic
 
     volumes:
       - data:/data     # corpus, space, device tokens, models, back this up
@@ -73,32 +72,21 @@ services:
       start_period: 15s
       retries: 3
 
-  # A music folder instead, in place of the service below:
-  #
-  #   qobuz:
-  #     build: https://github.com/nab-os/stelly-local.git#v0.1.0
-  #     environment:
-  #       PUBLIC_URL: http://<this-host>:7710   # how devices reach the files
-  #       STELLY_PROVIDER_TOKEN: ${STELLY_QOBUZ_TOKEN}   # the shared one
-  #     volumes:
-  #       - /srv/music:/music:ro
-  #     ports:
-  #       - "127.0.0.1:7710:7710"
-  #
   # The Qobuz account, its credentials and its one request queue, for the
   # server and anything else that talks to Qobuz. Pinned like the server, and
-  # bumped with it; on the compose network only, not published. Publish
-  # 127.0.0.1:7710:7710 too for stelly-mix on the host.
+  # bumped with it; on the compose network only, not published: its stream
+  # URLs are Qobuz's own. Publish 127.0.0.1:7710:7710 too for stelly-mix on
+  # the host.
   qobuz:
     image: stellymusic/stelly-qobuz:v0.2.0
     command: ["serve", "--bind", "0.0.0.0:7710"]
-    # STELLY_QOBUZ_TOKEN, which it refuses to listen past loopback without,
-    # and the account: QOBUZ_APP_ID, QOBUZ_APP_SECRETS, QOBUZ_USER_AUTH_TOKEN,
-    # as `stelly-qobuz login` wrote them on a machine with a browser. The
+    # The account, QOBUZ_APP_ID, QOBUZ_APP_SECRETS, QOBUZ_USER_AUTH_TOKEN, as
+    # `stelly-qobuz login` wrote them on a machine with a browser: its
     # sign-in's redirect cannot reach a container, so it is not run here.
+    environment:
+      # The shared token, which it listens with under its own name.
+      STELLY_QOBUZ_TOKEN: ${STELLY_PROVIDER_TOKEN}
     env_file:
-      - path: .env
-        required: false
       - path: qobuz.env
         required: true
     volumes:
@@ -106,7 +94,41 @@ services:
     init: true
     restart: unless-stopped
 
+  # The YouTube Music account. Its audio is relayed through it, YouTube's
+  # stream URLs answering only the address that asked, so devices fetch from
+  # it directly: its port is published like the server's, to be reached the
+  # same way, and YTMUSIC_PUBLIC_URL is that address as devices see it. Its
+  # sign-in is browser.json in its volume, from `stelly-ytmusic login` on a
+  # machine with a browser, copied in as above.
+  ytmusic:
+    image: stellymusic/stelly-ytmusic:v0.2.0
+    environment:
+      PUBLIC_URL: ${YTMUSIC_PUBLIC_URL:?set YTMUSIC_PUBLIC_URL in .env, how devices reach port 7712}
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:7712:7712"
+    volumes:
+      - ytmusic:/data  # browser.json, cookies.txt and ids.db: back this up too
+    init: true
+    restart: unless-stopped
+
+  # A music folder too, if there is one: add `http://local:7710` to
+  # STELLY_PROVIDERS above, where in the order it should come.
+  #
+  #   local:
+  #     build: https://github.com/nab-os/stelly-local.git#v0.1.0
+  #     environment:
+  #       PUBLIC_URL: http://<this-host>:7711   # how devices reach the files
+  #     env_file: .env                          # STELLY_PROVIDER_TOKEN
+  #     volumes:
+  #       - /srv/music:/music:ro
+  #     ports:
+  #       - "127.0.0.1:7711:7710"
+
 volumes:
   data:
   cache:
   qobuz:
+  ytmusic:
