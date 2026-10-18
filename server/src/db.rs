@@ -90,7 +90,11 @@ pub fn connect(db_path: &Path, busy: Duration) -> Result<SqliteConnection> {
         .with_context(|| format!("{} is not a UTF-8 path", db_path.display()))?;
     let mut conn = SqliteConnection::establish(url)
         .with_context(|| format!("opening {}", db_path.display()))?;
-    conn.batch_execute(&format!("PRAGMA busy_timeout = {}", busy.as_millis()))?;
+    // WAL's own advice: a commit waits for no disk sync, only a checkpoint
+    // does. The database stays whole whatever happens; a power cut can lose
+    // the last few commits, not corrupt it. A write a request makes, a new
+    // provider item's id, no longer waits on the disk.
+    conn.batch_execute(&format!("PRAGMA busy_timeout = {}; PRAGMA synchronous = NORMAL;", busy.as_millis()))?;
     Ok(conn)
 }
 

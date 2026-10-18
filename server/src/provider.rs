@@ -137,14 +137,22 @@ impl Provider {
         self.sources[source].client.at(self.priority)
     }
 
-    /// `f` with the ids' database, opened on first use. Never held across an
-    /// await.
-    fn with_refs<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
+    /// `f` with the ids' database, opened on first use, as is: for what
+    /// runs its own transactions. Never held across an await.
+    fn with_conn<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         if conn.is_none() {
             *conn = Some(crate::db::open_for_write(&self.db_path)?);
         }
         f(conn.as_mut().expect("opened just above"))
+    }
+
+    /// `f` with the ids' database, in one transaction: a search's or an
+    /// album's worth of new ids is written and synced to disk once, not once
+    /// an item. Never held across an await.
+    fn with_refs<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
+        use diesel::Connection;
+        self.with_conn(|conn| conn.transaction(f))
     }
 
     /// The provider a catalogue from before several providers came from:
@@ -185,7 +193,7 @@ impl Provider {
         }
         if let Some(source) = self.legacy().await? {
             let legacy = self.name(source).await?;
-            let taken = self.with_refs(|conn| refs::bootstrap(conn, &legacy))?;
+            let taken = self.with_conn(|conn| refs::bootstrap(conn, &legacy))?;
             if taken > 0 {
                 eprintln!("took {taken} catalogue ids for {legacy}'s");
             }

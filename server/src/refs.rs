@@ -93,6 +93,18 @@ struct Found {
 }
 
 #[derive(QueryableByName)]
+struct Known {
+    #[diesel(sql_type = Text)]
+    id: String,
+    #[diesel(sql_type = BigInt)]
+    no_isrc: i64,
+    #[diesel(sql_type = BigInt)]
+    no_key: i64,
+    #[diesel(sql_type = BigInt)]
+    no_seconds: i64,
+}
+
+#[derive(QueryableByName)]
 struct Route {
     #[diesel(sql_type = Text)]
     provider: String,
@@ -108,14 +120,24 @@ struct Count {
 
 /// Stelly's id for `provider`'s `item`, made if it has none yet.
 pub fn resolve(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item) -> Result<String> {
-    let known = diesel::sql_query("SELECT id FROM refs WHERE provider = ? AND kind = ? AND ref = ?")
-        .bind::<Text, _>(provider)
-        .bind::<Text, _>(kind.as_str())
-        .bind::<Text, _>(&item.external)
-        .load::<Found>(conn)?;
+    let known = diesel::sql_query(
+        "SELECT id, isrc IS NULL AS no_isrc, match_key IS NULL AS no_key, seconds IS NULL AS no_seconds
+         FROM refs WHERE provider = ? AND kind = ? AND ref = ?",
+    )
+    .bind::<Text, _>(provider)
+    .bind::<Text, _>(kind.as_str())
+    .bind::<Text, _>(&item.external)
+    .load::<Known>(conn)?;
     if let Some(found) = known.into_iter().next() {
         // A stub, an artist named in a track say, learns what it is called
-        // when the item itself arrives.
+        // when the item itself arrives. Only then is it written to: an item
+        // seen again is read alone, and waits on no writer.
+        let learns = (found.no_isrc != 0 && item.isrc.is_some())
+            || (found.no_key != 0 && item.key.is_some())
+            || (found.no_seconds != 0 && item.seconds.is_some());
+        if !learns {
+            return Ok(found.id);
+        }
         diesel::sql_query(
             "UPDATE refs SET isrc = COALESCE(isrc, ?), match_key = COALESCE(match_key, ?), seconds = COALESCE(seconds, ?)
              WHERE provider = ? AND kind = ? AND ref = ?",
@@ -152,13 +174,14 @@ fn same_as(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item)
     if kind == Kind::Playlist {
         return Ok(None);
     }
-    let elsewhere = "provider <> ? AND id NOT IN (SELECT id FROM refs WHERE kind = ? AND provider = ?)";
+    // Another provider's, under an id this one has nothing under: looked up
+    // by that id, not by listing every id this provider has.
+    let elsewhere = "provider <> ? AND NOT EXISTS (SELECT 1 FROM refs o WHERE o.kind = refs.kind AND o.id = refs.id AND o.provider = ?)";
     if let Some(isrc) = item.isrc.map(str::trim).filter(|s| !s.is_empty()) {
         let found = diesel::sql_query(format!("SELECT id FROM refs WHERE kind = ? AND isrc = ? AND {elsewhere} LIMIT 1"))
             .bind::<Text, _>(kind.as_str())
             .bind::<Text, _>(isrc.to_ascii_uppercase())
             .bind::<Text, _>(provider)
-            .bind::<Text, _>(kind.as_str())
             .bind::<Text, _>(provider)
             .load::<Found>(conn)?;
         if let Some(found) = found.into_iter().next() {
@@ -176,7 +199,6 @@ fn same_as(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item)
         .bind::<Text, _>(kind.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(provider)
-        .bind::<Text, _>(kind.as_str())
         .bind::<Text, _>(provider)
         .load::<Found>(conn)?;
     Ok(found.into_iter().next().map(|f| f.id))
@@ -233,7 +255,7 @@ fn first_free(conn: &mut SqliteConnection, kind: Kind) -> Result<i64> {
 pub fn routes(conn: &mut SqliteConnection, kind: Kind, id: &str) -> Result<Vec<(String, String)>> {
     let rows = diesel::sql_query(
         "SELECT provider, ref AS external FROM refs WHERE kind = ?1 AND id = COALESCE(
-             (SELECT CAST(into_id AS TEXT) FROM track_merges WHERE ?1 = 'track' AND CAST(from_id AS TEXT) = ?2), ?2)",
+             (SELECT CAST(into_id AS TEXT) FROM track_merges WHERE ?1 = 'track' AND from_id = CAST(?2 AS INTEGER)), ?2)",
     )
     .bind::<Text, _>(kind.as_str())
     .bind::<Text, _>(id)
