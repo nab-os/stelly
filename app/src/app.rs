@@ -520,12 +520,17 @@ fn Shell() -> Element {
         }
     });
     let provider = use_signal(|| crate::cache::read::<crate::catalogue::Capabilities>(PROVIDER_CACHE));
-    use_context_provider(|| Provider(provider));
+    let providers = use_signal(|| crate::cache::read::<Vec<crate::catalogue::Capabilities>>(PROVIDERS_CACHE).unwrap_or_default());
+    use_context_provider(|| Provider(provider, providers));
     use_future(move || async move {
-        let mut provider = provider;
+        let (mut provider, mut providers) = (provider, providers);
         if let Ok(found) = backend().capabilities().await {
             crate::cache::write(PROVIDER_CACHE, &found);
             provider.set(Some(found));
+        }
+        if let Ok(found) = backend().providers().await {
+            crate::cache::write(PROVIDERS_CACHE, &found);
+            providers.set(found);
         }
     });
     // A server older than users answers no `me`, and let any device hide.
@@ -985,6 +990,7 @@ const POINTS_META_CACHE: &str = "points-meta.json";
 const POINTS_STAMP_CACHE: &str = "points.stamp";
 const ME_CACHE: &str = "me.json";
 const PROVIDER_CACHE: &str = "provider.json";
+const PROVIDERS_CACHE: &str = "providers.json";
 
 /// The map's points as `map.js` reads them, and the stamp they were cut at.
 /// A global because the asset handler answers outside any scope.

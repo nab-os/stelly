@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         // --------------------------------------------------------- browsing
         .route("/api/search", get(search))
         .route("/api/capabilities", get(capabilities))
+        .route("/api/providers", get(providers))
         .route("/api/favourites/tracks", get(favourite_tracks))
         .route("/api/favourites/albums", get(favourite_albums))
         .route("/api/favourites/artists", get(favourite_artists))
@@ -112,6 +113,9 @@ struct SearchQuery {
     q: String,
     #[serde(default = "default_search_limit")]
     limit: usize,
+    /// Comma-separated provider names to ask; all of them when absent.
+    #[serde(default)]
+    providers: Option<String>,
 }
 
 fn default_search_limit() -> usize {
@@ -173,7 +177,7 @@ async fn search(
     _: PlayAuth,
     Query(query): Query<SearchQuery>,
 ) -> Reply<SearchResults> {
-    Ok(Json(state.hub.search(&query.q, query.limit).await?))
+    Ok(Json(state.hub.search(&query.q, query.limit, &names(query.providers.as_deref())).await?))
 }
 
 /// The asking device's user's likes, nobody else's.
@@ -280,6 +284,15 @@ async fn file_url(
     Ok(Json(StreamUrl {
         url: state.hub.file_url(id, query.quality()).await?,
     }))
+}
+
+fn names(list: Option<&str>) -> Vec<String> {
+    list.unwrap_or_default().split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()
+}
+
+/// Each provider, most preferred first, so the app can search one of them.
+async fn providers(State(state): State<AppState>, _: PlayAuth) -> Reply<Vec<Capabilities>> {
+    Ok(Json(state.hub.providers().await?))
 }
 
 /// What the music provider is and can do, so the app offers only that.

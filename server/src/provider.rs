@@ -342,10 +342,18 @@ impl Provider {
 
     // ------------------------------------------------------------ browsing
 
-    /// Every provider's results, the first one's first, each item once.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<SearchResults> {
+    /// Every provider's results, the first one's first, each item once; or
+    /// only those of the providers `only` names, when it names any.
+    pub async fn search(&self, query: &str, limit: usize, only: &[String]) -> Result<SearchResults> {
         self.ready().await?;
-        let asks = (0..self.sources.len()).map(|source| async move { (source, self.client(source).send(api::search(query, limit)).await) });
+        let mut asked = Vec::new();
+        for name in only {
+            asked.push(self.named(name).await?);
+        }
+        if asked.is_empty() {
+            asked = (0..self.sources.len()).collect();
+        }
+        let asks = asked.into_iter().map(|source| async move { (source, self.client(source).send(api::search(query, limit)).await) });
         let answers = futures_util::future::join_all(asks).await;
         let mut out = SearchResults::default();
         let (mut tracks, mut albums, mut artists) = (HashSet::new(), HashSet::new(), HashSet::new());
