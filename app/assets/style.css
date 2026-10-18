@@ -695,6 +695,28 @@ ol.list .row::before {
   .search-history-remove { visibility: visible; }
 }
 
+/* Where a search looks: a chip that opens a list, its words saying where. */
+.source-select {
+  flex: none;
+  max-width: 45%;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--row) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b90a3' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 10px center;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 7px 28px 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.source-select:hover { background-color: var(--row-hover); }
+.source-select:focus { outline: none; border-color: var(--accent); }
+.source-select option { background: var(--panel); color: var(--text); }
+
 /* Two options, exactly one of them lit. */
 .segmented {
   display: flex;

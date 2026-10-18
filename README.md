@@ -126,8 +126,9 @@ and title, artists by name. What else is one recording, the dedupe stage
 hears.
 It plays and analyses from the first provider in the list that has it, the
 next if that fails. Search, artist pages and playlists gather from all of
-them; a search can be narrowed to one, from the chips beside the search box
-or with `/api/search?providers=local`. A provider that does not answer is
+them; a search can be narrowed to one, from the list beside the search box
+("in your space", "in all providers", "in Qobuz"...) or with
+`/api/search?providers=local`. A provider that does not answer is
 left out, asked again half a minute later, so one down holds nothing up: a
 search waits six seconds for each at most.
 
