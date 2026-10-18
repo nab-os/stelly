@@ -127,19 +127,21 @@ impl Provider {
     }
 
     /// The provider a catalogue from before several providers came from:
-    /// the one that can convert what it stored, or else the first.
-    async fn legacy(&self) -> Result<usize> {
+    /// the one that can convert what it stored. None when it is not among
+    /// them: until it is, that catalogue is nobody's.
+    async fn legacy(&self) -> Result<Option<usize>> {
         for (source, s) in self.sources.iter().enumerate() {
             if s.capabilities().await?.import {
-                return Ok(source);
+                return Ok(Some(source));
             }
         }
         anyhow::ensure!(!self.sources.is_empty(), "no music provider is configured");
-        Ok(0)
+        Ok(None)
     }
 
     /// Every provider has said what it is, and a catalogue from before
-    /// several providers has its ids taken for its provider's.
+    /// several providers has its ids taken for its provider's, if that
+    /// provider is one of them.
     async fn ready(&self) -> Result<()> {
         self.ready
             .get_or_try_init(|| async {
@@ -150,10 +152,12 @@ impl Provider {
                         bail!("two music providers are both called {name:?}");
                     }
                 }
-                let legacy = self.name(self.legacy().await?).await?;
-                let taken = self.with_refs(|conn| refs::bootstrap(conn, &legacy))?;
-                if taken > 0 {
-                    eprintln!("took {taken} catalogue ids for {legacy}'s");
+                if let Some(source) = self.legacy().await? {
+                    let legacy = self.name(source).await?;
+                    let taken = self.with_refs(|conn| refs::bootstrap(conn, &legacy))?;
+                    if taken > 0 {
+                        eprintln!("took {taken} catalogue ids for {legacy}'s");
+                    }
                 }
                 Ok(())
             })
@@ -558,12 +562,16 @@ impl Provider {
     /// a Stelly before providers stored them, in the protocol's. Its ids are
     /// Stelly's, so they are left as they are.
     pub async fn import<T: DeserializeOwned>(&self, kind: Kind, items: &[Value]) -> Result<Vec<Option<T>>> {
-        self.client(self.legacy().await?).send(api::import(kind, items)).await
+        let source = self.legacy().await?.context("no music provider can convert what a Stelly before providers stored")?;
+        self.client(source).send(api::import(kind, items)).await
     }
 
-    /// What that provider is.
-    pub async fn legacy_capabilities(&self) -> Result<Capabilities> {
-        Ok(self.sources[self.legacy().await?].capabilities().await?.clone())
+    /// What that provider is, if it is one of them.
+    pub async fn legacy_capabilities(&self) -> Result<Option<Capabilities>> {
+        match self.legacy().await? {
+            Some(source) => Ok(Some(self.sources[source].capabilities().await?.clone())),
+            None => Ok(None),
+        }
     }
 }
 

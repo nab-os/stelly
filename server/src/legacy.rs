@@ -69,12 +69,12 @@ pub async fn run(db_path: &Path, provider: &Provider, report: &(dyn Fn(String) +
     if !pending(&mut conn)? {
         return Ok(Imported::default());
     }
-    let capabilities = provider.legacy_capabilities().await.context("asking the music provider what it can do")?;
-    anyhow::ensure!(
-        capabilities.import,
-        "{} cannot convert what an earlier Stelly stored; the stored items stay as they are",
-        capabilities.title
-    );
+    // Only the provider that catalogue came from can make sense of it.
+    provider
+        .legacy_capabilities()
+        .await
+        .context("asking the music providers what they can do")?
+        .context("no configured music provider can convert what an earlier Stelly stored; it stays as it is")?;
 
     let mut total = Imported::default();
     for (table, kind) in [("likes", None), ("artists", Some(Kind::Artist)), ("albums", Some(Kind::Album)), ("tracks", Some(Kind::Track))] {

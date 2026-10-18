@@ -242,11 +242,17 @@ pub fn routes(conn: &mut SqliteConnection, kind: Kind, id: &str) -> Result<Vec<(
 }
 
 /// Take a catalogue from before several providers, keyed by `provider`'s
-/// ids, for Stelly's own: each item it holds, liked or blocked, becomes
-/// `provider`'s item of the same id. Nothing, once there are any refs.
+/// ids, for Stelly's own: each item it holds, liked or blocked, that no
+/// provider stands for yet becomes `provider`'s item of the same id. Once;
+/// `provider` is the one that catalogue came from, the one that can convert
+/// what it stored, never merely the first configured.
+///
+/// A build before this credited such a catalogue to the first provider,
+/// whatever it was: the ids it gave away, each the provider's own id as it
+/// was, are given back.
 pub fn bootstrap(conn: &mut SqliteConnection, provider: &str) -> Result<usize> {
-    let any = diesel::sql_query("SELECT COUNT(*) AS n FROM (SELECT 1 FROM refs LIMIT 1)").get_result::<Count>(conn)?;
-    if any.n > 0 {
+    let done = diesel::sql_query("SELECT COUNT(*) AS n FROM id_counters WHERE kind = 'bootstrapped'").get_result::<Count>(conn)?;
+    if done.n > 0 {
         return Ok(0);
     }
 
@@ -263,22 +269,43 @@ pub fn bootstrap(conn: &mut SqliteConnection, provider: &str) -> Result<usize> {
         #[diesel(sql_type = Nullable<BigInt>)]
         seconds: Option<i64>,
     }
+    let unclaimed = |kind: &str, id: &str| format!("NOT EXISTS (SELECT 1 FROM refs r WHERE r.kind = '{kind}' AND r.id = {id})");
     let queries = [
         (
             Kind::Track,
-            "SELECT CAST(t.id AS TEXT) AS id, a.name AS artist, t.title AS title, t.isrc AS isrc, t.duration AS seconds
-             FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id",
+            format!(
+                "SELECT CAST(t.id AS TEXT) AS id, a.name AS artist, t.title AS title, t.isrc AS isrc, t.duration AS seconds
+                 FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id WHERE {}",
+                unclaimed("track", "CAST(t.id AS TEXT)")
+            ),
         ),
         (
             Kind::Album,
-            "SELECT b.id AS id, a.name AS artist, b.title AS title, NULL AS isrc, NULL AS seconds
-             FROM albums b LEFT JOIN artists a ON a.id = b.artist_id",
+            format!(
+                "SELECT b.id AS id, a.name AS artist, b.title AS title, NULL AS isrc, NULL AS seconds
+                 FROM albums b LEFT JOIN artists a ON a.id = b.artist_id WHERE {}",
+                unclaimed("album", "b.id")
+            ),
         ),
-        (Kind::Artist, "SELECT CAST(id AS TEXT) AS id, name AS artist, NULL AS title, NULL AS isrc, NULL AS seconds FROM artists"),
+        (
+            Kind::Artist,
+            format!(
+                "SELECT CAST(id AS TEXT) AS id, name AS artist, NULL AS title, NULL AS isrc, NULL AS seconds
+                 FROM artists WHERE {}",
+                unclaimed("artist", "CAST(id AS TEXT)")
+            ),
+        ),
     ];
 
     conn.batch_execute("BEGIN").context("bootstrapping refs")?;
-    let mut written = 0;
+    // Given away by an earlier build: an item whose id is the provider's own
+    // id is the catalogue's, and the catalogue is `provider`'s.
+    let mut written = diesel::sql_query(
+        "UPDATE OR IGNORE refs SET provider = ?1
+         WHERE ref = id AND provider <> ?1 AND kind IN ('track', 'album', 'artist')",
+    )
+    .bind::<Text, _>(provider)
+    .execute(conn)?;
     for (kind, query) in queries {
         for row in diesel::sql_query(query).load::<Row>(conn)? {
             let key = match (&row.artist, &row.title) {
@@ -301,17 +328,26 @@ pub fn bootstrap(conn: &mut SqliteConnection, provider: &str) -> Result<usize> {
     }
     // Liked or hidden but never catalogued: theirs too, unnamed until seen.
     let identity = [
-        "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT kind, ref_id, ?, ref_id FROM likes",
-        "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT 'artist', CAST(artist_id AS TEXT), ?, CAST(artist_id AS TEXT) FROM blocked_artists",
+        format!(
+            "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT kind, ref_id, ?, ref_id FROM likes l WHERE {}",
+            "NOT EXISTS (SELECT 1 FROM refs r WHERE r.kind = l.kind AND r.id = l.ref_id)"
+        ),
+        format!(
+            "INSERT OR IGNORE INTO refs (kind, id, provider, ref)
+             SELECT 'artist', CAST(artist_id AS TEXT), ?, CAST(artist_id AS TEXT) FROM blocked_artists WHERE {}",
+            unclaimed("artist", "CAST(artist_id AS TEXT)")
+        ),
         // Merged by `dedupe` before there were refs: the one it joined.
-        "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT 'track', CAST(into_id AS TEXT), ?, CAST(from_id AS TEXT) FROM track_merges",
+        "INSERT OR IGNORE INTO refs (kind, id, provider, ref)
+         SELECT 'track', CAST(into_id AS TEXT), ?, CAST(from_id AS TEXT) FROM track_merges"
+            .to_string(),
     ];
     for query in identity {
         if let Ok(n) = diesel::sql_query(query).bind::<Text, _>(provider).execute(conn) {
             written += n;
         }
     }
-    conn.batch_execute("COMMIT")?;
+    conn.batch_execute("INSERT INTO id_counters (kind, next) VALUES ('bootstrapped', 1); COMMIT;")?;
     Ok(written)
 }
 
@@ -364,6 +400,21 @@ mod tests {
         let mut routes = routes(conn, Kind::Track, &qobuz).unwrap();
         routes.sort();
         assert_eq!(routes, [("local".into(), "9".into()), ("qobuz".into(), "111".into())]);
+    }
+
+    #[test]
+    fn a_catalogue_given_to_the_wrong_provider_is_given_back() {
+        let conn = &mut scratch();
+        conn.batch_execute(
+            "INSERT INTO tracks (id, title) VALUES (500, 'Gwerz');
+             INSERT INTO refs (kind, id, provider, ref) VALUES ('track', '500', 'ytmusic', '500'),
+                                                               ('track', '501', 'ytmusic', '8796093022207');",
+        )
+        .unwrap();
+        bootstrap(conn, "qobuz").unwrap();
+        assert_eq!(routes(conn, Kind::Track, "500").unwrap(), [("qobuz".to_string(), "500".to_string())]);
+        // Its own item, under an id of Stelly's, stays its own.
+        assert_eq!(routes(conn, Kind::Track, "501").unwrap(), [("ytmusic".to_string(), "8796093022207".to_string())]);
     }
 
     #[test]
