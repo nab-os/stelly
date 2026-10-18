@@ -325,6 +325,9 @@ pub struct Library {
     /// searches are for something new, not a re-check of what is already
     /// kept.
     pub liked_only: Signal<bool>,
+    /// The one provider a search of the catalogue asks, by name, or all of
+    /// them. Sticks across searches, like `source`.
+    pub only: Signal<Option<String>>,
     /// Where a search looks. Sticks across searches, like `liked_only`.
     pub source: Signal<Source>,
     /// The three favourited-id sets a search result is checked against, or
@@ -379,6 +382,7 @@ impl Library {
             layouts: Signal::new(prefs.layouts),
             grouping: Signal::new(prefs.grouping),
             liked_only: Signal::new(false),
+            only: Signal::new(None),
             source: Signal::new(Source::Catalogue),
             liked: Signal::new(None),
             epoch: Signal::new(0),
@@ -703,6 +707,7 @@ impl Library {
         self.pending.set(None);
         let epoch = *self.epoch.peek();
         let space_only = *self.source.peek() == Source::Space;
+        let only = self.only.peek().clone();
         // Already showing what `kept` had for this view: a failed refresh
         // leaves that up rather than swapping it for an error.
         let refreshing = !*self.loading.peek();
@@ -716,7 +721,7 @@ impl Library {
             } else {
                 None
             };
-            let loaded = load(target, space_only).await;
+            let loaded = load(target, space_only, only).await;
 
             // Someone asked for a different view while this was in flight.
             // Writing now would put these rows under that view's heading, and
@@ -818,7 +823,7 @@ const RELEASES_CACHE: &str = "releases.json";
 /// How far back new releases reach.
 const RELEASES_DAYS: u32 = 90;
 
-async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
+async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Result<Shelf> {
     let mut shelf = Shelf::default();
 
     match view {
@@ -834,7 +839,7 @@ async fn load(view: View, space_only: bool) -> anyhow::Result<Shelf> {
             }
         }
         View::Search { query, scope } => {
-            let found = backend().search(&query, SEARCH_LIMIT).await?;
+            let found = backend().search(&query, SEARCH_LIMIT, only.as_deref()).await?;
             if scope.tracks() {
                 shelf.tracks = found.tracks;
             }
@@ -1092,7 +1097,10 @@ pub fn MainScreen() -> Element {
 fn SearchBar() -> Element {
     let library = use_context::<Library>();
     let search = use_context::<Search>();
-    let provider_title = use_context::<super::Provider>().title();
+    let provider = use_context::<super::Provider>();
+    let provider_title = provider.title();
+    let each = provider.each();
+    let only = library.only.read().clone();
     let mut query = search.text;
     let source = *library.source.read();
 
@@ -1104,10 +1112,13 @@ fn SearchBar() -> Element {
         );
     });
 
-    let pick = move |wanted: Source| {
-        let mut source = library.source;
-        if *source.peek() != wanted {
+    // A source, and for the catalogue the one provider to ask, if any.
+    let pick = move |wanted: Source, provider: Option<String>| {
+        let (mut source, mut only) = (library.source, library.only);
+        let provider = if wanted == Source::Space { only.peek().clone() } else { provider };
+        if *source.peek() != wanted || *only.peek() != provider {
             source.set(wanted);
+            only.set(provider);
             // Re-run rather than hide a half: a hidden shelf would still be
             // what "play all" plays.
             let view = library.view.peek().clone();
@@ -1152,14 +1163,36 @@ fn SearchBar() -> Element {
                 button {
                     class: if source == Source::Space { "active" } else { "" },
                     title: "only what's already in your space",
-                    onclick: move |_| pick(Source::Space),
+                    onclick: move |_| pick(Source::Space, None),
                     "space"
                 }
-                button {
-                    class: if source == Source::Catalogue { "active" } else { "" },
-                    title: "the whole {provider_title} catalogue",
-                    onclick: move |_| pick(Source::Catalogue),
-                    "{provider_title.to_lowercase()}"
+                if each.is_empty() {
+                    button {
+                        class: if source == Source::Catalogue { "active" } else { "" },
+                        title: "the whole {provider_title} catalogue",
+                        onclick: move |_| pick(Source::Catalogue, None),
+                        "{provider_title.to_lowercase()}"
+                    }
+                } else {
+                    // Several providers: all of them at once, or one.
+                    button {
+                        class: if source == Source::Catalogue && only.is_none() { "active" } else { "" },
+                        title: "every provider: {provider_title}",
+                        onclick: move |_| pick(Source::Catalogue, None),
+                        "all"
+                    }
+                    for one in each {
+                        button {
+                            key: "{one.name}",
+                            class: if source == Source::Catalogue && only.as_deref() == Some(one.name.as_str()) { "active" } else { "" },
+                            title: "only {one.title}",
+                            onclick: {
+                                let name = one.name.clone();
+                                move |_| pick(Source::Catalogue, Some(name.clone()))
+                            },
+                            "{one.title.to_lowercase()}"
+                        }
+                    }
                 }
             }
         }
@@ -1503,7 +1536,9 @@ impl Item {
 /// other sort interleaves them, unless split by kind, see `Grouping`.
 #[component]
 fn MixedRows() -> Element {
-    let provider_title = use_context::<super::Provider>().title();
+    let only = use_context::<Library>().only.read().clone();
+    // The provider the search asked, or all of them.
+    let provider_title = use_context::<super::Provider>().title_of(only.as_deref());
     let library = use_context::<Library>();
     let player = use_context::<Player>();
     let local = use_context::<LocalIds>();

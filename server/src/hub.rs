@@ -215,10 +215,18 @@ impl Hub {
             .await
     }
 
-    pub async fn search(&self, query: &str, limit: usize) -> Result<SearchResults> {
-        let key = format!("search:{limit}:{query}");
+    /// `only` names the providers to ask; none is all of them.
+    pub async fn search(&self, query: &str, limit: usize, only: &[String]) -> Result<SearchResults> {
+        let key = format!("search:{limit}:{}:{query}", only.join(","));
         self.searches
-            .get_or(key, async { self.session().await?.search(query, limit).await })
+            .get_or(key, async { self.session().await?.search(query, limit, only).await })
+            .await
+    }
+
+    /// Each provider, most preferred first: what it is called and can do.
+    pub async fn providers(&self) -> Result<Vec<Capabilities>> {
+        self.catalogue
+            .get_or("providers".to_string(), async { self.provider().each_capabilities().await })
             .await
     }
 

@@ -476,9 +476,27 @@ pub struct Me(pub Signal<Option<Device>>);
 /// until the server has said, or from a server before 1.2, which only ever
 /// had Qobuz behind it.
 #[derive(Clone, Copy)]
-pub struct Provider(pub Signal<Option<crate::catalogue::Capabilities>>);
+pub struct Provider(
+    pub Signal<Option<crate::catalogue::Capabilities>>,
+    /// Each provider on its own, most preferred first; none from a server
+    /// that cannot list them.
+    pub Signal<Vec<crate::catalogue::Capabilities>>,
+);
 
 impl Provider {
+    /// The providers a search can be narrowed to: none when there is only
+    /// one, since narrowing to it is no narrowing.
+    pub fn each(&self) -> Vec<crate::catalogue::Capabilities> {
+        let each = self.1.read().clone();
+        if each.len() > 1 { each } else { Vec::new() }
+    }
+
+    /// What to call the provider named `only`, or every one when none is.
+    pub fn title_of(&self, only: Option<&str>) -> String {
+        let named = only.and_then(|name| self.1.read().iter().find(|c| c.name == name).map(|c| c.title.clone()));
+        named.unwrap_or_else(|| self.title())
+    }
+
     /// What to call the catalogue behind the server.
     pub fn title(&self) -> String {
         self.0.read().as_ref().map_or_else(|| "Catalogue".to_string(), |c| c.title.clone())

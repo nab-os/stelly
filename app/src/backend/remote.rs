@@ -168,12 +168,15 @@ impl Remote {
 
     // -------------------------------------------------------------- browsing
 
-    pub async fn search(&self, query: &str, limit: usize) -> Result<SearchResults> {
-        self.get(&format!(
-            "/api/search?q={}&limit={limit}",
-            urlencode(query)
-        ))
-        .await
+    /// `only` names the one provider to ask; none is all of them.
+    pub async fn search(&self, query: &str, limit: usize, only: Option<&str>) -> Result<SearchResults> {
+        let only = only.map(|name| format!("&providers={}", urlencode(name))).unwrap_or_default();
+        self.get(&format!("/api/search?q={}&limit={limit}{only}", urlencode(query))).await
+    }
+
+    /// Each provider, most preferred first.
+    pub async fn providers(&self) -> Result<Vec<crate::catalogue::Capabilities>> {
+        self.get("/api/providers").await
     }
 
     pub async fn favourite_tracks(&self, cap: usize) -> Result<Vec<RemoteTrack>> {
