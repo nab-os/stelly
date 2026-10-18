@@ -95,30 +95,55 @@ sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
 The server needs none of it: it depends on `stelly-core`, the half the two
 share, not on the app, which keeps dioxus, wry and GTK out.
 
-### The provider
+### Providers
 
-The server asks a catalogue for nothing itself: its provider does, for every
-program on the machine. Stelly finds it at `STELLY_PROVIDER_URL` (default
-`http://127.0.0.1:7710`), sending `STELLY_PROVIDER_TOKEN` if it is set, from
-the environment or `.env`; `stelly-server whoami` says what it found.
-`compose.yaml` runs one beside the server.
+The server asks a catalogue for nothing itself: its providers do, for every
+program on the machine. `STELLY_PROVIDERS` lists them, most preferred
+first, a token where one is wanted as the URL's user:
 
-Two exist:
-[stelly-qobuz](https://hub.docker.com/r/stellymusic/stelly-qobuz), in
-front of a Qobuz account, and [stelly-local](https://github.com/nab-os/stelly-local),
-in front of a folder of music files:
+```sh
+STELLY_PROVIDERS=http://127.0.0.1:7711,http://secret@127.0.0.1:7710
+```
+
+or `STELLY_PROVIDER_URL` (default `http://127.0.0.1:7710`) and
+`STELLY_PROVIDER_TOKEN` for just one, from the environment or `.env`.
+`stelly-server whoami` says what it found. `compose.yaml` runs one beside
+the server.
+
+Three exist: [stelly-qobuz](https://hub.docker.com/r/stellymusic/stelly-qobuz),
+in front of a Qobuz account, stelly-ytmusic, in front of a YouTube Music
+one, and [stelly-local](https://github.com/nab-os/stelly-local), in front of
+a folder of music files:
 
 ```sh
 stelly-local serve ~/Music          # http://127.0.0.1:7710
 ```
 
-A provider says what it can do: similar artists, which the crawl expands
-through, the account's own playlists, writing a playlist back, following new
-releases. What it cannot, Stelly does without, and the app does not offer.
+Stelly speaks in ids of its own, and keeps which providers' items each
+stands for. One recording on two providers is one track, analysed once and
+one point on the map, when their ISRCs agree; albums are matched by artist
+and title, artists by name. What else is one recording, the dedupe stage
+hears.
+It plays and analyses from the first provider in the list that has it, the
+next if that fails. Search, artist pages and playlists gather from all of
+them.
 
-A database from before providers kept items in Qobuz's own shapes; the
-server has the provider convert them at start, once (`stelly-server
-import` does it by hand).
+A provider says what it can do: similar artists, which the crawl expands
+through, the account's own likes and playlists, writing a playlist back,
+following new releases. What none can, Stelly does without, and the app
+does not offer.
+
+An account's own likes on a provider become someone's in Stelly with:
+
+```sh
+stelly-server import --provider qobuz --user sasha            # tracks, albums, artists
+stelly-server import --provider ytmusic --user lou --kinds tracks --dry-run
+```
+
+A database from before providers kept items in Qobuz's own shapes, keyed by
+Qobuz's ids: the server has the provider that can convert them do so at
+start, once (`stelly-server convert-legacy` by hand), and takes those ids for
+its own.
 
 ## Running the pipeline
 
@@ -127,9 +152,10 @@ Every stage is a subcommand of the server, and also a button in the app's
 
 ```sh
 cd server
-cargo run --release -- whoami                   # verify the gateway's credentials
+cargo run --release -- whoami                   # each provider, and who it is signed in as
 cargo run --release -- crawl --max-tracks 2000  # likes, then similar artists
 cargo run --release -- analyse                  # fetch excerpts, extract features
+cargo run --release -- dedupe                   # merge tracks that sound the same
 cargo run --release -- build-space              # assemble vectors
 cargo run --release -- layout                   # UMAP projection for the map
 cargo run --release -- evaluate                 # space sanity check
@@ -204,6 +230,23 @@ at start, given `STELLY_SERVER` and `STELLY_TOKEN`.
 
 The server builds stelly-mix's renderer, Signalsmith Stretch, from C++: the
 build wants `clang` and `libclang-dev` besides the rest.
+
+
+### Deduplicating
+
+Catalogues file one recording under several entries, a single and its
+album, compilations, reissues, clean and explicit editions, and providers
+give it different ids and sometimes no ISRC. `dedupe` merges the tracks
+that are one by their CLAP embeddings: cosine similarity 0.995 or more and
+lengths within two seconds, or 0.999 between tracks whose ISRCs differ,
+which only the same master reaches. A track merges with the one it is kept
+as, never through a chain of others, so an audiobook's chapters in one voice
+stay chapters. The one kept is the closest to a like; the others' providers'
+items and likes become its, and `track_merges` remembers each merge, so an
+id a device still holds keeps playing. Each run compares only what was
+analysed since the last; on the production catalogue, the first merged
+52,887 tracks of 192,410 in under a minute. `--dry-run` says what it would
+merge.
 
 ## Running the app
 

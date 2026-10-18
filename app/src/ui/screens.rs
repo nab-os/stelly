@@ -202,7 +202,6 @@ fn clock(seconds: i64) -> String {
 /// and the space have about it.
 #[component]
 pub fn TrackScreen(track: RemoteTrack) -> Element {
-    let provider = use_context::<super::Provider>().title();
     let player = use_context::<Player>();
     let library = use_context::<Library>();
     let local = use_context::<LocalIds>();
@@ -330,8 +329,8 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("In your space", Some(if in_space { "yes" } else { "no" }.to_string()))}
                 {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from a like", m.seed_distance)))}
                 {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
-                {fact(&format!("{provider} track"), Some(track.id.to_string()))}
-                {fact(&format!("{provider} album"), track.album_id.clone())}
+                {fact("Track id", Some(track.id.to_string()))}
+                {fact("Album id", track.album_id.clone())}
             }
 
             if in_space && generator.can_steer() {

@@ -59,11 +59,11 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
     match selection {
         Selection::Track { .. } | Selection::Album { .. } | Selection::Artist { .. } => {
             let conn = &mut crate::db::open_for_write(&paths.db_path)?;
-            let mut client = Provider::from_env(&paths.env_dir).bulk();
+            let mut client = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
             crate::crawl::catalogue_target(conn, &mut client, &target.expect("a target"), job).await
         }
         Selection::Playlist { id } => {
-            let mut client = Provider::from_env(&paths.env_dir).bulk();
+            let mut client = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
             let tracks = client.playlist_tracks(*id, PLAYLIST_CAP).await?;
             job.log(format!("{} tracks in playlist {id}", tracks.len()));
             catalogue_each(paths, &mut client, tracks.iter().map(|t| Target::Track(t.id)).collect(), job).await
@@ -84,7 +84,7 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
                 })
                 .collect();
             job.log(format!("{} liked tracks and albums", targets.len()));
-            let mut client = Provider::from_env(&paths.env_dir).bulk();
+            let mut client = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
             catalogue_each(paths, &mut client, targets, job).await
         }
         Selection::Mood { phrase, count } => {
@@ -400,7 +400,7 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
     // What the provider calls itself is where each entry says it came from,
     // `qobuz:<id>` to stelly-mix. On a thread of its own, whatever runtime
     // this was called from.
-    let provider = Provider::from_env(&paths.env_dir).bulk();
+    let provider = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
     let source = std::thread::scope(|scope| {
         scope
             .spawn(|| -> Result<String> {
@@ -416,13 +416,13 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
     let mut handles = Vec::new();
     for n in 0..workers {
         let (queue, report, job) = (queue.clone(), report.clone(), job.clone());
-        let (env_dir, model_dir) = (paths.env_dir.clone(), paths.model_dir.clone());
+        let (env_dir, model_dir, db_path) = (paths.env_dir.clone(), paths.model_dir.clone(), paths.db_path.clone());
         let source = source.clone();
         // Loaded here, so a missing model fails the stage rather than a thread.
         let mut encoder = stelly_audio::clap::AudioEncoder::load(&model_dir, 1)?;
         let handle = std::thread::Builder::new().name(format!("stelly-mix-{n}")).spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
-            let client = Provider::from_env(&env_dir).bulk();
+            let client = Provider::from_env(&env_dir, &db_path).bulk();
             let Ok(http) = reqwest::Client::builder().timeout(DOWNLOAD_TIMEOUT).build() else { return };
             loop {
                 if job.cancelled() {

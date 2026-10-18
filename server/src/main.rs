@@ -24,14 +24,16 @@ mod auth;
 mod cache;
 mod cli;
 mod crawl;
+mod dedupe;
 mod db;
 mod hub;
-mod import;
+mod legacy;
 mod likes;
 mod mix;
 mod pipeline;
 mod playback;
 mod provider;
+mod refs;
 mod routes;
 mod space;
 use stelly_core::schema;
@@ -164,11 +166,13 @@ pub enum Command {
 
     Whoami(cli::Whoami),
     Import(cli::Import),
+    ConvertLegacy(cli::ConvertLegacy),
     Favourites(cli::Favourites),
 
     Crawl(cli::Crawl),
     Analyse(cli::Analyse),
     MixAnalyse(cli::MixAnalyse),
+    Dedupe(cli::Dedupe),
     BuildSpace(cli::BuildSpace),
     Layout(cli::Layout),
     Models(cli::Models),

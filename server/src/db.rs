@@ -359,7 +359,7 @@ mod tests {
             .first(conn)
             .unwrap();
         assert_eq!((legacy.as_deref(), meta, image), (Some("{\"id\":\"a1\"}"), None, None));
-        assert!(crate::import::pending(conn).unwrap());
+        assert!(crate::legacy::pending(conn).unwrap());
         // Not listed until imported, and new likes need no legacy at all.
         let listed: Vec<(crate::provider::RemoteTrack, i64)> = crate::likes::list(&db_path, 1, "track", 10).unwrap();
         assert!(listed.is_empty());
