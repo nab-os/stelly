@@ -14,7 +14,7 @@ use crate::backend::backend;
 use super::icons;
 pub use crate::api::Recipe;
 use crate::api::{GenerateRequest, Step, TrackMeta};
-use crate::qobuz::RemoteTrack;
+use crate::catalogue::RemoteTrack;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -402,8 +402,7 @@ pub(crate) fn as_remote(meta: &TrackMeta) -> RemoteTrack {
         duration: None,
         streamable: true,
         hires: false,
-        // The space stores no art, so the cover is derived from the album id.
-        image: crate::qobuz::cover_url(&meta.album_id),
+        image: meta.image.clone(),
         isrc: meta.isrc.clone(),
         // Neither travels through the space, `TrackMeta` carries a release
         // *year*, folded into the era block, not the full date, and never
@@ -430,6 +429,7 @@ mod tests {
                 genre: String::new(),
                 artist_id: 1,
                 album_id: String::new(),
+                image: None,
                 bpm: None,
                 seed_distance: 0,
                 isrc: isrc.map(str::to_string),

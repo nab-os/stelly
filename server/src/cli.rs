@@ -12,7 +12,7 @@
 //! from the structs below; `main` gathers them with its own into `Command`.
 
 use crate::pipeline::{analyse, assemble, demo, layout, models, Job, Paths};
-use crate::qobuz::QobuzClient;
+use crate::provider::Provider;
 use crate::schema::{albums, artists, layout as layout_table, tracks};
 use crate::{crawl, db, stages, Command};
 use anyhow::{bail, Context, Result};
@@ -25,10 +25,16 @@ use stelly_core::api::Target;
 
 // ---------------------------------------------------------------- arguments
 
-/// Check that the gateway has working credentials.
+/// Check that the music provider answers, and who it is signed in as.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "whoami")]
 pub struct Whoami {}
+
+/// Have the music provider convert what an earlier Stelly stored in its own
+/// shapes. `serve` does this at start; this does it now, in the foreground.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "import")]
+pub struct Import {}
 
 /// List the account's favourites.
 #[derive(FromArgs)]
@@ -271,6 +277,12 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
 
     match command {
         Command::Whoami(_) => block(Box::pin(whoami(paths))),
+        Command::Import(_) => block(Box::pin(async {
+            let report = |line: String| eprintln!("{line}");
+            let done = crate::import::run(&paths.db_path, &Provider::from_env(&paths.env_dir).bulk(), &report).await?;
+            println!("{} stored items converted, {} dropped", done.converted, done.dropped);
+            Ok(())
+        })),
         Command::Favourites(args) => block(Box::pin(favourites(args, paths))),
         Command::Crawl(args) => block(Box::pin(crawl_command(args, paths))),
         Command::Analyse(args) => block(Box::pin(analyse_command(args, paths))),
@@ -299,48 +311,46 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
 // ------------------------------------------------------------------ account
 
 async fn whoami(paths: &Paths) -> Result<()> {
-    let user = QobuzClient::from_env(&paths.env_dir).user().await?;
-    let field = |key: &str| user.get(key).and_then(|v| v.as_str()).unwrap_or("?").to_string();
-    let credential = user.get("credential").cloned().unwrap_or_default();
-    let subscription = credential
-        .get("label")
-        .or_else(|| credential.get("description"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    println!("user id     : {}", user.get("id").map(|v| v.to_string()).unwrap_or_default());
-    println!("email       : {}", field("email"));
-    println!("display name: {}", field("display_name"));
-    println!("subscription: {subscription}");
+    let provider = Provider::from_env(&paths.env_dir);
+    let what = provider.capabilities().await?;
+    let account = provider.account().await?;
+    let field = |value: Option<String>| value.unwrap_or_else(|| "?".into());
+    println!("provider    : {} ({}, at {})", what.title, what.name, provider.url());
+    println!("account id  : {}", field(account.id));
+    println!("email       : {}", field(account.email));
+    println!("display name: {}", field(account.name));
+    println!("subscription: {}", field(account.subscription));
     Ok(())
 }
 
 async fn favourites(args: Favourites, paths: &Paths) -> Result<()> {
     let kind = args.kind;
     let cap = if args.limit == 0 { usize::MAX } else { args.limit };
-    let items = QobuzClient::from_env(&paths.env_dir).favorites_raw(kind.as_str(), cap).await?;
-
-    let name = |v: &serde_json::Value, key: &str, field: &str| -> String {
-        v.get(key)
-            .and_then(|o| o.get(field))
-            .and_then(|s| s.as_str())
-            .unwrap_or("?")
-            .to_string()
+    let provider = Provider::from_env(&paths.env_dir);
+    let lines: Vec<String> = match kind {
+        Kind::Tracks => provider
+            .favourite_tracks(cap)
+            .await?
+            .iter()
+            .map(|t| format!("{:>12}  {} - {}  [{}]", t.id, t.artist, t.title, t.album))
+            .collect(),
+        Kind::Albums => provider
+            .favourite_albums(cap)
+            .await?
+            .iter()
+            .map(|a| format!("{:>12}  {} - {}", a.id, a.artist, a.title))
+            .collect(),
+        Kind::Artists => provider
+            .favourite_artists(cap)
+            .await?
+            .iter()
+            .map(|a| format!("{:>12}  {}", a.id, a.name))
+            .collect(),
     };
-    let text = |v: &serde_json::Value, key: &str| v.get(key).and_then(|s| s.as_str()).unwrap_or("?").to_string();
-    for item in &items {
-        let id = item.get("id").map(|v| v.to_string()).unwrap_or_default();
-        match kind {
-            Kind::Tracks => println!(
-                "{id:>12}  {} - {}  [{}]",
-                name(item, "performer", "name"),
-                text(item, "title"),
-                name(item, "album", "title")
-            ),
-            Kind::Albums => println!("{id:>12}  {} - {}", name(item, "artist", "name"), text(item, "title")),
-            Kind::Artists => println!("{id:>12}  {}", text(item, "name")),
-        }
+    for line in &lines {
+        println!("{line}");
     }
-    eprintln!("\n{} {} shown", items.len(), kind.as_str());
+    eprintln!("\n{} {} shown", lines.len(), kind.as_str());
     Ok(())
 }
 
@@ -349,7 +359,7 @@ async fn favourites(args: Favourites, paths: &Paths) -> Result<()> {
 async fn crawl_command(args: Crawl, paths: &Paths) -> Result<()> {
     let conn = &mut db::open_for_write(&paths.db_path)?;
     // How fast is the gateway's to say, for the whole account.
-    let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+    let mut client = Provider::from_env(&paths.env_dir).bulk();
 
     if !args.no_seed {
         eprintln!("seeding from the family's likes…");

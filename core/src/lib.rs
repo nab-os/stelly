@@ -3,8 +3,8 @@
 //! and its schema, the vector space, and navigation over it.
 
 pub mod api;
+pub mod catalogue;
 pub mod logbuffer;
-pub mod qobuz;
 pub mod recording;
 pub mod session;
 

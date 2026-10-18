@@ -171,6 +171,7 @@ mod tests {
             genre: String::new(),
             artist_id,
             album_id: String::new(),
+            image: None,
             bpm: None,
             seed_distance: 0,
             isrc: isrc.map(str::to_string),

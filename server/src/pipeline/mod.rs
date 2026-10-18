@@ -112,7 +112,7 @@ impl Paths {
     /// `STELLY_DATA_DIR`, `STELLY_MODEL_DIR`, `STELLY_CACHE_DIR` and
     /// `STELLY_ENV_DIR`, each falling back to a place in the checkout.
     pub fn from_env() -> Self {
-        let repo_root = crate::qobuz::repo_root();
+        let repo_root = crate::provider::repo_root();
         let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
         let data_dir = var("STELLY_DATA_DIR").unwrap_or_else(|| repo_root.join("data"));
         Self {

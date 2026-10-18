@@ -222,8 +222,8 @@ pub struct BlockedArtist {
 
 // ---------------------------------------------------------------- the space
 
-/// One track of the space, as navigation and the map know it. Not a Qobuz
-/// track: no art, no duration, a genre and a position instead.
+/// One track of the space, as navigation and the map know it. Not a
+/// provider's track: no duration, a genre and a position instead.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TrackMeta {
     pub track_id: i64,
@@ -233,10 +233,14 @@ pub struct TrackMeta {
     pub genre: String,
     pub artist_id: i64,
     pub album_id: String,
+    /// The album's cover, when the provider gave one. A server before 1.2
+    /// sends none.
+    #[serde(default)]
+    pub image: Option<String>,
     pub bpm: Option<f32>,
     pub seed_distance: i32,
     /// Names the recording rather than the release; see
-    /// `qobuz::RemoteTrack::identity`.
+    /// `catalogue::RemoteTrack::identity`.
     pub isrc: Option<String>,
     /// UMAP coordinates for the map, if the layout step has been run.
     pub x: Option<f32>,
@@ -315,6 +319,9 @@ pub struct SpaceAlbum {
     pub title: String,
     pub artist: String,
     pub artist_id: Option<i64>,
+    /// Its cover, when the provider gave one; a server before 1.2 sends none.
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

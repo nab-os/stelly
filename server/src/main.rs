@@ -26,11 +26,12 @@ mod cli;
 mod crawl;
 mod db;
 mod hub;
+mod import;
 mod likes;
 mod mix;
 mod pipeline;
 mod playback;
-mod qobuz;
+mod provider;
 mod routes;
 mod space;
 use stelly_core::schema;
@@ -139,10 +140,11 @@ impl IntoResponse for Failure {
 is shown once, at pairing, and only its hash is kept.
 
 STELLY_DATA_DIR, STELLY_MODEL_DIR and STELLY_CACHE_DIR move the corpus,
-the model weights and the excerpt cache; STELLY_ENV_DIR, the .env. Qobuz is
-the stelly-qobuz gateway's, at STELLY_QOBUZ_URL (default
-http://127.0.0.1:7710) with STELLY_QOBUZ_TOKEN if it wants one. The
-environment itself wins over any .env."
+the model weights and the excerpt cache; STELLY_ENV_DIR, the .env. The
+music is a provider's, at STELLY_PROVIDER_URL (default
+http://127.0.0.1:7710) with STELLY_PROVIDER_TOKEN if it wants one; the
+older STELLY_QOBUZ_URL and STELLY_QOBUZ_TOKEN still count. The environment
+itself wins over any .env."
 )]
 struct Cli {
     #[argh(subcommand)]
@@ -161,6 +163,7 @@ pub enum Command {
     Revoke(Revoke),
 
     Whoami(cli::Whoami),
+    Import(cli::Import),
     Favourites(cli::Favourites),
 
     Crawl(cli::Crawl),
@@ -428,6 +431,8 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
                 eprintln!("no space loaded yet: {err:#}");
             }
         });
+
+        state.hub.import_legacy();
 
         if releases_every > 0 {
             let every = std::time::Duration::from_secs(releases_every * 60 * 60);

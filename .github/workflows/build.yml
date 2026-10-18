@@ -134,7 +134,7 @@ jobs:
           Priority: optional
           Homepage: https://github.com/nab-os/stelly-releases
           Description: Stelly server: API, crawler and analysis pipeline
-           Owns the Qobuz credentials, the SQLite corpus, the CLAP models and every
+           Owns the SQLite corpus, the CLAP models and every
            pipeline stage, and serves them to Stelly clients over HTTP. No GUI: this
            package deliberately links neither GTK nor webkit.
           EOF

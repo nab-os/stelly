@@ -7,7 +7,7 @@ use crate::api::{Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
 use crate::backend::{self, backend};
 use crate::ui::{
     icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
-    Library, LocalIds, MainScreen, MapView, Me, PathPill, Pipeline, Player, PlayerBar, QueueView,
+    Library, LocalIds, MainScreen, MapView, Me, PathPill, Provider, Pipeline, Player, PlayerBar, QueueView,
     ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, TitleBar,
     View, Weights,
 };
@@ -519,6 +519,15 @@ fn Shell() -> Element {
             me.set(Some(found));
         }
     });
+    let provider = use_signal(|| crate::cache::read::<crate::catalogue::Capabilities>(PROVIDER_CACHE));
+    use_context_provider(|| Provider(provider));
+    use_future(move || async move {
+        let mut provider = provider;
+        if let Ok(found) = backend().capabilities().await {
+            crate::cache::write(PROVIDER_CACHE, &found);
+            provider.set(Some(found));
+        }
+    });
     // A server older than users answers no `me`, and let any device hide.
     let editable = use_memo(move || me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin));
 
@@ -845,6 +854,7 @@ fn Shell() -> Element {
                             title: t.title.clone(),
                             album: t.album.clone(),
                             album_id: t.album_id.clone(),
+                            image: t.image.clone(),
                         })
                         .collect();
                     filtered.set((rows, found.total));
@@ -974,6 +984,7 @@ const POINTS_CACHE: &str = "points.bin";
 const POINTS_META_CACHE: &str = "points-meta.json";
 const POINTS_STAMP_CACHE: &str = "points.stamp";
 const ME_CACHE: &str = "me.json";
+const PROVIDER_CACHE: &str = "provider.json";
 
 /// The map's points as `map.js` reads them, and the stamp they were cut at.
 /// A global because the asset handler answers outside any scope.

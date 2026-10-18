@@ -13,7 +13,7 @@
 //! come back through `transport`, bound with `RegisterNatives` so the linker
 //! cannot drop it for want of a caller.
 
-use crate::qobuz::RemoteTrack;
+use crate::catalogue::RemoteTrack;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::jdouble;
 use jni::{JNIEnv, JavaVM, NativeMethod};

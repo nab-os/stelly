@@ -12,7 +12,8 @@ diesel::table! {
     artists (id) {
         id -> BigInt,
         name -> Text,
-        qobuz_json -> Nullable<Text>,
+        meta_json -> Nullable<Text>,
+        legacy_json -> Nullable<Text>,
         similar_fetched_at -> Nullable<Text>,
     }
 }
@@ -25,7 +26,9 @@ diesel::table! {
         release_date -> Nullable<Text>,
         label -> Nullable<Text>,
         genre -> Nullable<Text>,
-        qobuz_json -> Nullable<Text>,
+        image -> Nullable<Text>,
+        meta_json -> Nullable<Text>,
+        legacy_json -> Nullable<Text>,
     }
 }
 
@@ -37,7 +40,8 @@ diesel::table! {
         title -> Text,
         duration -> Nullable<BigInt>,
         isrc -> Nullable<Text>,
-        qobuz_json -> Nullable<Text>,
+        meta_json -> Nullable<Text>,
+        legacy_json -> Nullable<Text>,
         seed_distance -> BigInt,
     }
 }

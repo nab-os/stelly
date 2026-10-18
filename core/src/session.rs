@@ -10,7 +10,7 @@
 //! Against a server older than this, the app keeps its copy to itself and is
 //! its own output, which is how playback worked before there was a session.
 
-use crate::qobuz::{RemoteTrack, TrackIdentity};
+use crate::catalogue::{RemoteTrack, TrackIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::Instant;

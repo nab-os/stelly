@@ -17,7 +17,7 @@ use super::{
 };
 use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
-use crate::qobuz::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
+use crate::catalogue::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::prelude::*;
 
 /// Add to or remove from this user's likes, which the server keeps and Qobuz
@@ -175,7 +175,7 @@ pub(crate) fn PathButtons(track: RemoteTrack, enabled: bool, compact: bool) -> E
 }
 
 /// One line of the facts list, skipped when there is nothing to say.
-fn fact(label: &'static str, value: Option<String>) -> Element {
+fn fact(label: &str, value: Option<String>) -> Element {
     match value.filter(|v| !v.trim().is_empty()) {
         Some(value) => rsx! {
             div { class: "fact",
@@ -202,6 +202,7 @@ fn clock(seconds: i64) -> String {
 /// and the space have about it.
 #[component]
 pub fn TrackScreen(track: RemoteTrack) -> Element {
+    let provider = use_context::<super::Provider>().title();
     let player = use_context::<Player>();
     let library = use_context::<Library>();
     let local = use_context::<LocalIds>();
@@ -329,8 +330,8 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("In your space", Some(if in_space { "yes" } else { "no" }.to_string()))}
                 {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from a like", m.seed_distance)))}
                 {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
-                {fact("Qobuz track", Some(track.id.to_string()))}
-                {fact("Qobuz album", track.album_id.clone())}
+                {fact(&format!("{provider} track"), Some(track.id.to_string()))}
+                {fact(&format!("{provider} album"), track.album_id.clone())}
             }
 
             if in_space && generator.can_steer() {

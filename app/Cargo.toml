@@ -19,7 +19,7 @@ required-features = ["gui"]
 
 # ---------------------------------------------------------------- features
 #
-# Every build is a client of `stelly-server`: Qobuz, the pipeline and the
+# Every build is a client of `stelly-server`: the provider, the pipeline and the
 # models live there. Without `gui` this is just the client library.
 #
 #   desktop: a dioxus window.

@@ -362,6 +362,7 @@ fn groups(haystacks: &[Haystack], engine: &Engine, terms: &[String]) -> (Vec<Spa
                         title: track.album.clone(),
                         artist: track.artist.clone(),
                         artist_id,
+                        image: track.image.clone(),
                     },
                 ));
                 albums.len() - 1

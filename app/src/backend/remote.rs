@@ -10,7 +10,7 @@ use crate::api::{
     Step, Target, TrackMeta, TracksRequest, User, Word,
 };
 use crate::session::{Command, Session, Update};
-use crate::qobuz::{RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use crate::catalogue::{Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::logbuffer::LogBuffer;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -230,13 +230,13 @@ impl Remote {
 
     // -------------------------------------------------------------- playback
 
-    pub async fn file_url(&self, track_id: i64, format_id: u32) -> Result<String> {
+    pub async fn file_url(&self, track_id: i64, quality: Quality) -> Result<String> {
         #[derive(serde::Deserialize)]
         struct Url {
             url: String,
         }
         let found: Url = self
-            .get(&format!("/api/tracks/{track_id}/url?format={format_id}"))
+            .get(&format!("/api/tracks/{track_id}/url?quality={}", quality.as_str()))
             .await?;
         Ok(found.url)
     }
@@ -572,6 +572,10 @@ impl Remote {
     }
 
     /// This device, whose it is and what it may do.
+    pub async fn capabilities(&self) -> Result<crate::catalogue::Capabilities> {
+        self.get("/api/capabilities").await
+    }
+
     pub async fn me(&self) -> Result<Device> {
         self.get("/api/me").await
     }

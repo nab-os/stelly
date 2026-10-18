@@ -10,7 +10,7 @@
 //! times the download and the CPU of an excerpt.
 
 use crate::pipeline::{models, Job, Paths};
-use crate::qobuz::{QobuzClient, FORMAT_MP3_320};
+use crate::provider::{Provider, Quality};
 use crate::space::SpaceService;
 use anyhow::{bail, Context, Result};
 use diesel::prelude::*;
@@ -59,11 +59,11 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
     match selection {
         Selection::Track { .. } | Selection::Album { .. } | Selection::Artist { .. } => {
             let conn = &mut crate::db::open_for_write(&paths.db_path)?;
-            let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+            let mut client = Provider::from_env(&paths.env_dir).bulk();
             crate::crawl::catalogue_target(conn, &mut client, &target.expect("a target"), job).await
         }
         Selection::Playlist { id } => {
-            let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+            let mut client = Provider::from_env(&paths.env_dir).bulk();
             let tracks = client.playlist_tracks(*id, PLAYLIST_CAP).await?;
             job.log(format!("{} tracks in playlist {id}", tracks.len()));
             catalogue_each(paths, &mut client, tracks.iter().map(|t| Target::Track(t.id)).collect(), job).await
@@ -77,14 +77,14 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
             // which is `artist/<id>` to ask for on its own.
             let targets: Vec<Target> = likes
                 .iter()
-                .filter_map(|(kind, item)| match kind.as_str() {
-                    "track" => item["id"].as_i64().map(Target::Track),
-                    "album" => item["id"].as_str().map(|id| Target::Album(id.to_string())),
-                    _ => None,
+                .filter_map(|liked| match liked {
+                    crate::likes::Liked::Track(track) => Some(Target::Track(track.id)),
+                    crate::likes::Liked::Album(album) => Some(Target::Album(album.id.clone())),
+                    crate::likes::Liked::Artist(_) => None,
                 })
                 .collect();
             job.log(format!("{} liked tracks and albums", targets.len()));
-            let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+            let mut client = Provider::from_env(&paths.env_dir).bulk();
             catalogue_each(paths, &mut client, targets, job).await
         }
         Selection::Mood { phrase, count } => {
@@ -133,7 +133,7 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
 
 /// Catalogue each of `targets`, those already known costing nothing, and
 /// the tracks they come to, each once; one that fails is told and passed.
-async fn catalogue_each(paths: &Paths, client: &mut QobuzClient, targets: Vec<Target>, job: &Job) -> Result<Vec<i64>> {
+async fn catalogue_each(paths: &Paths, client: &mut Provider, targets: Vec<Target>, job: &Job) -> Result<Vec<i64>> {
     let conn = &mut crate::db::open_for_write(&paths.db_path)?;
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
@@ -397,17 +397,32 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
         })
         .collect();
     let queue = Arc::new(Mutex::new(queue));
+    // What the provider calls itself is where each entry says it came from,
+    // `qobuz:<id>` to stelly-mix. On a thread of its own, whatever runtime
+    // this was called from.
+    let provider = Provider::from_env(&paths.env_dir).bulk();
+    let source = std::thread::scope(|scope| {
+        scope
+            .spawn(|| -> Result<String> {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                Ok(runtime.block_on(provider.capabilities())?.name)
+            })
+            .join()
+            .unwrap_or_else(|_| anyhow::bail!("asking the provider its name panicked"))
+    })
+    .context("asking the music provider what it is")?;
     let (report, results) = mpsc::channel::<(i64, String, Outcome)>();
 
     let mut handles = Vec::new();
     for n in 0..workers {
         let (queue, report, job) = (queue.clone(), report.clone(), job.clone());
         let (env_dir, model_dir) = (paths.env_dir.clone(), paths.model_dir.clone());
+        let source = source.clone();
         // Loaded here, so a missing model fails the stage rather than a thread.
         let mut encoder = stelly_audio::clap::AudioEncoder::load(&model_dir, 1)?;
         let handle = std::thread::Builder::new().name(format!("stelly-mix-{n}")).spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
-            let client = QobuzClient::from_env(&env_dir).bulk();
+            let client = Provider::from_env(&env_dir).bulk();
             let Ok(http) = reqwest::Client::builder().timeout(DOWNLOAD_TIMEOUT).build() else { return };
             loop {
                 if job.cancelled() {
@@ -416,9 +431,9 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
                 let Some(work) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { break };
                 let name = format!("{} - {}", work.item.artist, work.item.title);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Track> {
-                    let bytes = runtime.block_on(download(&client, &http, work.id))?;
-                    let pcm = stelly_audio::decode::decode_mp3(bytes)?;
-                    let origin = Origin { source: "qobuz".into(), item: work.item.clone() };
+                    let (bytes, mime) = runtime.block_on(download(&client, &http, work.id))?;
+                    let pcm = crate::pipeline::audio::decode_any(bytes, mime.as_deref())?;
+                    let origin = Origin { source: source.clone(), item: work.item.clone() };
                     stelly_mix::library::index_origin_pcm(&pcm, origin, &stelly_mix::Options::default(), &mut encoder)
                 }));
                 let outcome = match outcome {
@@ -457,11 +472,10 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
     Ok(stats)
 }
 
-/// The whole track, MP3 320, by way of the gateway's signed URL.
-async fn download(client: &QobuzClient, http: &reqwest::Client, id: i64) -> Result<Vec<u8>> {
-    let url = client.file_url(id, FORMAT_MP3_320).await?;
-    let response = http.get(&url).send().await?.error_for_status()?;
-    Ok(response.bytes().await?.to_vec())
+/// The whole track, lossy, and what format it is in.
+async fn download(client: &Provider, http: &reqwest::Client, id: i64) -> Result<(Vec<u8>, Option<String>)> {
+    let file = client.file(id, Quality::Lossy).await?;
+    Ok((crate::pipeline::audio::fetch_whole(http, &file.url).await?, file.mime_type))
 }
 
 fn default_workers() -> usize {

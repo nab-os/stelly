@@ -10,7 +10,7 @@
 use super::screens::toggle_like;
 use super::{album_link, artist_link, icons, open_remote_track, Cover, Library, LocalIds, Selection};
 use crate::backend::{backend, Sent, SessionFeed};
-use crate::qobuz::{RemoteTrack, FORMAT_FLAC_CD, FORMAT_FLAC_HIRES, FORMAT_MP3_320};
+use crate::catalogue::{Quality, RemoteTrack};
 use crate::session::{Clocked, Command, Op, Output, Session, Update};
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -27,7 +27,7 @@ pub struct Player {
     /// carried forward from the session's last word everywhere else, where
     /// the duration is left at 0 for the track's own to fill in.
     pub position: Signal<(f64, f64)>,
-    pub quality: Signal<u32>,
+    pub quality: Signal<Quality>,
     pub status: Signal<Option<String>>,
     /// 0.0 to 1.0, the output's, which is what the slider shows and turns.
     /// This device's own while it is the output, or nothing is: the
@@ -352,9 +352,9 @@ async fn load(mut player: Player, track: RemoteTrack, index: usize, ticket: u64)
 
     player.status.set(Some(format!("loading {}…", track.title)));
     player.position.set((0.0, track.duration.unwrap_or(0) as f64));
-    let format_id = *player.quality.peek();
+    let quality = *player.quality.peek();
 
-    let url = match stream_url(track.id, format_id).await {
+    let url = match stream_url(track.id, quality).await {
         Ok(url) => url,
         Err(err) => {
             give_up(player, format!("{err:#}"));
@@ -559,22 +559,21 @@ pub fn set_volume(player: Player, level: f64) {
     }
 }
 
-pub fn quality_label(format_id: u32) -> &'static str {
-    match format_id {
-        FORMAT_MP3_320 => "MP3 320",
-        FORMAT_FLAC_CD => "FLAC 16/44",
-        FORMAT_FLAC_HIRES => "FLAC hi-res",
-        _ => "unknown",
+pub fn quality_label(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Lossy => "Lossy",
+        Quality::Lossless => "CD quality",
+        Quality::Hires => "Hi-res",
     }
 }
 
-/// Stream URLs signed earlier, by (track, format). Qobuz's last an hour and
-/// are kept for less, so one handed to the audio element still has time to
-/// run.
+/// Stream URLs signed earlier, by (track, quality). A provider's may expire,
+/// Qobuz's after an hour, so they are kept for less, and one handed to the
+/// audio element still has time to run.
 #[derive(Default)]
 struct Signed {
-    urls: HashMap<(i64, u32), (String, Instant)>,
-    signing: HashSet<(i64, u32)>,
+    urls: HashMap<(i64, Quality), (String, Instant)>,
+    signing: HashSet<(i64, Quality)>,
 }
 
 const SIGNED_FOR: Duration = Duration::from_secs(40 * 60);
@@ -586,31 +585,31 @@ fn signed() -> MutexGuard<'static, Signed> {
 }
 
 impl Signed {
-    fn fresh(&mut self, key: (i64, u32)) -> Option<String> {
+    fn fresh(&mut self, key: (i64, Quality)) -> Option<String> {
         self.urls.retain(|_, (_, at)| at.elapsed() < SIGNED_FOR);
         self.urls.get(&key).map(|(url, _)| url.clone())
     }
 
-    fn keep(&mut self, key: (i64, u32), url: String) {
+    fn keep(&mut self, key: (i64, Quality), url: String) {
         self.urls.retain(|_, (_, at)| at.elapsed() < SIGNED_FOR);
         self.urls.insert(key, (url, Instant::now()));
     }
 }
 
-async fn stream_url(track_id: i64, format_id: u32) -> anyhow::Result<String> {
-    let key = (track_id, format_id);
+async fn stream_url(track_id: i64, quality: Quality) -> anyhow::Result<String> {
+    let key = (track_id, quality);
     if let Some(url) = signed().fresh(key) {
         return Ok(url);
     }
-    let url = backend().file_url(track_id, format_id).await?;
+    let url = backend().file_url(track_id, quality).await?;
     signed().keep(key, url.clone());
     Ok(url)
 }
 
 /// Sign the session's current track on a device that is not making the
 /// sound, so that taking it over starts without a round trip to the server
-/// and on to Qobuz. One request per track per device, the account's budget
-/// can spare it.
+/// and on to the provider. One request per track per device, the account's
+/// budget can spare it.
 fn presign(player: Player, track: &RemoteTrack) {
     if !track.streamable {
         return;

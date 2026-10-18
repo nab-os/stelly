@@ -8,7 +8,7 @@
 //! first, so a single album reaches the space without the backlog.
 
 use crate::pipeline::{analyse, assemble, layout, Job, Paths};
-use crate::qobuz::QobuzClient;
+use crate::provider::Provider;
 use crate::schema::{failures, features, frontier, tracks};
 use crate::{crawl, db};
 use anyhow::{bail, Result};
@@ -44,7 +44,7 @@ pub async fn analyse_target(target: &Target, paths: &Paths, options: analyse::Op
     job.log(format!("cataloguing {target}"));
     let ids = {
         let conn = &mut db::open_for_write(&paths.db_path)?;
-        let mut client = QobuzClient::from_env(&paths.env_dir).bulk();
+        let mut client = Provider::from_env(&paths.env_dir).bulk();
         crawl::catalogue_target(conn, &mut client, target, job).await?
     };
     if ids.is_empty() {

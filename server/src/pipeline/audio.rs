@@ -188,19 +188,96 @@ fn frame_aligned(bytes: &[u8]) -> Result<&[u8]> {
 
 // ----------------------------------------------------------------- decoding
 
-/// Decode, cut to the window, and check there is enough of it.
+/// Decode, cut to the window, and check there is enough of it. The bytes
+/// are a slice of MP3, or an excerpt `excerpt_of_whole` cut and packed.
 pub fn excerpt_pcm(bytes: Vec<u8>) -> Result<Pcm> {
-    let mut pcm = decode_mp3(bytes)?;
+    let mut pcm = match unpack(&bytes) {
+        Some(pcm) => pcm,
+        None => decode_mp3(bytes)?,
+    };
     pcm.samples
         .truncate((EXCERPT_SECONDS * pcm.rate as f64) as usize);
     let seconds = pcm.seconds();
     if seconds < MIN_EXCERPT_SECONDS {
         bail!(
             "excerpt decoded to only {seconds:.1}s of audio \
-             (empty stream, or the track duration Qobuz reported was wrong)"
+             (empty stream, or the track duration the provider reported was wrong)"
         );
     }
     Ok(pcm)
+}
+
+// ------------------------------------------------------------- whole files
+//
+// A stream that is not constant-bitrate MP3 cannot be cut by byte range: a
+// FLAC's or an Opus's bytes do not map evenly onto time. Those are fetched
+// whole, decoded, and the excerpt is cut from the samples, then packed as
+// 16-bit PCM, for the cache and the extractors to take like any other.
+
+/// What a packed excerpt starts with; no MP3 frame or ID3 tag does.
+const PACKED: &[u8; 8] = b"STLYPCM1";
+
+/// A whole track's bytes, from a URL that needs no credentials.
+pub async fn fetch_whole(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let response = http.get(url).send().await.context("requesting the stream")?;
+    let response = response.error_for_status().context("requesting the stream")?;
+    Ok(response.bytes().await.context("reading the stream")?.to_vec())
+}
+
+/// A whole track's bytes decoded to mono, whatever its format: MIME types
+/// name it, and an unnamed one is taken for MP3, as streams mostly are.
+pub fn decode_any(bytes: Vec<u8>, mime_type: Option<&str>) -> Result<Pcm> {
+    let extension = match mime_type.map(|m| m.split(';').next().unwrap_or(m).trim().to_ascii_lowercase()) {
+        None => return decode_mp3(bytes),
+        Some(mime) => match mime.as_str() {
+            "audio/mpeg" | "audio/mp3" => return decode_mp3(bytes),
+            "audio/flac" | "audio/x-flac" => "flac",
+            "audio/ogg" | "application/ogg" | "audio/vorbis" => "ogg",
+            "audio/opus" => "opus",
+            "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac" => "m4a",
+            "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+            "audio/aiff" | "audio/x-aiff" => "aiff",
+            _ => "audio",
+        },
+    };
+    // The decoder reads files, where the extension says what is in them.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("stelly-decode-{}-{n}.{extension}", std::process::id()));
+    std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+    let decoded = stelly_audio::decode::decode_file(&path);
+    let _ = std::fs::remove_file(&path);
+    decoded
+}
+
+/// The excerpt of a whole track, centred as `fetch_excerpt` centres it,
+/// packed for the cache.
+pub fn excerpt_of_whole(bytes: Vec<u8>, mime_type: Option<&str>) -> Result<Vec<u8>> {
+    let pcm = decode_any(bytes, mime_type)?;
+    let seconds = pcm.seconds().round() as i64;
+    let start = (excerpt_start(Some(seconds)) * pcm.rate as f64) as usize;
+    let end = (start + (EXCERPT_SECONDS * pcm.rate as f64) as usize).min(pcm.samples.len());
+    Ok(pack(&Pcm { samples: pcm.samples[start.min(end)..end].to_vec(), rate: pcm.rate }))
+}
+
+fn pack(pcm: &Pcm) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PACKED.len() + 4 + pcm.samples.len() * 2);
+    out.extend_from_slice(PACKED);
+    out.extend_from_slice(&pcm.rate.to_le_bytes());
+    for sample in &pcm.samples {
+        out.extend_from_slice(&((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16).to_le_bytes());
+    }
+    out
+}
+
+fn unpack(bytes: &[u8]) -> Option<Pcm> {
+    let rest = bytes.strip_prefix(PACKED)?;
+    let rate = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?);
+    let samples = rest[4..]
+        .chunks_exact(2)
+        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / i16::MAX as f32)
+        .collect();
+    Some(Pcm { samples, rate })
 }
 
 // -------------------------------------------------------------------- cache
@@ -390,5 +467,16 @@ mod tests {
         let pcm = excerpt_pcm(bytes).unwrap();
         assert_eq!(pcm.rate, whole.rate);
         assert!((pcm.seconds() - EXCERPT_SECONDS).abs() < 0.1, "{}s", pcm.seconds());
+    }
+
+    #[test]
+    fn a_packed_excerpt_comes_back_as_it_went() {
+        let pcm = Pcm { samples: vec![0.0, 0.5, -0.5, 1.0, -1.0], rate: 22_050 };
+        let back = unpack(&pack(&pcm)).unwrap();
+        assert_eq!(back.rate, 22_050);
+        for (a, b) in pcm.samples.iter().zip(&back.samples) {
+            assert!((a - b).abs() < 1e-4, "{a} came back as {b}");
+        }
+        assert!(unpack(b"ID3\x04rest").is_none());
     }
 }
