@@ -142,9 +142,10 @@ stelly-server import --provider ytmusic --user lou --kinds tracks --dry-run
 ```
 
 A database from before providers kept items in Qobuz's own shapes, keyed by
-Qobuz's ids: the server has the provider that can convert them do so at
-start, once (`stelly-server convert-legacy` by hand), and takes those ids for
-its own.
+Qobuz's ids: the server has the provider that can convert them, the Qobuz
+gateway, do so at start, once (`stelly-server convert-legacy` by hand), and
+credits those ids to it. Keep it among the providers: without it, that
+catalogue is nobody's, and only plays again once it is back.
 
 ## Running the pipeline
 
