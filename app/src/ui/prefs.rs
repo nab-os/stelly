@@ -79,17 +79,10 @@ pub fn update(change: impl FnOnce(&mut Prefs)) {
     }
 }
 
-/// A quality by name, or as builds before 1.2 stored it: the format ids of
-/// Qobuz, the only provider there was. Anything else is none, rather than a
-/// file that fails to load.
+/// A quality by name. Anything else is none, rather than a file that fails
+/// to load and takes every other preference with it.
 fn quality<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Quality>, D::Error> {
     Ok(match serde_json::Value::deserialize(deserializer)? {
-        serde_json::Value::Number(n) => match n.as_u64() {
-            Some(5) => Some(Quality::Lossy),
-            Some(6) => Some(Quality::Lossless),
-            Some(7 | 27) => Some(Quality::Hires),
-            _ => None,
-        },
         serde_json::Value::String(name) => name.parse().ok(),
         _ => None,
     })
@@ -122,11 +115,10 @@ mod tests {
     }
 
     #[test]
-    fn older_and_unknown_qualities_load() {
+    fn unknown_qualities_load() {
         let quality = |text: &str| serde_json::from_str::<Prefs>(text).unwrap().quality();
-        assert_eq!(quality(r#"{"quality":6}"#), Quality::Lossless);
-        assert_eq!(quality(r#"{"quality":7}"#), Quality::Hires);
         assert_eq!(quality(r#"{"quality":"hires"}"#), Quality::Hires);
+        assert_eq!(quality(r#"{"quality":6}"#), Quality::Lossy);
         assert_eq!(quality(r#"{"quality":99}"#), Quality::Lossy);
         assert_eq!(quality(r#"{"quality":null}"#), Quality::Lossy);
     }

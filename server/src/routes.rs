@@ -154,20 +154,8 @@ fn default_days() -> u32 {
 
 #[derive(Deserialize)]
 struct QualityQuery {
-    quality: Option<Quality>,
-    /// What apps before 1.2 send instead: the format ids of Qobuz, the only
-    /// provider there was.
-    format: Option<u32>,
-}
-
-impl QualityQuery {
-    fn quality(&self) -> Quality {
-        self.quality.unwrap_or(match self.format {
-            Some(6) => Quality::Lossless,
-            Some(7 | 27) => Quality::Hires,
-            _ => Quality::Lossy,
-        })
-    }
+    #[serde(default)]
+    quality: Quality,
 }
 
 // ----------------------------------------------------------------- browsing
@@ -282,7 +270,7 @@ async fn file_url(
     Query(query): Query<QualityQuery>,
 ) -> Reply<StreamUrl> {
     Ok(Json(StreamUrl {
-        url: state.hub.file_url(id, query.quality()).await?,
+        url: state.hub.file_url(id, query.quality).await?,
     }))
 }
 

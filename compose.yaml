@@ -46,6 +46,8 @@ services:
     #   STELLY_PROVIDERS: http://local:7710,http://qobuz:7710,http://ytmusic:7712
     environment:
       STELLY_PROVIDER_URL: http://qobuz:7710
+      # The token the gateway below listens with, sent to it.
+      STELLY_PROVIDER_TOKEN: ${STELLY_QOBUZ_TOKEN}
     env_file:
       - path: .env
         required: false
