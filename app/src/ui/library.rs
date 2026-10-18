@@ -1159,38 +1159,34 @@ fn SearchBar() -> Element {
                     }
                 }
             }
-            div { class: "segmented",
-                button {
-                    class: if source == Source::Space { "active" } else { "" },
-                    title: "only what's already in your space",
-                    onclick: move |_| pick(Source::Space, None),
-                    "space"
-                }
-                if each.is_empty() {
-                    button {
-                        class: if source == Source::Catalogue { "active" } else { "" },
-                        title: "the whole {provider_title} catalogue",
-                        onclick: move |_| pick(Source::Catalogue, None),
-                        "{provider_title.to_lowercase()}"
+            // Where to look, as a phrase: one dropdown, so the box keeps
+            // its width on a phone, and the closed one says it in words.
+            select {
+                class: "source-select",
+                title: "where to search",
+                onchange: move |event| {
+                    let value = event.value();
+                    match value.as_str() {
+                        "space" => pick(Source::Space, None),
+                        "all" => pick(Source::Catalogue, None),
+                        name => pick(Source::Catalogue, Some(name.trim_start_matches("in:").to_string())),
                     }
+                },
+                option { value: "space", selected: source == Source::Space, "in your space" }
+                if each.is_empty() {
+                    option { value: "all", selected: source == Source::Catalogue, "in {provider_title}" }
                 } else {
-                    // Several providers: all of them at once, or one.
-                    button {
-                        class: if source == Source::Catalogue && only.is_none() { "active" } else { "" },
-                        title: "every provider: {provider_title}",
-                        onclick: move |_| pick(Source::Catalogue, None),
-                        "all"
+                    option {
+                        value: "all",
+                        selected: source == Source::Catalogue && only.is_none(),
+                        "in all providers"
                     }
                     for one in each {
-                        button {
+                        option {
                             key: "{one.name}",
-                            class: if source == Source::Catalogue && only.as_deref() == Some(one.name.as_str()) { "active" } else { "" },
-                            title: "only {one.title}",
-                            onclick: {
-                                let name = one.name.clone();
-                                move |_| pick(Source::Catalogue, Some(name.clone()))
-                            },
-                            "{one.title.to_lowercase()}"
+                            value: "in:{one.name}",
+                            selected: source == Source::Catalogue && only.as_deref() == Some(one.name.as_str()),
+                            "in {one.title}"
                         }
                     }
                 }
