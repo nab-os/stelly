@@ -9,8 +9,8 @@
 //!
 //! Each row converted, or that the provider makes nothing of, loses its
 //! `legacy_json`, so this resumes where it stopped and costs nothing once
-//! done. The server runs it at start; `stelly-server import` runs it by
-//! hand.
+//! done. The server runs it at start; `stelly-server convert-legacy` runs it by
+//! hand, as `stelly-server convert-legacy`.
 
 use crate::provider::{Provider, RemoteAlbum, RemoteArtist, RemoteTrack};
 use anyhow::{Context, Result};
@@ -69,7 +69,7 @@ pub async fn run(db_path: &Path, provider: &Provider, report: &(dyn Fn(String) +
     if !pending(&mut conn)? {
         return Ok(Imported::default());
     }
-    let capabilities = provider.capabilities().await.context("asking the music provider what it can do")?;
+    let capabilities = provider.legacy_capabilities().await.context("asking the music provider what it can do")?;
     anyhow::ensure!(
         capabilities.import,
         "{} cannot convert what an earlier Stelly stored; the stored items stay as they are",

@@ -111,9 +111,9 @@ pub fn now() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// Liking twice keeps the first time.
-pub fn record(db_path: &Path, user_id: i64, ref_id: &str, item: &Liked, liked_at: i64) -> Result<()> {
-    diesel::insert_or_ignore_into(likes::table)
+/// Liking twice keeps the first time. Whether it was new.
+pub fn record(db_path: &Path, user_id: i64, ref_id: &str, item: &Liked, liked_at: i64) -> Result<usize> {
+    Ok(diesel::insert_or_ignore_into(likes::table)
         .values((
             likes::user_id.eq(user_id),
             likes::kind.eq(item.kind()),
@@ -121,8 +121,7 @@ pub fn record(db_path: &Path, user_id: i64, ref_id: &str, item: &Liked, liked_at
             likes::item_json.eq(item.json()),
             likes::liked_at.eq(liked_at),
         ))
-        .execute(&mut open(db_path)?)?;
-    Ok(())
+        .execute(&mut open(db_path)?)?)
 }
 
 pub fn forget(db_path: &Path, user_id: i64, kind: &str, ref_id: &str) -> Result<()> {

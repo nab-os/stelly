@@ -345,6 +345,14 @@ pub fn waveform() -> Element {
 }
 
 /// Build space: the vectors assembled into one block.
+/// Two of the same, overlapping: tracks that are one recording.
+pub fn twins() -> Element {
+    stroked(rsx! {
+        circle { cx: "9", cy: "12", r: "6" }
+        circle { cx: "15", cy: "12", r: "6" }
+    })
+}
+
 pub fn cube() -> Element {
     stroked(rsx! {
         path { d: "M12 2.5l8.5 4.75v9.5L12 21.5l-8.5-4.75v-9.5z" }

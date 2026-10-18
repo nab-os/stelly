@@ -40,6 +40,10 @@ services:
       - "127.0.0.1:7700:7700"
 
     # The music through the provider below, which wants the shared token.
+    # Several, most preferred first, a token where one is wanted as the URL's
+    # user, are STELLY_PROVIDERS instead:
+    #
+    #   STELLY_PROVIDERS: http://local:7710,http://qobuz:7710,http://ytmusic:7712
     environment:
       STELLY_PROVIDER_URL: http://qobuz:7710
     env_file:
