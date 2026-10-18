@@ -32,22 +32,43 @@ use tokio::sync::OnceCell;
 pub use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 pub use stelly_provider::Account;
 
+/// How long a search waits for any one provider: one slow or down is left
+/// out rather than holding every search up.
+const SEARCH_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// How long a provider has to say what it is, and how long one that did
+/// not is left alone before it is asked again: one down holds nothing up.
+const ASK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// One configured provider, and what it said it is.
 struct Source {
     client: Client,
     capabilities: OnceCell<Capabilities>,
+    /// When it last failed to say, if it has not said since.
+    down_since: Mutex<Option<std::time::Instant>>,
 }
 
 impl Source {
     async fn capabilities(&self) -> Result<&Capabilities> {
-        self.capabilities
-            .get_or_try_init(|| async {
-                self.client
-                    .send(api::capabilities())
-                    .await
-                    .with_context(|| format!("asking the music provider at {} what it is", self.client.url()))
-            })
-            .await
+        if let Some(known) = self.capabilities.get() {
+            return Ok(known);
+        }
+        let url = self.client.url();
+        if let Some(at) = *self.down_since.lock().unwrap_or_else(|e| e.into_inner()) {
+            if at.elapsed() < DOWN_FOR {
+                bail!("the music provider at {url} did not answer {}s ago", at.elapsed().as_secs());
+            }
+        }
+        let ask = self.capabilities.get_or_try_init(|| async {
+            self.client.send(api::capabilities()).await.with_context(|| format!("asking the music provider at {url} what it is"))
+        });
+        let answer = match tokio::time::timeout(ASK_WAIT, ask).await {
+            Ok(answer) => answer,
+            Err(_) => Err(anyhow::anyhow!("the music provider at {url} did not answer in {}s", ASK_WAIT.as_secs())),
+        };
+        *self.down_since.lock().unwrap_or_else(|e| e.into_inner()) = answer.is_err().then(std::time::Instant::now);
+        answer
     }
 
     async fn name(&self) -> Result<&str> {
@@ -95,7 +116,7 @@ impl Provider {
     pub fn from_env(env_dir: &Path, db_path: &Path) -> Self {
         let sources = configured(env_dir)
             .into_iter()
-            .map(|config| Source { client: Client::new(config), capabilities: OnceCell::new() })
+            .map(|config| Source { client: Client::new(config), capabilities: OnceCell::new(), down_since: Mutex::new(None) })
             .collect();
         Self {
             sources: Arc::new(sources),
@@ -131,7 +152,7 @@ impl Provider {
     /// them: until it is, that catalogue is nobody's.
     async fn legacy(&self) -> Result<Option<usize>> {
         for (source, s) in self.sources.iter().enumerate() {
-            if s.capabilities().await?.import {
+            if s.capabilities().await.is_ok_and(|c| c.import) {
                 return Ok(Some(source));
             }
         }
@@ -139,30 +160,51 @@ impl Provider {
         Ok(None)
     }
 
-    /// Every provider has said what it is, and a catalogue from before
+    /// The providers have said what they are, and a catalogue from before
     /// several providers has its ids taken for its provider's, if that
-    /// provider is one of them.
+    /// provider is one of them. Those that did not answer are asked again
+    /// next time, and the rest carry on without them.
     async fn ready(&self) -> Result<()> {
-        self.ready
-            .get_or_try_init(|| async {
-                let mut names = HashSet::new();
-                for source in self.sources.iter() {
-                    let name = source.name().await?;
+        if self.ready.initialized() {
+            return Ok(());
+        }
+        let mut names = HashSet::new();
+        let mut all = true;
+        for source in self.sources.iter() {
+            match source.name().await {
+                Ok(name) => {
                     if !names.insert(name.to_string()) {
                         bail!("two music providers are both called {name:?}");
                     }
                 }
-                if let Some(source) = self.legacy().await? {
-                    let legacy = self.name(source).await?;
-                    let taken = self.with_refs(|conn| refs::bootstrap(conn, &legacy))?;
-                    if taken > 0 {
-                        eprintln!("took {taken} catalogue ids for {legacy}'s");
-                    }
+                Err(err) => {
+                    eprintln!("{err:#}");
+                    all = false;
                 }
-                Ok(())
-            })
-            .await
-            .map(|_| ())
+            }
+        }
+        if let Some(source) = self.legacy().await? {
+            let legacy = self.name(source).await?;
+            let taken = self.with_refs(|conn| refs::bootstrap(conn, &legacy))?;
+            if taken > 0 {
+                eprintln!("took {taken} catalogue ids for {legacy}'s");
+            }
+        }
+        if all {
+            let _ = self.ready.set(());
+        }
+        Ok(())
+    }
+
+    /// The providers that have said what they are, by name.
+    async fn answering(&self) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        for source in 0..self.sources.len() {
+            if let Ok(name) = self.name(source).await {
+                out.push((source, name));
+            }
+        }
+        out
     }
 
     async fn name(&self, source: usize) -> Result<String> {
@@ -175,14 +217,13 @@ impl Provider {
         self.ready().await?;
         let known = self.with_refs(|conn| refs::routes(conn, kind, id))?;
         let mut out = Vec::new();
-        for source in 0..self.sources.len() {
-            let name = self.name(source).await?;
+        for (source, name) in self.answering().await {
             if let Some((_, external)) = known.iter().find(|(provider, _)| *provider == name) {
                 out.push((source, external.clone()));
             }
         }
         if out.is_empty() {
-            bail!("no music provider has {} {id}", kind.as_str());
+            bail!("no music provider that is answering has {} {id}", kind.as_str());
         }
         Ok(out)
     }
@@ -208,7 +249,7 @@ impl Provider {
         self.ready().await?;
         let mut out = Vec::new();
         for (source, s) in self.sources.iter().enumerate() {
-            if can(s.capabilities().await?) {
+            if s.capabilities().await.is_ok_and(&can) {
                 out.push(source);
             }
         }
@@ -289,13 +330,20 @@ impl Provider {
 
     // ------------------------------------------------------------ what they are
 
-    /// Every provider's capabilities, in order.
+    /// Every answering provider's capabilities, in order.
     pub async fn each_capabilities(&self) -> Result<Vec<Capabilities>> {
         let mut out = Vec::new();
+        let mut last = None;
         for source in self.sources.iter() {
-            out.push(source.capabilities().await?.clone());
+            match source.capabilities().await {
+                Ok(capabilities) => out.push(capabilities.clone()),
+                Err(err) => last = Some(err),
+            }
         }
-        Ok(out)
+        match (out.is_empty(), last) {
+            (true, Some(err)) => Err(err),
+            _ => Ok(out),
+        }
     }
 
     /// What they can do between them, under one name: what the app is told.
@@ -333,15 +381,12 @@ impl Provider {
     /// The provider called `name`.
     async fn named(&self, name: &str) -> Result<usize> {
         self.ready().await?;
-        let mut known = Vec::new();
-        for source in 0..self.sources.len() {
-            let theirs = self.name(source).await?;
-            if theirs == name {
-                return Ok(source);
-            }
-            known.push(theirs);
+        let answering = self.answering().await;
+        if let Some((source, _)) = answering.iter().find(|(_, theirs)| theirs == name) {
+            return Ok(*source);
         }
-        bail!("no music provider is called {name:?}; there are {}", known.join(", "))
+        let known: Vec<&str> = answering.iter().map(|(_, n)| n.as_str()).collect();
+        bail!("no answering music provider is called {name:?}; there are {}", known.join(", "))
     }
 
     // ------------------------------------------------------------ browsing
@@ -355,9 +400,16 @@ impl Provider {
             asked.push(self.named(name).await?);
         }
         if asked.is_empty() {
-            asked = (0..self.sources.len()).collect();
+            asked = self.answering().await.into_iter().map(|(source, _)| source).collect();
         }
-        let asks = asked.into_iter().map(|source| async move { (source, self.client(source).send(api::search(query, limit)).await) });
+        let asks = asked.into_iter().map(|source| async move {
+            let client = self.client(source);
+            let answer = match tokio::time::timeout(SEARCH_WAIT, client.send(api::search(query, limit))).await {
+                Ok(answer) => answer,
+                Err(_) => Err(anyhow::anyhow!("no answer in {}s", SEARCH_WAIT.as_secs())),
+            };
+            (source, answer)
+        });
         let answers = futures_util::future::join_all(asks).await;
         let mut out = SearchResults::default();
         let (mut tracks, mut albums, mut artists) = (HashSet::new(), HashSet::new(), HashSet::new());

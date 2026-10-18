@@ -118,9 +118,7 @@ pub struct Corpus {
     /// Exactly what `analyse` would queue: unanalysed, not failed, not blocked.
     pub to_analyse: i64,
     pub failed: i64,
-    /// Analysed tracks `dedupe` has not compared yet. A server before 2.0
-    /// sends none.
-    #[serde(default)]
+    /// Analysed tracks `dedupe` has not compared yet.
     pub to_dedupe: i64,
     /// Frontier entries waiting for a crawl.
     pub pending: i64,
@@ -241,9 +239,7 @@ pub struct TrackMeta {
     pub genre: String,
     pub artist_id: i64,
     pub album_id: String,
-    /// The album's cover, when the provider gave one. A server before 1.2
-    /// sends none.
-    #[serde(default)]
+    /// The album's cover, when the provider gave one.
     pub image: Option<String>,
     pub bpm: Option<f32>,
     pub seed_distance: i32,
@@ -327,8 +323,7 @@ pub struct SpaceAlbum {
     pub title: String,
     pub artist: String,
     pub artist_id: Option<i64>,
-    /// Its cover, when the provider gave one; a server before 1.2 sends none.
-    #[serde(default)]
+    /// Its cover, when the provider gave one.
     pub image: Option<String>,
 }
 

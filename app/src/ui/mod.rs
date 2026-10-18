@@ -472,9 +472,8 @@ pub struct Blocklist {
 #[derive(Clone, Copy)]
 pub struct Me(pub Signal<Option<Device>>);
 
-/// The server's music provider, what it is called and what it can do; none
-/// until the server has said, or from a server before 1.2, which only ever
-/// had Qobuz behind it.
+/// The server's music providers, what they are called and can do between
+/// them; none until the server has said.
 #[derive(Clone, Copy)]
 pub struct Provider(
     pub Signal<Option<crate::catalogue::Capabilities>>,

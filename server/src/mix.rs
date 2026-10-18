@@ -397,20 +397,9 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
         })
         .collect();
     let queue = Arc::new(Mutex::new(queue));
-    // What the provider calls itself is where each entry says it came from,
-    // `qobuz:<id>` to stelly-mix. On a thread of its own, whatever runtime
-    // this was called from.
-    let provider = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
-    let source = std::thread::scope(|scope| {
-        scope
-            .spawn(|| -> Result<String> {
-                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                Ok(runtime.block_on(provider.capabilities())?.name)
-            })
-            .join()
-            .unwrap_or_else(|_| anyhow::bail!("asking the provider its name panicked"))
-    })
-    .context("asking the music provider what it is")?;
+    // Where each entry says it came from: Stelly's own ids, `stelly:<id>` to
+    // stelly-mix, whichever provider has the audio.
+    let source = stelly_mix::stelly::SOURCE.to_string();
     let (report, results) = mpsc::channel::<(i64, String, Outcome)>();
 
     let mut handles = Vec::new();
