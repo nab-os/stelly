@@ -12,7 +12,7 @@
 //! from the structs below; `main` gathers them with its own into `Command`.
 
 use crate::pipeline::{analyse, assemble, demo, layout, models, Job, Paths};
-use crate::provider::Provider;
+use crate::provider::{Provider, RemoteAlbum, RemoteArtist, RemoteTrack};
 use crate::schema::{albums, artists, layout as layout_table, tracks};
 use crate::{crawl, db, stages, Command};
 use anyhow::{bail, Context, Result};
@@ -30,16 +30,39 @@ use stelly_core::api::Target;
 #[argh(subcommand, name = "whoami")]
 pub struct Whoami {}
 
-/// Have the music provider convert what an earlier Stelly stored in its own
-/// shapes. `serve` does this at start; this does it now, in the foreground.
+/// Have the first music provider convert what a Stelly before providers
+/// stored in its own shapes. `serve` does this at start; this does it now.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "convert-legacy")]
+pub struct ConvertLegacy {}
+
+/// Make a provider account's likes one person's: its liked tracks, albums
+/// and artists, as if they had been liked in Stelly, when they were liked
+/// there. The crawl seeds from them at its next run.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "import")]
-pub struct Import {}
+pub struct Import {
+    /// the provider whose account's likes they are, by name; see whoami
+    #[argh(option)]
+    provider: String,
+    /// whose likes they become
+    #[argh(option)]
+    user: String,
+    /// only these, comma-separated: tracks, albums, artists (default all)
+    #[argh(option, default = "String::from(\"tracks,albums,artists\")")]
+    kinds: String,
+    /// say what would be imported, and import nothing
+    #[argh(switch)]
+    dry_run: bool,
+}
 
-/// List the account's favourites.
+/// List a provider account's own favourites.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "favourites")]
 pub struct Favourites {
+    /// the provider, by name; see whoami
+    #[argh(option)]
+    provider: String,
     /// tracks, albums or artists (default tracks)
     #[argh(option, default = "Kind::Tracks")]
     kind: Kind,
@@ -277,12 +300,14 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
 
     match command {
         Command::Whoami(_) => block(Box::pin(whoami(paths))),
-        Command::Import(_) => block(Box::pin(async {
+        Command::ConvertLegacy(_) => block(Box::pin(async {
             let report = |line: String| eprintln!("{line}");
-            let done = crate::import::run(&paths.db_path, &Provider::from_env(&paths.env_dir).bulk(), &report).await?;
+            let provider = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
+            let done = crate::legacy::run(&paths.db_path, &provider, &report).await?;
             println!("{} stored items converted, {} dropped", done.converted, done.dropped);
             Ok(())
         })),
+        Command::Import(args) => block(Box::pin(import_likes(args, paths))),
         Command::Favourites(args) => block(Box::pin(favourites(args, paths))),
         Command::Crawl(args) => block(Box::pin(crawl_command(args, paths))),
         Command::Analyse(args) => block(Box::pin(analyse_command(args, paths))),
@@ -311,37 +336,90 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
 // ------------------------------------------------------------------ account
 
 async fn whoami(paths: &Paths) -> Result<()> {
-    let provider = Provider::from_env(&paths.env_dir);
-    let what = provider.capabilities().await?;
-    let account = provider.account().await?;
+    let provider = Provider::from_env(&paths.env_dir, &paths.db_path);
     let field = |value: Option<String>| value.unwrap_or_else(|| "?".into());
-    println!("provider    : {} ({}, at {})", what.title, what.name, provider.url());
-    println!("account id  : {}", field(account.id));
-    println!("email       : {}", field(account.email));
-    println!("display name: {}", field(account.name));
-    println!("subscription: {}", field(account.subscription));
+    for (n, (what, url, account)) in provider.accounts().await.into_iter().enumerate() {
+        if n > 0 {
+            println!();
+        }
+        println!("provider    : {what}, at {url}");
+        match account {
+            Ok(account) => {
+                println!("account id  : {}", field(account.id));
+                println!("email       : {}", field(account.email));
+                println!("display name: {}", field(account.name));
+                println!("subscription: {}", field(account.subscription));
+            }
+            Err(err) => println!("account     : {err:#}"),
+        }
+    }
+    Ok(())
+}
+
+async fn import_likes(args: Import, paths: &Paths) -> Result<()> {
+    use crate::likes::{self, Liked};
+    let user = crate::auth::AuthStore::new(&paths.db_path)?.user(&args.user)?;
+    let provider = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
+    let now = likes::now();
+    for kind in args.kinds.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+        // Each with when it was liked there, if the provider says.
+        let found: Vec<(String, Liked, Option<i64>)> = match kind {
+            "tracks" => provider
+                .favourite_tracks(&args.provider, usize::MAX)
+                .await?
+                .into_iter()
+                .map(|t| (t.id.to_string(), t.liked_at, Liked::Track(RemoteTrack { liked_at: None, ..t })))
+                .map(|(id, at, liked)| (id, liked, at))
+                .collect(),
+            "albums" => provider
+                .favourite_albums(&args.provider, usize::MAX)
+                .await?
+                .into_iter()
+                .map(|a| (a.id.clone(), a.liked_at, Liked::Album(RemoteAlbum { liked_at: None, ..a })))
+                .map(|(id, at, liked)| (id, liked, at))
+                .collect(),
+            "artists" => provider
+                .favourite_artists(&args.provider, usize::MAX)
+                .await?
+                .into_iter()
+                .map(|a| (a.id.to_string(), a.liked_at, Liked::Artist(RemoteArtist { liked_at: None, ..a })))
+                .map(|(id, at, liked)| (id, liked, at))
+                .collect(),
+            other => anyhow::bail!("{other:?} is not tracks, albums or artists"),
+        };
+        if args.dry_run {
+            println!("{}: {} {kind} to import for {}", args.provider, found.len(), user.name);
+            continue;
+        }
+        let mut added = 0;
+        for (id, liked, at) in &found {
+            added += likes::record(&paths.db_path, user.id, id, liked, at.unwrap_or(now))?;
+        }
+        println!("{}: {added} new liked {kind} for {}, of {}", args.provider, user.name, found.len());
+    }
     Ok(())
 }
 
 async fn favourites(args: Favourites, paths: &Paths) -> Result<()> {
     let kind = args.kind;
     let cap = if args.limit == 0 { usize::MAX } else { args.limit };
-    let provider = Provider::from_env(&paths.env_dir);
+    let provider = Provider::from_env(&paths.env_dir, &paths.db_path);
+    let name = args.provider.as_str();
     let lines: Vec<String> = match kind {
         Kind::Tracks => provider
-            .favourite_tracks(cap)
+            .favourite_tracks(name, cap)
             .await?
             .iter()
             .map(|t| format!("{:>12}  {} - {}  [{}]", t.id, t.artist, t.title, t.album))
             .collect(),
         Kind::Albums => provider
-            .favourite_albums(cap)
+            .favourite_albums(name, cap)
             .await?
             .iter()
             .map(|a| format!("{:>12}  {} - {}", a.id, a.artist, a.title))
             .collect(),
         Kind::Artists => provider
-            .favourite_artists(cap)
+            .favourite_artists(name, cap)
             .await?
             .iter()
             .map(|a| format!("{:>12}  {}", a.id, a.name))
@@ -359,7 +437,7 @@ async fn favourites(args: Favourites, paths: &Paths) -> Result<()> {
 async fn crawl_command(args: Crawl, paths: &Paths) -> Result<()> {
     let conn = &mut db::open_for_write(&paths.db_path)?;
     // How fast is the gateway's to say, for the whole account.
-    let mut client = Provider::from_env(&paths.env_dir).bulk();
+    let mut client = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
 
     if !args.no_seed {
         eprintln!("seeding from the family's likes…");

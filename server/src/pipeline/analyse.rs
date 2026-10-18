@@ -318,7 +318,7 @@ pub async fn run(paths: &Paths, options: &Options, job: &Job) -> Result<Stats> {
     ));
 
     // Behind browsing at the gateway: a search goes ahead of the backlog.
-    let client = Provider::from_env(&paths.env_dir).bulk();
+    let client = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()?;

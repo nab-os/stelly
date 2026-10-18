@@ -117,3 +117,31 @@ CREATE TABLE IF NOT EXISTS mix_failures (
     reason     TEXT,
     failed_at  TEXT
 );
+
+-- Which providers' items each of Stelly's own ids stands for: one row per
+-- provider item, several for one recording found on several providers.
+-- See server/src/refs.rs.
+CREATE TABLE IF NOT EXISTS refs (
+    -- 'track' | 'album' | 'artist' | 'playlist'
+    kind       TEXT NOT NULL,
+    -- Stelly's id: a number written out, but for albums.
+    id         TEXT NOT NULL,
+    -- The provider's name, as its capabilities give it, and its id.
+    provider   TEXT NOT NULL,
+    ref        TEXT NOT NULL,
+    -- What items from different providers are matched on.
+    isrc       TEXT,
+    match_key  TEXT,
+    seconds    INTEGER,
+    PRIMARY KEY (provider, kind, ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_refs_id   ON refs(kind, id);
+CREATE INDEX IF NOT EXISTS idx_refs_isrc ON refs(kind, isrc);
+CREATE INDEX IF NOT EXISTS idx_refs_key  ON refs(kind, match_key);
+
+-- The next of Stelly's own ids for each kind.
+CREATE TABLE IF NOT EXISTS id_counters (
+    kind  TEXT PRIMARY KEY,
+    next  INTEGER NOT NULL
+);

@@ -44,7 +44,7 @@ pub async fn analyse_target(target: &Target, paths: &Paths, options: analyse::Op
     job.log(format!("cataloguing {target}"));
     let ids = {
         let conn = &mut db::open_for_write(&paths.db_path)?;
-        let mut client = Provider::from_env(&paths.env_dir).bulk();
+        let mut client = Provider::from_env(&paths.env_dir, &paths.db_path).bulk();
         crawl::catalogue_target(conn, &mut client, target, job).await?
     };
     if ids.is_empty() {

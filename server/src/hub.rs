@@ -170,7 +170,7 @@ impl Hub {
     /// The provider's client, built on first reach. Clones share it; the
     /// provider queues every device's requests on the account's one budget.
     fn provider(&self) -> Provider {
-        self.client.get_or_init(|| Provider::from_env(&self.env_dir)).clone()
+        self.client.get_or_init(|| Provider::from_env(&self.env_dir, &self.db_path)).clone()
     }
 
     /// The client for a device's reads, which queue as interactive.
@@ -190,7 +190,7 @@ impl Hub {
         std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             let report = |line: String| hub.log.push(line);
-            match runtime.block_on(crate::import::run(&hub.db_path, &hub.provider().bulk(), &report)) {
+            match runtime.block_on(crate::legacy::run(&hub.db_path, &hub.provider().bulk(), &report)) {
                 Ok(done) if done.converted > 0 => {
                     hub.log.push(format!("imported {} stored items, {} dropped", done.converted, done.dropped));
                     if let Err(err) = hub.space.reload() {
@@ -435,7 +435,7 @@ impl Hub {
             }
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };
-        likes::record(&self.db_path, user_id, id, &item, likes::now())
+        likes::record(&self.db_path, user_id, id, &item, likes::now()).map(|_| ())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
@@ -810,7 +810,7 @@ async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance
     // This thread's own connection and client: a client's connections belong
     // to the runtime that made them.
     let mut conn = db::open_for_write(db_path).context("opening the database")?;
-    let mut client = Provider::from_env(env_dir).bulk();
+    let mut client = Provider::from_env(env_dir, db_path).bulk();
 
     // From the database alone, so likes made since the last crawl are in
     // the frontier before it carries on.
