@@ -24,6 +24,7 @@ mod auth;
 mod cache;
 mod cli;
 mod crawl;
+mod dedupe;
 mod db;
 mod hub;
 mod legacy;
@@ -171,6 +172,7 @@ pub enum Command {
     Crawl(cli::Crawl),
     Analyse(cli::Analyse),
     MixAnalyse(cli::MixAnalyse),
+    Dedupe(cli::Dedupe),
     BuildSpace(cli::BuildSpace),
     Layout(cli::Layout),
     Models(cli::Models),

@@ -193,6 +193,23 @@ pub struct Analyse {
     artist: Option<i64>,
 }
 
+/// Merge tracks that are one recording: newly analysed tracks whose CLAP
+/// embeddings all but coincide with another's, at about the same length.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "dedupe")]
+pub struct Dedupe {
+    /// how alike two embeddings must be, cosine similarity, when either
+    /// track has no ISRC (default 0.995)
+    #[argh(option, default = "crate::dedupe::MIN_SIMILARITY")]
+    min_similarity: f32,
+    /// the same, between tracks with different ISRCs (default 0.999)
+    #[argh(option, default = "crate::dedupe::MIN_SIMILARITY_OTHER_ISRC")]
+    min_similarity_other_isrc: f32,
+    /// say what would be merged, and merge nothing
+    #[argh(switch)]
+    dry_run: bool,
+}
+
 /// Build the space the map and the paths are drawn in.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "build-space")]
@@ -312,6 +329,14 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
         Command::Crawl(args) => block(Box::pin(crawl_command(args, paths))),
         Command::Analyse(args) => block(Box::pin(analyse_command(args, paths))),
         Command::MixAnalyse(args) => block(Box::pin(mix_analyse_command(args, paths))),
+        Command::Dedupe(args) => {
+            let options = crate::dedupe::Options {
+                min_similarity: args.min_similarity,
+                min_similarity_other_isrc: args.min_similarity_other_isrc,
+                dry_run: args.dry_run,
+            };
+            crate::dedupe::run(paths, &options, &Job::stderr()).map(|_| ())
+        }
         Command::BuildSpace(args) => block(Box::pin(assemble::run(paths, args.weights, &Job::stderr()))),
         Command::Layout(args) => layout_command(args, paths),
         Command::Models(_) => block(Box::pin(async {

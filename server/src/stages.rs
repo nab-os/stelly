@@ -1,7 +1,7 @@
 //! Running a pipeline stage, and the counts that say which one is due.
 //!
 //! Stages run in this process. The crawl has its own loop in `hub`, since it
-//! runs until stopped rather than until done; the other three come through
+//! runs until stopped rather than until done; the others come through
 //! here, from the pipeline view and the command line alike.
 //!
 //! Analyse can be pointed at one track, album or artist, which it catalogues
@@ -26,6 +26,11 @@ pub async fn run(stage: Stage, target: Option<&Target>, paths: &Paths, job: &Job
         }
         (Stage::Analyse, None) => {
             analyse::run(paths, &analyse::Options::default(), job).await?;
+        }
+        (Stage::Dedupe, _) => {
+            let (paths, job) = (paths.clone(), job.clone());
+            tokio::task::spawn_blocking(move || crate::dedupe::run(&paths, &crate::dedupe::Options::default(), &job))
+                .await??;
         }
         (Stage::BuildSpace, _) => {
             assemble::run(paths, None, job).await?;
@@ -83,6 +88,7 @@ pub fn corpus(db_path: &Path) -> Result<Corpus> {
         analysed: features::table.count().get_result(conn).unwrap_or(0),
         to_analyse: analyse::pending_count(conn).unwrap_or(0),
         failed: failures::table.count().get_result(conn).unwrap_or(0),
+        to_dedupe: crate::dedupe::pending_count(conn).unwrap_or(0),
         pending: frontier::table
             .filter(frontier::state.eq("pending"))
             .count()

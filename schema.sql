@@ -145,3 +145,19 @@ CREATE TABLE IF NOT EXISTS id_counters (
     kind  TEXT PRIMARY KEY,
     next  INTEGER NOT NULL
 );
+
+-- Tracks `dedupe` has compared with the rest, so the next run compares only
+-- what was analysed since.
+CREATE TABLE IF NOT EXISTS dedupe_seen (
+    track_id  INTEGER PRIMARY KEY
+);
+
+-- Tracks `dedupe` heard as another and merged into it: their providers'
+-- items, likes and mix analysis are `into_id`'s now. Kept so an id a device
+-- still holds keeps working, and so a merge can be looked back on.
+CREATE TABLE IF NOT EXISTS track_merges (
+    from_id     INTEGER PRIMARY KEY,
+    into_id     INTEGER NOT NULL,
+    similarity  REAL NOT NULL,
+    merged_at   TEXT NOT NULL
+);

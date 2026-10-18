@@ -121,15 +121,20 @@ impl Queue {
         self.stages.pop_front().map(|stage| (stage, None))
     }
 
-    /// Make build-space then layout the next stages, so what the targets add
-    /// reaches the map before the backlog carries on.
+    /// Make dedupe, build-space then layout the next stages, so what the
+    /// targets add reaches the map before the backlog carries on.
     fn rebuild_next(&mut self) {
         match self.stages.front() {
-            Some(Stage::BuildSpace) => {}
-            Some(Stage::Layout) => self.stages.push_front(Stage::BuildSpace),
+            Some(Stage::Dedupe) => {}
+            Some(Stage::BuildSpace) => self.stages.push_front(Stage::Dedupe),
+            Some(Stage::Layout) => {
+                self.stages.push_front(Stage::BuildSpace);
+                self.stages.push_front(Stage::Dedupe);
+            }
             _ => {
                 self.stages.push_front(Stage::Layout);
                 self.stages.push_front(Stage::BuildSpace);
+                self.stages.push_front(Stage::Dedupe);
             }
         }
     }

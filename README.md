@@ -121,8 +121,9 @@ stelly-local serve ~/Music          # http://127.0.0.1:7710
 
 Stelly speaks in ids of its own, and keeps which providers' items each
 stands for. One recording on two providers is one track, analysed once and
-one point on the map: matched by ISRC, or by main artist, bare title and a
-length within three seconds; albums by artist and title, artists by name.
+one point on the map, when their ISRCs agree; albums are matched by artist
+and title, artists by name. What else is one recording, the dedupe stage
+hears.
 It plays and analyses from the first provider in the list that has it, the
 next if that fails. Search, artist pages and playlists gather from all of
 them.
@@ -154,6 +155,7 @@ cd server
 cargo run --release -- whoami                   # each provider, and who it is signed in as
 cargo run --release -- crawl --max-tracks 2000  # likes, then similar artists
 cargo run --release -- analyse                  # fetch excerpts, extract features
+cargo run --release -- dedupe                   # merge tracks that sound the same
 cargo run --release -- build-space              # assemble vectors
 cargo run --release -- layout                   # UMAP projection for the map
 cargo run --release -- evaluate                 # space sanity check
@@ -228,6 +230,23 @@ at start, given `STELLY_SERVER` and `STELLY_TOKEN`.
 
 The server builds stelly-mix's renderer, Signalsmith Stretch, from C++: the
 build wants `clang` and `libclang-dev` besides the rest.
+
+
+### Deduplicating
+
+Catalogues file one recording under several entries, a single and its
+album, compilations, reissues, clean and explicit editions, and providers
+give it different ids and sometimes no ISRC. `dedupe` merges the tracks
+that are one by their CLAP embeddings: cosine similarity 0.995 or more and
+lengths within two seconds, or 0.999 between tracks whose ISRCs differ,
+which only the same master reaches. A track merges with the one it is kept
+as, never through a chain of others, so an audiobook's chapters in one voice
+stay chapters. The one kept is the closest to a like; the others' providers'
+items and likes become its, and `track_merges` remembers each merge, so an
+id a device still holds keeps playing. Each run compares only what was
+analysed since the last; on the production catalogue, the first merged
+52,887 tracks of 192,410 in under a minute. `--dry-run` says what it would
+merge.
 
 ## Running the app
 

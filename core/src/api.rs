@@ -15,17 +15,19 @@ use std::collections::HashMap;
 pub enum Stage {
     Crawl,
     Analyse,
+    Dedupe,
     BuildSpace,
     Layout,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 4] = [Stage::Crawl, Stage::Analyse, Stage::BuildSpace, Stage::Layout];
+    pub const ALL: [Stage; 5] = [Stage::Crawl, Stage::Analyse, Stage::Dedupe, Stage::BuildSpace, Stage::Layout];
 
     pub fn label(self) -> &'static str {
         match self {
             Stage::Crawl => "crawl",
             Stage::Analyse => "analyse",
+            Stage::Dedupe => "dedupe",
             Stage::BuildSpace => "build space",
             Stage::Layout => "layout",
         }
@@ -36,6 +38,7 @@ impl Stage {
         match self {
             Stage::Crawl => "crawl",
             Stage::Analyse => "analyse",
+            Stage::Dedupe => "dedupe",
             Stage::BuildSpace => "build-space",
             Stage::Layout => "layout",
         }
@@ -45,6 +48,7 @@ impl Stage {
         match self {
             Stage::Crawl => "Follow similar artists outward from your favourites.",
             Stage::Analyse => "Download excerpts and extract features. The slow one.",
+            Stage::Dedupe => "Merge tracks that sound the same: one recording, several entries.",
             Stage::BuildSpace => "Assemble the vectors. Seconds, no network.",
             Stage::Layout => "UMAP projection for the map.",
         }
@@ -57,9 +61,9 @@ impl Stage {
     }
 }
 
-/// The three that terminate on their own, in dependency order. Crawl runs
+/// The four that terminate on their own, in dependency order. Crawl runs
 /// until the frontier empties, so it is not queued behind other work.
-pub const FULL_RUN: [Stage; 3] = [Stage::Analyse, Stage::BuildSpace, Stage::Layout];
+pub const FULL_RUN: [Stage; 4] = [Stage::Analyse, Stage::Dedupe, Stage::BuildSpace, Stage::Layout];
 
 // ------------------------------------------------------------- the targets
 
@@ -114,6 +118,10 @@ pub struct Corpus {
     /// Exactly what `analyse` would queue: unanalysed, not failed, not blocked.
     pub to_analyse: i64,
     pub failed: i64,
+    /// Analysed tracks `dedupe` has not compared yet. A server before 2.0
+    /// sends none.
+    #[serde(default)]
+    pub to_dedupe: i64,
     /// Frontier entries waiting for a crawl.
     pub pending: i64,
     /// What `build-space` would include if run now.

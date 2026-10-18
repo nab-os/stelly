@@ -201,6 +201,7 @@ fn stage_icon(stage: Stage) -> Element {
     match stage {
         Stage::Crawl => icons::crawl(),
         Stage::Analyse => icons::waveform(),
+        Stage::Dedupe => icons::twins(),
         Stage::BuildSpace => icons::cube(),
         Stage::Layout => icons::constellation(),
     }
@@ -214,7 +215,7 @@ fn capitalised(label: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The four stages as the steps they are, each with the count it moves and
+/// The stages as the steps they are, each with the count it moves and
 /// whether it has anything to do, so what to run next reads off the page.
 #[component]
 pub fn PipelineControls() -> Element {
@@ -240,6 +241,7 @@ pub fn PipelineControls() -> Element {
     let needs = |stage: Stage| match stage {
         Stage::Crawl => false,
         Stage::Analyse => corpus.to_analyse > 0,
+        Stage::Dedupe => corpus.to_dedupe > 0,
         Stage::BuildSpace => corpus.buildable != corpus.in_space,
         Stage::Layout => corpus.in_space > corpus.on_map,
     };
@@ -272,6 +274,10 @@ pub fn PipelineControls() -> Element {
                     (left, 0) => Some(format!("{left} to go")),
                     (left, failed) => Some(format!("{left} to go, {failed} failed")),
                 },
+            ),
+            Stage::Dedupe => (
+                format!("{} compared", corpus.analysed - corpus.to_dedupe),
+                needs(stage).then(|| format!("{} to compare", corpus.to_dedupe)),
             ),
             Stage::BuildSpace => (
                 format!("{} in the space", corpus.in_space),

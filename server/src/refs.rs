@@ -3,11 +3,11 @@
 //! Every track, album, artist and playlist the server knows has an id of
 //! Stelly's, what the catalogue, the space, likes and the app all speak in,
 //! and one row here for each provider item it stands for. One recording on
-//! two providers is one track: a provider's item is taken for an id another
-//! provider already has when their ISRCs agree, or else when their artist
-//! and title do and their lengths are within a few seconds. Albums are the
-//! same by artist and title, artists by name. Within one provider nothing is
-//! merged: a catalogue's own single and album versions stay its business.
+//! two providers is one track when their ISRCs agree; names are not enough,
+//! and what else is the same recording is the `dedupe` stage's to find, by
+//! what it sounds like. Albums are merged by artist and title, artists by
+//! name. Within one provider nothing is merged here: a catalogue's own single
+//! and album versions stay its business, until `dedupe` hears them as one.
 //!
 //! A catalogue from before several providers was keyed by its one
 //! provider's ids; `bootstrap` takes those for Stelly's own, so nothing in it
@@ -17,9 +17,6 @@ use anyhow::{Context, Result};
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Nullable, Text};
-
-/// Lengths closer than this are the same recording, with the same names.
-const SAME_LENGTH: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -93,8 +90,6 @@ pub fn credit_key(artist: &str, title: &str) -> String {
 struct Found {
     #[diesel(sql_type = Text)]
     id: String,
-    #[diesel(sql_type = Nullable<BigInt>)]
-    seconds: Option<i64>,
 }
 
 #[derive(QueryableByName)]
@@ -113,7 +108,7 @@ struct Count {
 
 /// Stelly's id for `provider`'s `item`, made if it has none yet.
 pub fn resolve(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item) -> Result<String> {
-    let known = diesel::sql_query("SELECT id, seconds FROM refs WHERE provider = ? AND kind = ? AND ref = ?")
+    let known = diesel::sql_query("SELECT id FROM refs WHERE provider = ? AND kind = ? AND ref = ?")
         .bind::<Text, _>(provider)
         .bind::<Text, _>(kind.as_str())
         .bind::<Text, _>(&item.external)
@@ -159,7 +154,7 @@ fn same_as(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item)
     }
     let elsewhere = "provider <> ? AND id NOT IN (SELECT id FROM refs WHERE kind = ? AND provider = ?)";
     if let Some(isrc) = item.isrc.map(str::trim).filter(|s| !s.is_empty()) {
-        let found = diesel::sql_query(format!("SELECT id, seconds FROM refs WHERE kind = ? AND isrc = ? AND {elsewhere} LIMIT 1"))
+        let found = diesel::sql_query(format!("SELECT id FROM refs WHERE kind = ? AND isrc = ? AND {elsewhere} LIMIT 1"))
             .bind::<Text, _>(kind.as_str())
             .bind::<Text, _>(isrc.to_ascii_uppercase())
             .bind::<Text, _>(provider)
@@ -170,21 +165,21 @@ fn same_as(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item)
             return Ok(Some(found.id));
         }
     }
+    // A track is its ISRC or nothing: names and a length mislead too often.
+    if kind == Kind::Track {
+        return Ok(None);
+    }
     let Some(key) = item.key.as_deref().filter(|k| !k.replace('|', "").trim().is_empty()) else {
         return Ok(None);
     };
-    let found = diesel::sql_query(format!("SELECT id, seconds FROM refs WHERE kind = ? AND match_key = ? AND {elsewhere}"))
+    let found = diesel::sql_query(format!("SELECT id FROM refs WHERE kind = ? AND match_key = ? AND {elsewhere}"))
         .bind::<Text, _>(kind.as_str())
         .bind::<Text, _>(key)
         .bind::<Text, _>(provider)
         .bind::<Text, _>(kind.as_str())
         .bind::<Text, _>(provider)
         .load::<Found>(conn)?;
-    let close = |other: Option<i64>| match (kind, item.seconds, other) {
-        (Kind::Track, Some(a), Some(b)) => (a - b).abs() <= SAME_LENGTH,
-        _ => true,
-    };
-    Ok(found.into_iter().find(|f| close(f.seconds)).map(|f| f.id))
+    Ok(found.into_iter().next().map(|f| f.id))
 }
 
 /// A new id: a number, but for albums, whose ids are text.
@@ -234,11 +229,15 @@ fn first_free(conn: &mut SqliteConnection, kind: Kind) -> Result<i64> {
 }
 
 /// The providers' items Stelly's `id` stands for, as (provider, their id).
+/// A track `dedupe` merged into another stands for that one's.
 pub fn routes(conn: &mut SqliteConnection, kind: Kind, id: &str) -> Result<Vec<(String, String)>> {
-    let rows = diesel::sql_query("SELECT provider, ref AS external FROM refs WHERE kind = ? AND id = ?")
-        .bind::<Text, _>(kind.as_str())
-        .bind::<Text, _>(id)
-        .load::<Route>(conn)?;
+    let rows = diesel::sql_query(
+        "SELECT provider, ref AS external FROM refs WHERE kind = ?1 AND id = COALESCE(
+             (SELECT CAST(into_id AS TEXT) FROM track_merges WHERE ?1 = 'track' AND CAST(from_id AS TEXT) = ?2), ?2)",
+    )
+    .bind::<Text, _>(kind.as_str())
+    .bind::<Text, _>(id)
+    .load::<Route>(conn)?;
     Ok(rows.into_iter().map(|r| (r.provider, r.external)).collect())
 }
 
@@ -304,6 +303,8 @@ pub fn bootstrap(conn: &mut SqliteConnection, provider: &str) -> Result<usize> {
     let identity = [
         "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT kind, ref_id, ?, ref_id FROM likes",
         "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT 'artist', CAST(artist_id AS TEXT), ?, CAST(artist_id AS TEXT) FROM blocked_artists",
+        // Merged by `dedupe` before there were refs: the one it joined.
+        "INSERT OR IGNORE INTO refs (kind, id, provider, ref) SELECT 'track', CAST(into_id AS TEXT), ?, CAST(from_id AS TEXT) FROM track_merges",
     ];
     for query in identity {
         if let Ok(n) = diesel::sql_query(query).bind::<Text, _>(provider).execute(conn) {
@@ -353,22 +354,16 @@ mod tests {
         assert_eq!(resolve(conn, "qobuz", Kind::Track, &track("111", None, "Lun", "Gwerz", 200)).unwrap(), qobuz);
         // By ISRC, whatever the names.
         assert_eq!(resolve(conn, "local", Kind::Track, &track("9", Some("gbaaa1"), "LUN", "Gwerz (remaster)", 205)).unwrap(), qobuz);
-        // By names and length, with no ISRC.
-        let yt = resolve(conn, "ytmusic", Kind::Track, &track("abc", None, "lun", "GWERZ", 202)).unwrap();
-        assert_eq!(yt, qobuz);
-        // Too long to be it.
-        let other = resolve(conn, "local", Kind::Track, &track("10", None, "Lun", "Gwerz", 400)).unwrap();
-        assert_ne!(other, qobuz);
+        // Names and a length are not enough: that is for `dedupe` to hear.
+        let yt = resolve(conn, "ytmusic", Kind::Track, &track("abc", None, "lun", "GWERZ", 200)).unwrap();
+        assert_ne!(yt, qobuz);
         // The same provider's second edition stays its own.
         let edition = resolve(conn, "qobuz", Kind::Track, &track("222", Some("GBAAA1"), "Lun", "Gwerz", 200)).unwrap();
         assert_ne!(edition, qobuz);
 
         let mut routes = routes(conn, Kind::Track, &qobuz).unwrap();
         routes.sort();
-        assert_eq!(
-            routes,
-            [("local".into(), "9".into()), ("qobuz".into(), "111".into()), ("ytmusic".into(), "abc".into())]
-        );
+        assert_eq!(routes, [("local".into(), "9".into()), ("qobuz".into(), "111".into())]);
     }
 
     #[test]
