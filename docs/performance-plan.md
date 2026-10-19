@@ -75,7 +75,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 2.11 | Legacy conversion marked done; space load reads only the space's ids and only the bpm | `server/src/legacy.rs:47`, `core/src/db.rs:88` | S | #108 |
 | 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | #109 |
 | 2.13 | Layout, dedupe and analyse on all cores but one, or at a lower priority | `server/src/pipeline/layout.rs`, `dedupe.rs` | S | #110 |
-| 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | |
+| 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | #111 |
 | 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | done, nginx passes Accept-Encoding |
 
 ## Phase 3: app quick wins
