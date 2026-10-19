@@ -25,7 +25,19 @@ holds 142,292, so walks there scale about 6×.
 | Qobuz album behind 6 interactive-lane calls | 1.47 s |
 | Qobuz first stream URL after start / next | 1.14 s / 0.53 s |
 | YouTube Music stream URL (yt-dlp) | 1.54 s, 79 MB per run |
-| YouTube Music relay, any range over 1 MB | 0 bytes: googlevideo answers 403 above 1 MB, pieces are 4 MB |
+| YouTube Music relay with yt-dlp 2026.03.17 | 0 bytes after 1.7 s: YouTube serves its URLs' first ~1 MB only (2026.08.19 is fine, 2.9 s an extraction) |
+
+On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
+
+| What | Result |
+|---|---|
+| health, me, session, space, pipeline, crawl | 9–13 ms |
+| favourites tracks (242 KB) | 28 ms |
+| `/api/corpus` | **3.6 s**, and every app polls it every ~2 s |
+| index / points / meta | 2.1 / 2.6 / 4.7 MB on the wire, **uncompressed**: nginx does not pass `Accept-Encoding` on |
+| neighbours / path / even path / mood / drift | 80 / 496 / 753 / 148 / 978 ms |
+| radio, 50 tracks | **1.79 s**, holding the space for everyone |
+| provider search, cold / cached | 3.5 s / 27 ms |
 
 ## Phase 0: measure first
 
@@ -33,18 +45,18 @@ holds 142,292, so walks there scale about 6×.
 |---|---|---|---|---|
 | 0.1 | `bench/` scripts replaying the measurements above: routes, concurrent radios, search under load, a held write lock, providers, relay ranges | `bench/` | S | |
 | 0.2 | App baselines: launch to favourites, page open, search, time to sound, map open (WebKit inspector, Android DevTools) | app | S | |
-| 0.3 | The same route timings on the production server, read-only, sequential | prod | S | |
+| 0.3 | The same route timings on the production server, read-only, sequential | prod | S | done, above |
 
 ## Phase 1: broken or dangerous
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 1.1 | Relay pieces of at most 1 MB | ytmusic `streams.rs:22` | S | |
-| 1.2 | Re-extract only on an expired URL, not on a range refusal | ytmusic `routes.rs:269` | S | |
-| 1.3 | The release watcher on the bulk lane | `server/src/hub.rs:182` | S | |
+| 1.1 | A stream YouTube refuses is a 502 that says why, not a promised body never sent | ytmusic `routes.rs` | S | ytmusic#3 |
+| 1.2 | A URL found under a minute ago is not re-extracted on refusal | ytmusic `streams.rs` | S | ytmusic#3 |
+| 1.3 | The release watcher on the bulk lane | `server/src/hub.rs:182` | S | #91 |
 | 1.4 | Cap `count` on generate and order; a time budget on the 768-wide path retry | `server/src/space.rs`, `core/src/paths.rs:453` | S | |
-| 1.5 | Auth answers 500, not 401, on a database error | `server/src/auth.rs:332` | S | |
-| 1.6 | A timeout and one connect-error retry on session commands; pool idle timeout and TCP keepalive | `app/src/backend/remote.rs:254, 677` | S | |
+| 1.5 | Auth answers 503, not 401, on a database error; a failed `last_seen` write lets the request through | `server/src/auth.rs:332` | S | #93 |
+| 1.6 | A timeout and one connect-error retry on session commands; pool idle timeout and TCP keepalive | `app/src/backend/remote.rs:254, 677` | S | #92 |
 
 ## Phase 2: server quick wins
 
@@ -64,6 +76,7 @@ holds 142,292, so walks there scale about 6×.
 | 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | |
 | 2.13 | Layout, dedupe and analyse on all cores but one, or at a lower priority | `server/src/pipeline/layout.rs`, `dedupe.rs` | S | |
 | 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | |
+| 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | |
 
 ## Phase 3: app quick wins
 
@@ -151,6 +164,7 @@ holds 142,292, so walks there scale about 6×.
 | 7.6 | Docker: yt-dlp cache on a volume, the zipapp rather than PyInstaller | ytmusic `Dockerfile` | S | |
 | 7.7 | A resident yt-dlp instead of a process per track | ytmusic | L | |
 | 7.8 | Compression between gateway and server, for gateways off loopback | qobuz, provider | S | |
+| 7.9 | yt-dlp kept current: a scheduled image rebuild on new releases, and a start-up check that a stream answers past its first MB | ytmusic | S–M | |
 
 ## Phase 8: scale, before the space passes ~150k
 
@@ -163,7 +177,8 @@ holds 142,292, so walks there scale about 6×.
 
 ## Order
 
-Phase 0 and 1, then 2.1, 2.2, 3.1, 3.2, 3.4, 3.6, 4.6, 2.9, 2.10, which
-clear most of the measured stalls; then the rest of phases 2 to 4; then 5.1
+Phase 0 and 1, then 2.5, 2.6 and 3.1 (corpus is 3.6 s on production and
+polled every 2 s by each app), 2.15, 2.1, 2.2, 3.2, 2.9, 2.10 (radio is
+1.8 s there), 3.4, 3.6, 4.6, which clear most of the measured stalls; then the rest of phases 2 to 4; then 5.1
 and 5.4, phases 6 and 7; phase 8 as the corpus grows. Each phase ends by
 re-running 0.1 and 0.2 and recording before and after in `docs/design.md`.
