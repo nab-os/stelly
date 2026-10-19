@@ -329,20 +329,32 @@ impl AuthStore {
     /// Looked up by hash, so the comparison is SQLite's and not constant-time.
     /// Fine for a 256-bit random token, which cannot be probed a byte at a
     /// time; it would not be for a password.
-    pub fn verify(&self, token: &str) -> Option<Device> {
-        let conn = &mut self.open().ok()?;
+    ///
+    /// `None` only for a token that is not there. A database that cannot be
+    /// read is an error, not a revoked device: the app takes the one for the
+    /// other and drops back to pairing.
+    pub fn verify(&self, token: &str) -> Result<Option<Device>> {
+        let conn = &mut self.open()?;
 
-        let device: Device = device_rows!()
+        let Some(row) = device_rows!()
             .filter(devices::token_hash.eq(hash(token)))
             .first::<DeviceRow>(conn)
-            .ok()?
-            .into();
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let device = Device::from(row);
 
-        let _ = diesel::update(devices::table.find(device.id))
+        // A stage holding the write lock long enough to time this out is
+        // no reason to turn the request away; the next one records it.
+        if let Err(err) = diesel::update(devices::table.find(device.id))
             .set(devices::last_seen.eq(crate::db::utc_now()))
-            .execute(conn);
+            .execute(conn)
+        {
+            eprintln!("recording when device {} was last seen failed: {err}", device.id);
+        }
 
-        Some(device)
+        Ok(Some(device))
     }
 
     /// Everyone's, or one user's.
@@ -420,10 +432,18 @@ fn authorise(parts: &Parts, state: &crate::AppState, needed: Scope) -> Result<De
             "no bearer token; pair this device with `stelly-server pair`",
         ));
     };
-    let Some(device) = state.auth.verify(&token) else {
-        return Err(crate::Failure::unauthorised(
-            "unrecognised token; it may have been revoked",
-        ));
+    let device = match state.auth.verify(&token) {
+        Ok(Some(device)) => device,
+        Ok(None) => {
+            return Err(crate::Failure::unauthorised(
+                "unrecognised token; it may have been revoked",
+            ))
+        }
+        Err(err) => {
+            return Err(crate::Failure::unavailable(format!(
+                "could not check the token, try again: {err:#}"
+            )))
+        }
     };
     if !device.scope.covers(needed) {
         return Err(crate::Failure::forbidden(format!(
@@ -455,5 +475,42 @@ impl FromRequestParts<crate::AppState> for AdminAuth {
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
         authorise(parts, state, Scope::Admin).map(|_| AdminAuth)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use diesel::connection::SimpleConnection;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("stelly-auth-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("stelly.db")
+    }
+
+    /// Only a token that is not there is unknown; one the database cannot
+    /// check is an error, and one it cannot mark as seen still gets in.
+    #[test]
+    fn unknown_tokens_apart_from_a_database_in_the_way() {
+        let db_path = scratch("verify");
+        let store = AuthStore::new(&db_path).unwrap();
+        let user = store.user_for_pairing(None).unwrap();
+        let grant = store.issue("phone", Scope::Play, &user).unwrap();
+
+        assert_eq!(store.verify(&grant.token).unwrap().unwrap().id, grant.device.id);
+        assert!(store.verify("not a token").unwrap().is_none());
+
+        // Another connection holding the write lock, as a stage does: the
+        // `last_seen` update times out, the device is let through anyway.
+        let mut writer = crate::db::connect(&db_path, Duration::from_secs(5)).unwrap();
+        writer.batch_execute("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE;").unwrap();
+        assert_eq!(store.verify(&grant.token).unwrap().unwrap().id, grant.device.id);
+        writer.batch_execute("ROLLBACK;").unwrap();
+
+        // No devices table to read is a failure, not an unknown token.
+        writer.batch_execute("DROP TABLE devices;").unwrap();
+        assert!(store.verify(&grant.token).is_err());
     }
 }
