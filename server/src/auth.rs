@@ -19,8 +19,10 @@ use diesel::sql_types::BigInt;
 use stelly_core::api::{Device, PairingGrant, Scope, User};
 use rand::Rng;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// 32 bytes, hex-encoded. Long enough that guessing is not a threat model.
 const TOKEN_BYTES: usize = 32;
@@ -54,8 +56,33 @@ diesel::table! {
 diesel::joinable!(devices -> users (user_id));
 diesel::allow_tables_to_appear_in_same_query!(devices, users);
 
+/// How long a device found in the database is let in without looking
+/// again. Revoking from the app clears it at once; `stelly-server revoke` is
+/// another process, so this is how long a device it revokes can still get
+/// in. A time rather than `PRAGMA data_version`: the devices share the file
+/// with the catalogue, so every commit a stage makes would change the
+/// version and empty the cache all through a crawl.
+const TRUSTED_FOR: Duration = Duration::from_secs(30);
+
+/// `last_seen` is for telling a phone in use from one in a drawer; a
+/// minute is plenty fine enough.
+const SEEN_EVERY: Duration = Duration::from_secs(60);
+
 pub struct AuthStore {
     db_path: PathBuf,
+    trusted_for: Duration,
+    verified: Mutex<Verified>,
+    /// When each device's `last_seen` was last written, by device id.
+    seen: Mutex<HashMap<i64, Instant>>,
+}
+
+/// Devices already found, by token hash.
+#[derive(Default)]
+struct Verified {
+    devices: HashMap<String, (Device, Instant)>,
+    /// Bumped by every change to devices or users, so a lookup that read
+    /// the row before the change does not put it back after.
+    generation: u64,
 }
 
 /// A `devices` row with its owner's name. The scope is stored as its name.
@@ -127,6 +154,9 @@ impl AuthStore {
     pub fn new(db_path: &Path) -> Result<Self> {
         let store = Self {
             db_path: db_path.to_path_buf(),
+            trusted_for: TRUSTED_FOR,
+            verified: Mutex::default(),
+            seen: Mutex::default(),
         };
         store.ensure_schema()?;
         Ok(store)
@@ -134,6 +164,15 @@ impl AuthStore {
 
     fn open(&self) -> Result<SqliteConnection> {
         crate::db::connect(&self.db_path, Duration::from_secs(5))
+    }
+
+    /// Forget every device found so far, after a change to who may get in
+    /// or what they are called. Rare enough that being precise is not worth
+    /// it.
+    fn forget(&self) {
+        let mut verified = self.verified.lock().unwrap();
+        verified.devices.clear();
+        verified.generation += 1;
     }
 
     /// Users, devices and likes live in the catalogue database, so one file is still
@@ -270,6 +309,7 @@ impl AuthStore {
         diesel::update(users::table.find(user.id))
             .set(users::name.eq(to))
             .execute(conn)?;
+        self.forget();
         Ok(())
     }
 
@@ -286,6 +326,7 @@ impl AuthStore {
             bail!("“{name}” still has {paired} paired device(s); revoke them first");
         }
         diesel::delete(users::table.find(user.id)).execute(conn)?;
+        self.forget();
         Ok(())
     }
 
@@ -324,37 +365,85 @@ impl AuthStore {
         })
     }
 
-    /// Resolve a presented token, and record that it was used.
+    /// Resolve a presented token, and note that it was used.
     ///
-    /// Looked up by hash, so the comparison is SQLite's and not constant-time.
-    /// Fine for a 256-bit random token, which cannot be probed a byte at a
-    /// time; it would not be for a password.
+    /// From memory when it was found in the last `TRUSTED_FOR`, else from
+    /// the database off the runtime. `last_seen` is written at most every
+    /// `SEEN_EVERY`, and never waited for: a stage holding the write lock
+    /// would otherwise hold up every request behind it.
     ///
     /// `None` only for a token that is not there. A database that cannot be
     /// read is an error, not a revoked device: the app takes the one for the
     /// other and drops back to pairing.
-    pub fn verify(&self, token: &str) -> Result<Option<Device>> {
-        let conn = &mut self.open()?;
+    pub async fn check(self: &Arc<Self>, token: &str) -> Result<Option<Device>> {
+        let token_hash = hash(token);
+        let device = match self.remembered(&token_hash) {
+            Some(device) => device,
+            None => {
+                let store = Arc::clone(self);
+                match tokio::task::spawn_blocking(move || store.verify(token_hash)).await?? {
+                    Some(device) => device,
+                    None => return Ok(None),
+                }
+            }
+        };
+        if self.seen_due(device.id) {
+            let store = Arc::clone(self);
+            let id = device.id;
+            tokio::task::spawn_blocking(move || store.record_seen(id));
+        }
+        Ok(Some(device))
+    }
 
+    fn remembered(&self, token_hash: &str) -> Option<Device> {
+        let verified = self.verified.lock().unwrap();
+        let (device, found) = verified.devices.get(token_hash)?;
+        (found.elapsed() < self.trusted_for).then(|| device.clone())
+    }
+
+    /// Looked up by hash, so the comparison is SQLite's and not constant-time.
+    /// Fine for a 256-bit random token, which cannot be probed a byte at a
+    /// time; it would not be for a password.
+    fn verify(&self, token_hash: String) -> Result<Option<Device>> {
+        let generation = self.verified.lock().unwrap().generation;
         let Some(row) = device_rows!()
-            .filter(devices::token_hash.eq(hash(token)))
-            .first::<DeviceRow>(conn)
+            .filter(devices::token_hash.eq(&token_hash))
+            .first::<DeviceRow>(&mut self.open()?)
             .optional()?
         else {
             return Ok(None);
         };
         let device = Device::from(row);
 
-        // A stage holding the write lock long enough to time this out is
-        // no reason to turn the request away; the next one records it.
-        if let Err(err) = diesel::update(devices::table.find(device.id))
-            .set(devices::last_seen.eq(crate::db::utc_now()))
-            .execute(conn)
-        {
-            eprintln!("recording when device {} was last seen failed: {err}", device.id);
+        let mut verified = self.verified.lock().unwrap();
+        if verified.generation == generation {
+            verified.devices.insert(token_hash, (device.clone(), Instant::now()));
         }
-
         Ok(Some(device))
+    }
+
+    /// Whether it is time to write this device's `last_seen`, counting it
+    /// as written if so.
+    fn seen_due(&self, device_id: i64) -> bool {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.get(&device_id).is_some_and(|at| at.elapsed() < SEEN_EVERY) {
+            return false;
+        }
+        seen.insert(device_id, Instant::now());
+        true
+    }
+
+    /// A failure is only logged; the next one due records it.
+    fn record_seen(&self, device_id: i64) {
+        let written = self.open().and_then(|mut conn| {
+            diesel::update(devices::table.find(device_id))
+                .set(devices::last_seen.eq(crate::db::utc_now()))
+                .execute(&mut conn)
+                .map_err(anyhow::Error::from)
+        });
+        if let Err(err) = written {
+            eprintln!("recording when device {device_id} was last seen failed: {err:#}");
+        }
     }
 
     /// Everyone's, or one user's.
@@ -376,6 +465,7 @@ impl AuthStore {
         if target.execute(&mut self.open()?)? == 0 {
             bail!("no device with id {device_id}");
         }
+        self.forget();
         Ok(())
     }
 
@@ -426,13 +516,13 @@ fn bearer(parts: &Parts) -> Option<String> {
         .map(|token| token.trim().to_string())
 }
 
-fn authorise(parts: &Parts, state: &crate::AppState, needed: Scope) -> Result<Device, crate::Failure> {
+async fn authorise(parts: &Parts, state: &crate::AppState, needed: Scope) -> Result<Device, crate::Failure> {
     let Some(token) = bearer(parts) else {
         return Err(crate::Failure::unauthorised(
             "no bearer token; pair this device with `stelly-server pair`",
         ));
     };
-    let device = match state.auth.verify(&token) {
+    let device = match state.auth.check(&token).await {
         Ok(Some(device)) => device,
         Ok(None) => {
             return Err(crate::Failure::unauthorised(
@@ -463,7 +553,7 @@ impl FromRequestParts<crate::AppState> for PlayAuth {
         parts: &mut Parts,
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorise(parts, state, Scope::Play).map(PlayAuth)
+        authorise(parts, state, Scope::Play).await.map(PlayAuth)
     }
 }
 
@@ -474,7 +564,7 @@ impl FromRequestParts<crate::AppState> for AdminAuth {
         parts: &mut Parts,
         state: &crate::AppState,
     ) -> Result<Self, Self::Rejection> {
-        authorise(parts, state, Scope::Admin).map(|_| AdminAuth)
+        authorise(parts, state, Scope::Admin).await.map(|_| AdminAuth)
     }
 }
 
@@ -490,27 +580,61 @@ mod tests {
         dir.join("stelly.db")
     }
 
-    /// Only a token that is not there is unknown; one the database cannot
-    /// check is an error, and one it cannot mark as seen still gets in.
-    #[test]
-    fn unknown_tokens_apart_from_a_database_in_the_way() {
-        let db_path = scratch("verify");
-        let store = AuthStore::new(&db_path).unwrap();
+    fn paired(name: &str) -> (PathBuf, Arc<AuthStore>, PairingGrant) {
+        let db_path = scratch(name);
+        let store = Arc::new(AuthStore::new(&db_path).unwrap());
         let user = store.user_for_pairing(None).unwrap();
         let grant = store.issue("phone", Scope::Play, &user).unwrap();
+        (db_path, store, grant)
+    }
 
-        assert_eq!(store.verify(&grant.token).unwrap().unwrap().id, grant.device.id);
-        assert!(store.verify("not a token").unwrap().is_none());
+    /// Only a token that is not there is unknown; one the database cannot
+    /// check is an error. A held write lock holds up neither the lookup nor,
+    /// with `last_seen` written aside, the answer.
+    #[tokio::test]
+    async fn unknown_tokens_apart_from_a_database_in_the_way() {
+        let (db_path, store, grant) = paired("verify");
+        assert!(store.check("not a token").await.unwrap().is_none());
 
-        // Another connection holding the write lock, as a stage does: the
-        // `last_seen` update times out, the device is let through anyway.
+        // Another connection holding the write lock, as a stage does.
         let mut writer = crate::db::connect(&db_path, Duration::from_secs(5)).unwrap();
         writer.batch_execute("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE;").unwrap();
-        assert_eq!(store.verify(&grant.token).unwrap().unwrap().id, grant.device.id);
+        let asked = Instant::now();
+        assert_eq!(store.check(&grant.token).await.unwrap().unwrap().id, grant.device.id);
+        assert!(asked.elapsed() < Duration::from_secs(1), "waited {:?}", asked.elapsed());
         writer.batch_execute("ROLLBACK;").unwrap();
 
         // No devices table to read is a failure, not an unknown token.
         writer.batch_execute("DROP TABLE devices;").unwrap();
-        assert!(store.verify(&grant.token).is_err());
+        store.forget();
+        assert!(store.check(&grant.token).await.is_err());
+    }
+
+    /// Revoked here, refused on the next request; renamed here, the next
+    /// request has the new name.
+    #[tokio::test]
+    async fn changes_made_here_apply_at_once() {
+        let (_, store, grant) = paired("forget");
+        assert_eq!(store.check(&grant.token).await.unwrap().unwrap().user, "owner");
+
+        store.rename_user("owner", "ana").unwrap();
+        assert_eq!(store.check(&grant.token).await.unwrap().unwrap().user, "ana");
+
+        store.revoke(grant.device.id, None).unwrap();
+        assert!(store.check(&grant.token).await.unwrap().is_none());
+    }
+
+    /// `stelly-server revoke` is another process with its own store: the
+    /// device gets in until what was found expires, then no longer.
+    #[tokio::test]
+    async fn changes_made_elsewhere_apply_within_the_bound() {
+        let (db_path, mut store, grant) = paired("elsewhere");
+        Arc::get_mut(&mut store).unwrap().trusted_for = Duration::from_millis(200);
+        assert!(store.check(&grant.token).await.unwrap().is_some());
+
+        AuthStore::new(&db_path).unwrap().revoke(grant.device.id, None).unwrap();
+        assert!(store.check(&grant.token).await.unwrap().is_some());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(store.check(&grant.token).await.unwrap().is_none());
     }
 }
