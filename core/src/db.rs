@@ -34,6 +34,9 @@ pub struct Catalog {
     pub twins: HashMap<usize, Vec<usize>>,
 }
 
+/// Track ids bound into one query at load.
+const LOAD_BATCH: usize = 10_000;
+
 /// An artist number for a track without an artist.
 pub const NO_ARTIST: u32 = u32::MAX;
 
@@ -98,15 +101,22 @@ struct Row {
     isrc: Option<String>,
 }
 
+/// The one field of the descriptors the space keeps.
+#[derive(serde::Deserialize)]
+struct Bpm {
+    bpm: Option<f64>,
+}
+
 impl From<Row> for TrackMeta {
     fn from(row: Row) -> Self {
-        // BPM lives inside the descriptor blob; pull just that one field.
-        let bpm = row.descriptors.as_deref().and_then(|json| {
-            serde_json::from_str::<serde_json::Value>(json)
-                .ok()
-                .and_then(|v| v.get("bpm").and_then(|b| b.as_f64()))
-                .map(|b| b as f32)
-        });
+        // BPM lives inside the descriptor blob; pull just that one field,
+        // without building the rest.
+        let bpm = row
+            .descriptors
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<Bpm>(json).ok())
+            .and_then(|d| d.bpm)
+            .map(|b| b as f32);
         TrackMeta {
             track_id: row.id,
             title: row.title,
@@ -130,32 +140,34 @@ impl Catalog {
     /// line up with the rows of space.bin.
     pub fn load(db_path: &Path, track_ids: &[i64]) -> Result<Self> {
         let conn = &mut open(db_path)?;
-
-        let rows: Vec<Row> = tracks::table
-            .left_join(artists::table)
-            .left_join(albums::table)
-            .left_join(features::table)
-            .left_join(layout::table)
-            .select((
-                tracks::id,
-                tracks::title,
-                tracks::artist_id,
-                tracks::album_id,
-                tracks::seed_distance,
-                artists::name.nullable(),
-                albums::title.nullable(),
-                albums::genre.nullable(),
-                albums::image.nullable(),
-                features::descriptors_json.nullable(),
-                layout::x.nullable(),
-                layout::y.nullable(),
-                tracks::isrc,
-            ))
-            .load(conn)?;
-        let mut by_id: HashMap<i64, TrackMeta> = rows
-            .into_iter()
-            .map(|row| (row.id, TrackMeta::from(row)))
-            .collect();
+        // Only the space's tracks, a slice of the catalogue once the crawl has
+        // gone wide, in batches under SQLite's limit on bound values.
+        let mut by_id: HashMap<i64, TrackMeta> = HashMap::with_capacity(track_ids.len());
+        for ids in track_ids.chunks(LOAD_BATCH) {
+            let rows: Vec<Row> = tracks::table
+                .left_join(artists::table)
+                .left_join(albums::table)
+                .left_join(features::table)
+                .left_join(layout::table)
+                .filter(tracks::id.eq_any(ids))
+                .select((
+                    tracks::id,
+                    tracks::title,
+                    tracks::artist_id,
+                    tracks::album_id,
+                    tracks::seed_distance,
+                    artists::name.nullable(),
+                    albums::title.nullable(),
+                    albums::genre.nullable(),
+                    albums::image.nullable(),
+                    features::descriptors_json.nullable(),
+                    layout::x.nullable(),
+                    layout::y.nullable(),
+                    tracks::isrc,
+                ))
+                .load(conn)?;
+            by_id.extend(rows.into_iter().map(|row| (row.id, TrackMeta::from(row))));
+        }
 
         let tracks: Vec<TrackMeta> = track_ids
             .iter()
