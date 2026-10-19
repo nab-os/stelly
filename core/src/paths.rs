@@ -58,11 +58,11 @@ impl Navigator {
     /// Push blocked rows out of reach of any argsort over similarities.
     /// Cheaper than filtering afterwards, and matches `exclude_same_artist`.
     fn mask_blocked(&self, sims: &mut [f32]) {
-        if self.catalog.blocked_artists.is_empty() {
+        if self.catalog.blocked_artists().is_empty() {
             return;
         }
-        for (j, s) in sims.iter_mut().enumerate() {
-            if self.catalog.is_blocked(j) {
+        for (s, &blocked) in sims.iter_mut().zip(self.catalog.blocked_rows()) {
+            if blocked {
                 *s = f32::NEG_INFINITY;
             }
         }
@@ -95,10 +95,9 @@ impl Navigator {
         }
         self.mask_blocked(&mut sims);
 
-        if exclude_same_artist {
-            let artist = self.catalog.get(i).artist_id;
-            for (j, s) in sims.iter_mut().enumerate() {
-                if artist != -1 && self.catalog.get(j).artist_id == artist {
+        if let Some(artist) = self.catalog.artist(i).filter(|_| exclude_same_artist) {
+            for (s, &other) in sims.iter_mut().zip(self.catalog.artist_rows()) {
+                if other == artist {
                     *s = f32::NEG_INFINITY;
                 }
             }
@@ -150,6 +149,11 @@ impl Navigator {
 
         let mut sims = vec![0.0f32; self.space.n_tracks];
         let mut order = Vec::new();
+        // Times each artist has come up in the walk so far.
+        let mut times = vec![0u16; self.catalog.artist_count()];
+        if let Some(artist) = self.catalog.artist(start) {
+            times[artist as usize] = 1;
+        }
         while chosen.len() < steps {
             let current = *chosen.last().expect("seeded above");
             self.space.similarities_into(self.space.row(current), &mut sims);
@@ -159,16 +163,10 @@ impl Navigator {
             self.mask_blocked(&mut sims);
 
             if artist_penalty > 0.0 {
-                let mut seen: HashMap<i64, usize> = HashMap::new();
-                for &i in &chosen {
-                    let artist = self.catalog.get(i).artist_id;
-                    if artist != -1 {
-                        *seen.entry(artist).or_insert(0) += 1;
-                    }
-                }
-                for (j, score) in sims.iter_mut().enumerate() {
-                    if let Some(times) = seen.get(&self.catalog.get(j).artist_id) {
-                        *score -= artist_penalty * *times as f32;
+                for (score, &artist) in sims.iter_mut().zip(self.catalog.artist_rows()) {
+                    match times.get(artist as usize) {
+                        Some(&n) if n > 0 => *score -= artist_penalty * n as f32,
+                        _ => {}
                     }
                 }
             }
@@ -182,6 +180,9 @@ impl Navigator {
             similarity.push(Some(sims[pick]));
             chosen.push(pick);
             self.take(&mut used, pick);
+            if let Some(artist) = self.catalog.artist(pick) {
+                times[artist as usize] = times[artist as usize].saturating_add(1);
+            }
         }
 
         chosen
@@ -203,12 +204,9 @@ impl Navigator {
             return true;
         };
 
-        if meta.artist_id != -1 && c.artist_cooldown > 0 {
+        if let Some(artist) = self.catalog.artist(candidate).filter(|_| c.artist_cooldown > 0) {
             let start = chosen.len().saturating_sub(c.artist_cooldown);
-            if chosen[start..]
-                .iter()
-                .any(|&p| self.catalog.get(p).artist_id == meta.artist_id)
-            {
+            if chosen[start..].iter().any(|&p| self.catalog.artist(p) == Some(artist)) {
                 return false;
             }
         }
@@ -834,13 +832,7 @@ mod tests {
                 n_dims: 2,
                 scale: vec![1.0, 1.0],
             },
-            catalog: Catalog {
-                tracks,
-                clap: None,
-                clap_dims: 0,
-                blocked_artists: HashSet::new(),
-                twins: HashMap::new(),
-            },
+            catalog: Catalog::new(tracks, None, 0, HashSet::new()),
             index_of,
         }
     }
@@ -850,11 +842,12 @@ mod tests {
     fn scored(rows: &[(i64, f32, f32, i64)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        nav.catalog.clap = Some(std::sync::Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect()));
-        nav.catalog.clap_dims = 1;
-        for (track, &(_, _, _, artist)) in nav.catalog.tracks.iter_mut().zip(rows) {
+        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        for (track, &(_, _, _, artist)) in tracks.iter_mut().zip(rows) {
             track.artist_id = artist;
         }
+        let clap = std::sync::Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect());
+        nav.catalog = Catalog::new(tracks, Some(clap), 1, HashSet::new());
         nav
     }
 
@@ -998,11 +991,12 @@ mod tests {
     fn with_twins(rows: &[(i64, f32, &str)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        for (track, &(_, _, title)) in nav.catalog.tracks.iter_mut().zip(rows) {
+        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        for (track, &(_, _, title)) in tracks.iter_mut().zip(rows) {
             track.title = title.into();
             track.artist_id = 1;
         }
-        nav.catalog.twins = Catalog::twins_of(&nav.catalog.tracks);
+        nav.catalog = Catalog::new(tracks, None, 0, HashSet::new());
         nav
     }
 

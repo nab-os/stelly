@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Default)]
 pub struct Catalog {
     pub tracks: Vec<TrackMeta>,
     /// Raw CLAP audio embeddings, row-aligned with `tracks`. Raw rather than
@@ -18,13 +19,23 @@ pub struct Catalog {
     pub clap_dims: usize,
     /// Artists to pretend are not there. The space keeps their rows, so
     /// blocking is enforced on every read, which is what lets it take effect
-    /// without a rebuild.
-    pub blocked_artists: HashSet<i64>,
+    /// without a rebuild. Set through `set_blocked`, which keeps `blocked`.
+    blocked_artists: HashSet<i64>,
+    /// Per row, whether its artist is blocked. Every scan of the space asks
+    /// this of every row, a hash lookup each time was most of a scan.
+    blocked: Vec<bool>,
+    /// Per row, its artist numbered from 0, so a walk counts artists in a
+    /// plain array rather than a map. `NO_ARTIST` for a track without one.
+    artists: Vec<u32>,
+    artist_count: usize,
     /// For each row that is not the only one of its recording, the rows that
     /// are the same song on other releases. See `recording`. Worked out once
     /// per load, since it depends on the catalogue alone.
     pub twins: HashMap<usize, Vec<usize>>,
 }
+
+/// An artist number for a track without an artist.
+pub const NO_ARTIST: u32 = u32::MAX;
 
 fn open(db_path: &Path) -> Result<SqliteConnection> {
     let url = db_path
@@ -159,16 +170,54 @@ impl Catalog {
 
         let (clap, clap_dims) = load_clap(conn, track_ids)?;
         let blocked_artists = load_blocked(conn)?;
+        Ok(Self::new(tracks, clap.map(Arc::new), clap_dims, blocked_artists))
+    }
 
-        let twins = Self::twins_of(&tracks);
-
-        Ok(Self {
+    /// A catalogue over `tracks`, with what is worked out from them once.
+    pub fn new(
+        tracks: Vec<TrackMeta>,
+        clap: Option<Arc<Vec<f32>>>,
+        clap_dims: usize,
+        blocked_artists: HashSet<i64>,
+    ) -> Self {
+        let mut numbers: HashMap<i64, u32> = HashMap::new();
+        let artists = tracks
+            .iter()
+            .map(|t| match t.artist_id {
+                -1 => NO_ARTIST,
+                id => {
+                    let next = numbers.len() as u32;
+                    *numbers.entry(id).or_insert(next)
+                }
+            })
+            .collect();
+        let mut catalog = Self {
+            twins: Self::twins_of(&tracks),
             tracks,
-            clap: clap.map(Arc::new),
+            clap,
             clap_dims,
-            blocked_artists,
-            twins,
-        })
+            blocked_artists: HashSet::new(),
+            blocked: Vec::new(),
+            artists,
+            artist_count: numbers.len(),
+        };
+        catalog.set_blocked(blocked_artists);
+        catalog
+    }
+
+    /// Apply a block list. Blocking only filters, so nothing needs rebuilding.
+    pub fn set_blocked(&mut self, blocked_artists: HashSet<i64>) {
+        self.blocked = self
+            .tracks
+            .iter()
+            .map(|t| blocked_artists.contains(&t.artist_id))
+            .collect();
+        self.blocked_artists = blocked_artists;
+    }
+
+    /// The artists blocked.
+    pub fn blocked_artists(&self) -> &HashSet<i64> {
+        &self.blocked_artists
     }
 
     /// The `twins` map for a set of rows.
@@ -193,16 +242,29 @@ impl Catalog {
 
     /// Whether row `i` belongs to a blocked artist.
     pub fn is_blocked(&self, i: usize) -> bool {
-        self.tracks
-            .get(i)
-            .is_some_and(|t| self.blocked_artists.contains(&t.artist_id))
+        self.blocked.get(i).copied().unwrap_or(false)
     }
 
-    pub fn is_blocked_id(&self, track_id: i64) -> bool {
-        self.tracks
-            .iter()
-            .find(|t| t.track_id == track_id)
-            .is_some_and(|t| self.blocked_artists.contains(&t.artist_id))
+    /// Per row, whether it is blocked, for a scan over every row.
+    pub fn blocked_rows(&self) -> &[bool] {
+        &self.blocked
+    }
+
+    /// Row `i`'s artist in `artists`' numbering, `None` for a track without
+    /// one.
+    pub fn artist(&self, i: usize) -> Option<u32> {
+        Some(self.artists[i]).filter(|&a| a != NO_ARTIST)
+    }
+
+    /// Per row, its artist's number, `NO_ARTIST` for none, for a scan over
+    /// every row.
+    pub fn artist_rows(&self) -> &[u32] {
+        &self.artists
+    }
+
+    /// How many artists `artists` numbers.
+    pub fn artist_count(&self) -> usize {
+        self.artist_count
     }
 
     /// Row indices that are visible, in catalog order.

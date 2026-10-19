@@ -509,7 +509,7 @@ mod tests {
         let two = loaded.get(1);
         assert_eq!((two.title.as_str(), two.artist.as_str(), two.bpm), ("Two", "Eight", Some(120.0)));
         assert_eq!(loaded.clap_dims, 512);
-        assert!(loaded.blocked_artists.contains(&7));
+        assert!(loaded.blocked_artists().contains(&7));
 
         unblock_artist(&db_path, 7).unwrap();
         assert!(blocked_artists(&db_path).unwrap().is_empty());

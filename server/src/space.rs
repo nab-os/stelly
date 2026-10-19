@@ -358,7 +358,7 @@ fn derive(engine: &Engine, built_at: &str) -> Derived {
 
     // The build and the hidden artists are all a client's copy depends on.
     // Hashed rather than counted, so it survives a server restart.
-    let mut blocked: Vec<i64> = catalog.blocked_artists.iter().copied().collect();
+    let mut blocked: Vec<i64> = catalog.blocked_artists().iter().copied().collect();
     blocked.sort_unstable();
     let mut hasher = DefaultHasher::new();
     blocked.hash(&mut hasher);
