@@ -206,6 +206,11 @@ compares the mel front end and the embedding against reference files written by
 transformers, and `excerpt_from_the_middle_of_a_served_file` runs the byte-range
 fetch against a real MP3 (`STELLY_MP3_SAMPLE`).
 
+How fast is measured rather than tested: [`bench/`](../bench/README.md) times
+the server's routes, the generate recipes, the space under load and behind a
+held write lock, and a provider's routes and file ranges, on a copy of the
+data, so a change can be checked before and after.
+
 ## Not yet verified
 
 Whether Qobuz's signed file URLs are IP-bound. `track/getFileUrl` returns an
