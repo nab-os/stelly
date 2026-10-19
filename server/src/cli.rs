@@ -565,8 +565,8 @@ fn layout_command(args: Layout, paths: &Paths) -> Result<()> {
 }
 
 fn status(paths: &Paths) -> Result<()> {
-    let corpus = stages::corpus(&paths.db_path)?;
     let conn = &mut db::open_for_write(&paths.db_path)?;
+    let corpus = stages::corpus(&paths.db_path)?;
     for (label, n) in [
         ("artists", artists::table.count().get_result(conn).unwrap_or(0)),
         ("albums", albums::table.count().get_result(conn).unwrap_or(0)),

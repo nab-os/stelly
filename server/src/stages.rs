@@ -14,6 +14,7 @@ use crate::{crawl, db};
 use anyhow::{bail, Result};
 use diesel::prelude::*;
 use std::path::Path;
+use std::time::Duration;
 use stelly_core::api::{Corpus, Stage, Target};
 
 /// Run one terminating stage to completion. Analyse holds a blocking database
@@ -70,9 +71,9 @@ pub async fn analyse_target(target: &Target, paths: &Paths, options: analyse::Op
 
 /// Re-read the counts that tell you what still needs running. `in_space` and
 /// `on_map` stay zero: they are questions about what a client has loaded. See
-/// `api::Corpus`.
+/// `api::Corpus`. Only reads, so the schema is left to whoever writes.
 pub fn corpus(db_path: &Path) -> Result<Corpus> {
-    let conn = &mut crate::db::open_for_write(db_path)?;
+    let conn = &mut db::connect(db_path, Duration::from_secs(5))?;
 
     // Asked the way `build-space` asks it.
     let buildable = tracks::table

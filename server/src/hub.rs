@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN,
 };
@@ -42,6 +42,9 @@ const LIKED_ARTISTS_CAP: usize = 10_000;
 /// Each artist's newest few: enough to reach back months for all but the
 /// busiest, in one request.
 const RECENT_PER_ARTIST: usize = 20;
+/// How long the corpus counts are served from memory. They take seconds on a
+/// large database and every app polls them; a stage ending clears them.
+const CORPUS_TTL: Duration = Duration::from_secs(15);
 
 pub struct Hub {
     paths: Paths,
@@ -70,6 +73,7 @@ pub struct Hub {
     vocabulary: tokio::sync::Mutex<Option<Arc<Vocabulary>>>,
     crawl: Arc<CrawlJob>,
     pipeline: Arc<PipelineJob>,
+    corpus: Arc<CorpusCounts>,
     log: Arc<LogBuffer>,
     /// Whole tracks analysed for mixing, and the job that adds to them.
     mix: Arc<crate::mix::MixService>,
@@ -97,6 +101,23 @@ struct PipelineJob {
     generation: AtomicU64,
     /// The running stage's, cleared between stages.
     progress: ProgressSlot,
+}
+
+/// The last corpus counts and when they were taken. The lock is held while
+/// they are taken, so callers arriving meanwhile wait for that one answer
+/// rather than each running the counts again.
+#[derive(Default)]
+struct CorpusCounts {
+    held: tokio::sync::Mutex<Option<(Instant, u64, Corpus)>>,
+    /// Moved by whatever changes the counts. Counts taken before it moved
+    /// are not served after, even when they finish later.
+    epoch: AtomicU64,
+}
+
+impl CorpusCounts {
+    fn clear(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// What the pipeline is doing and will do, under one lock so a target
@@ -160,6 +181,7 @@ impl Hub {
             vocabulary: tokio::sync::Mutex::new(None),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
+            corpus: Arc::new(CorpusCounts::default()),
             log,
         }
     }
@@ -524,6 +546,7 @@ impl Hub {
     /// Tell the loaded space, which filters on every read rather than being
     /// rebuilt.
     async fn refresh_blocked(&self) -> Result<()> {
+        self.corpus.clear();
         let blocked = db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
         let space = self.space.clone();
         tokio::task::spawn_blocking(move || space.set_blocked(blocked))
@@ -533,8 +556,22 @@ impl Hub {
 
     // ------------------------------------------- extending the catalogue
 
+    /// The counts as of at most `CORPUS_TTL` ago. Taken on a blocking
+    /// thread: they scan whole tables.
     pub async fn corpus(&self) -> Result<Corpus> {
-        stages::corpus(&self.db_path)
+        let mut held = self.corpus.held.lock().await;
+        let epoch = self.corpus.epoch.load(Ordering::SeqCst);
+        if let Some((at, taken, corpus)) = &*held {
+            if *taken == epoch && at.elapsed() < CORPUS_TTL {
+                return Ok(corpus.clone());
+            }
+        }
+        let db_path = self.db_path.clone();
+        let corpus = tokio::task::spawn_blocking(move || stages::corpus(&db_path))
+            .await
+            .context("the worker thread panicked")??;
+        *held = Some((Instant::now(), epoch, corpus.clone()));
+        Ok(corpus)
     }
 
     // -------------------------------------------------------------- crawling
@@ -645,6 +682,7 @@ impl Hub {
             queue.adding.push(target);
             queue.rebuild_next();
         }
+        self.corpus.clear();
         self.drain().await
     }
 
@@ -667,6 +705,7 @@ impl Hub {
         let log = self.log.clone();
         let paths = self.paths.clone();
         let space = self.space.clone();
+        let corpus = self.corpus.clone();
 
         job.cancel.store(false, Ordering::SeqCst);
 
@@ -690,6 +729,7 @@ impl Hub {
                     stages::run(stage, scope.as_ref(), &stage_paths, &reporter).await
                 })
                 .await;
+                corpus.clear();
 
                 // Build-space is nearly always followed by layout, and telling
                 // clients after both would have them fetch the space twice for
