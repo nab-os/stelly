@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Duration;
 use stelly_core::api::{
     BlockWeight, GenerateRequest, OrderRequest, Recipe, SpaceAlbum, SpaceArtist, SpaceIndex,
     SpaceInfo, SpaceSearch, SpaceSort, Step, TrackMeta, Word,
@@ -18,6 +19,11 @@ use stelly_core::api::{
 use stelly_core::engine::Engine;
 use stelly_core::map;
 use stelly_core::paths::Constraints;
+
+/// How long a graph path may hold the engine before the wider corridor is
+/// given up on for the even path. Most get through the first corridor in tens
+/// of milliseconds, and never come near it.
+const PATH_BUDGET: Duration = Duration::from_millis(500);
 
 pub struct SpaceService {
     data_dir: PathBuf,
@@ -252,7 +258,7 @@ impl SpaceService {
             },
             (Recipe::Radio { seed }, _) => navigator.radio_nearest(*seed, count, request.penalty, &constraints),
             (Recipe::Path { a, b, even: true }, _) => navigator.interpolate(*a, *b, count, &constraints),
-            (Recipe::Path { a, b, even: false }, _) => navigator.graph_path(*a, *b, 16),
+            (Recipe::Path { a, b, even: false }, _) => navigator.graph_path(*a, *b, 16, count, PATH_BUDGET),
             (Recipe::Drift { seed, .. }, Some(embedding)) => {
                 navigator.drift_to_text(*seed, embedding, count, 5, &constraints)
             }

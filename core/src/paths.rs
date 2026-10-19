@@ -5,6 +5,7 @@ use crate::db::Catalog;
 use crate::space::{argsort_desc, Space, WeightedSpace};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct Constraints {
@@ -441,7 +442,12 @@ impl Navigator {
     /// Usually better than `interpolate`: a straight line through a
     /// high-dimensional space crosses empty regions, whereas this stays on the
     /// data manifold.
-    pub fn graph_path(&self, from_id: i64, to_id: i64, k: usize) -> Vec<Step> {
+    ///
+    /// A path that cannot get through is tried again in a corridor twice as
+    /// wide, unless the first try already took half of `budget`: the wider one
+    /// looks through twice the rows, and would overrun it. The even path of
+    /// `steps` stands in then, rather than nothing.
+    pub fn graph_path(&self, from_id: i64, to_id: i64, k: usize, steps: usize, budget: Duration) -> Vec<Step> {
         let (Some(&start), Some(&goal)) = (self.index_of.get(&from_id), self.index_of.get(&to_id))
         else {
             return Vec::new();
@@ -450,15 +456,19 @@ impl Navigator {
             return Vec::new();
         }
 
-        let walked = [CORRIDOR_WIDTH, 2 * CORRIDOR_WIDTH].into_iter().find_map(|width| {
+        let started = Instant::now();
+        let through = |width: usize| {
             let graph = self.knn_among(&self.corridor(start, goal, width), k);
             self.walk(start, goal, &graph)
-        });
-        walked
-            .unwrap_or_default()
-            .into_iter()
-            .map(|i| self.step(i, None))
-            .collect()
+        };
+        let walked = match through(CORRIDOR_WIDTH) {
+            Some(walked) => walked,
+            None if started.elapsed() * 2 >= budget => {
+                return self.interpolate(from_id, to_id, steps, &Constraints::default());
+            }
+            None => through(2 * CORRIDOR_WIDTH).unwrap_or_default(),
+        };
+        walked.into_iter().map(|i| self.step(i, None)).collect()
     }
 
     /// Dijkstra from `start` to `goal`, the rows on the way, both ends
@@ -1027,7 +1037,7 @@ mod tests {
     #[test]
     fn graph_path_never_steps_onto_a_twin() {
         let nav = with_twins(&TWINS);
-        let path = nav.graph_path(1, 8, 4);
+        let path = nav.graph_path(1, 8, 4, 6, Duration::MAX);
         assert_no_song_twice(&nav, &path);
         assert_eq!(path.first().map(|step| step.track.track_id), Some(1));
         assert_eq!(path.last().map(|step| step.track.track_id), Some(8));
@@ -1049,7 +1059,19 @@ mod tests {
     #[test]
     fn graph_path_leaves_a_song_through_any_of_its_releases() {
         let nav = with_twins(&[(1, 0.0, "a"), (2, 4.0, "a - Remastered"), (3, 6.0, "b"), (4, 20.0, "c")]);
-        let path = nav.graph_path(1, 3, 1);
+        let path = nav.graph_path(1, 3, 1, 6, Duration::MAX);
         assert_eq!(ids(&path), vec![1, 3]);
+    }
+
+    /// Two pairs that are each other's only neighbour: no corridor joins 1 to
+    /// 4. Out of time, the even path stands in for the wider try; given the
+    /// time, the answer is what it always was.
+    #[test]
+    fn graph_path_out_of_time_falls_back_to_the_even_path() {
+        let nav = navigator(&[(1, 0.0), (2, 1.0), (3, 50.0), (4, 51.0)]);
+        assert!(nav.graph_path(1, 4, 1, 3, Duration::MAX).is_empty());
+        let fallback = nav.graph_path(1, 4, 1, 3, Duration::ZERO);
+        assert_eq!(ids(&fallback), ids(&nav.interpolate(1, 4, 3, &Constraints::default())));
+        assert_eq!(fallback.last().map(|step| step.track.track_id), Some(4));
     }
 }
