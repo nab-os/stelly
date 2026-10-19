@@ -7,12 +7,14 @@ use diesel::prelude::*;
 pub use crate::api::TrackMeta;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct Catalog {
     pub tracks: Vec<TrackMeta>,
     /// Raw CLAP audio embeddings, row-aligned with `tracks`. Raw rather than
-    /// the PCA'd semantic block; see paths::text_target.
-    pub clap: Option<Vec<f32>>,
+    /// the PCA'd semantic block; see paths::text_target. Shared, so the
+    /// describe baseline can scan it without holding the engine.
+    pub clap: Option<Arc<Vec<f32>>>,
     pub clap_dims: usize,
     /// Artists to pretend are not there. The space keeps their rows, so
     /// blocking is enforced on every read, which is what lets it take effect
@@ -162,7 +164,7 @@ impl Catalog {
 
         Ok(Self {
             tracks,
-            clap,
+            clap: clap.map(Arc::new),
             clap_dims,
             blocked_artists,
             twins,

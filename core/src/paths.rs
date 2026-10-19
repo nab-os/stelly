@@ -705,27 +705,10 @@ impl Navigator {
         row.iter().any(|v| *v != 0.0).then_some(row)
     }
 
-    /// Where each phrase's similarity sits across the corpus: (mean, spread).
-    /// Depends on the corpus alone, so it is worked out once per load.
-    ///
-    /// Without it the words that describe a track best are the ones that
-    /// describe every track: "music" matches anything, "piano" matches far
-    /// more than it should. Measured against the corpus, a word only scores
-    /// when this track sounds like it more than the others do.
+    /// See `text_baseline`, over this catalogue's CLAP vectors.
     pub fn text_baseline(&self, phrases: &[Vec<f32>]) -> Vec<(f32, f32)> {
-        let rows: Vec<&[f32]> = (0..self.catalog.len()).filter_map(|i| self.clap_row(i)).collect();
-        phrases
-            .iter()
-            .map(|phrase| {
-                if rows.is_empty() || phrase.len() != self.catalog.clap_dims {
-                    return (0.0, 1.0);
-                }
-                let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
-                let mean = sims.iter().sum::<f32>() / sims.len() as f32;
-                let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
-                (mean, variance.sqrt().max(1e-6))
-            })
-            .collect()
+        let clap = self.catalog.clap.as_deref().map_or(&[][..], Vec::as_slice);
+        text_baseline(clap, self.catalog.clap_dims, phrases)
     }
 
     /// How much more than the average track this one sounds like each
@@ -741,6 +724,35 @@ impl Navigator {
                 .collect(),
         )
     }
+}
+
+/// Where each phrase's similarity sits across the corpus: (mean, spread),
+/// over `clap`'s rows of `dims`. Depends on the corpus alone, so it is worked
+/// out once per load. A free function so it can run on a shared copy of the
+/// vectors, without the navigator they belong to.
+///
+/// Without it the words that describe a track best are the ones that
+/// describe every track: "music" matches anything, "piano" matches far
+/// more than it should. Measured against the corpus, a word only scores
+/// when this track sounds like it more than the others do.
+pub fn text_baseline(clap: &[f32], dims: usize, phrases: &[Vec<f32>]) -> Vec<(f32, f32)> {
+    // A track analysed before the embeddings were stored has a row of zeros.
+    let rows: Vec<&[f32]> = clap
+        .chunks_exact(dims.max(1))
+        .filter(|row| row.iter().any(|v| *v != 0.0))
+        .collect();
+    phrases
+        .iter()
+        .map(|phrase| {
+            if rows.is_empty() || phrase.len() != dims {
+                return (0.0, 1.0);
+            }
+            let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
+            let mean = sims.iter().sum::<f32>() / sims.len() as f32;
+            let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
+            (mean, variance.sqrt().max(1e-6))
+        })
+        .collect()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -825,7 +837,7 @@ mod tests {
     fn scored(rows: &[(i64, f32, f32, i64)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        nav.catalog.clap = Some(rows.iter().map(|&(_, _, score, _)| score).collect());
+        nav.catalog.clap = Some(std::sync::Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect()));
         nav.catalog.clap_dims = 1;
         for (track, &(_, _, _, artist)) in nav.catalog.tracks.iter_mut().zip(rows) {
             track.artist_id = artist;
@@ -911,7 +923,7 @@ mod tests {
     #[test]
     fn describe_favours_what_sets_a_track_apart() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0), (12, 20.0)]);
-        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1]);
+        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1].into());
         nav.catalog.clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let baseline = nav.text_baseline(&phrases);
@@ -923,7 +935,7 @@ mod tests {
     #[test]
     fn describe_needs_a_clap_vector() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0)]);
-        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0]);
+        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0].into());
         nav.catalog.clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0]];
         let baseline = nav.text_baseline(&phrases);
@@ -1047,7 +1059,7 @@ mod tests {
     fn mood_never_takes_a_song_twice() {
         let mut nav = with_twins(&TWINS);
         // The twins score highest, both of each pair.
-        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1]);
+        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1].into());
         nav.catalog.clap_dims = 1;
         let picked = nav.mood(&[1.0], 3, 0.0, &loose());
         assert_no_song_twice(&nav, &picked);

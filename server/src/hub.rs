@@ -78,8 +78,8 @@ pub struct Hub {
     /// Phrases already embedded. The same few come back on every drift and
     /// mood regenerated, and mixing's baseline on every set.
     embeddings: moka::future::Cache<String, Arc<Vec<f32>>>,
-    /// The describing words, embedded on first use and kept.
-    vocabulary: tokio::sync::Mutex<Option<Arc<Vocabulary>>>,
+    /// The describing words, embedded once the tower has loaded and kept.
+    vocabulary: tokio::sync::OnceCell<Arc<Vocabulary>>,
     crawl: Arc<CrawlJob>,
     pipeline: Arc<PipelineJob>,
     corpus: Arc<CorpusCounts>,
@@ -189,7 +189,7 @@ impl Hub {
             text: tokio::sync::OnceCell::new(),
             steerable: AtomicBool::new(steerable),
             embeddings: moka::future::Cache::new(EMBEDDINGS_HELD),
-            vocabulary: tokio::sync::Mutex::new(None),
+            vocabulary: tokio::sync::OnceCell::new(),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
             corpus: Arc::new(CorpusCounts::default()),
@@ -504,9 +504,12 @@ impl Hub {
         }
         let hub = self.clone();
         tokio::spawn(async move {
-            // Mixing asks for its baseline with every set, so it is ready
-            // before the first.
+            // Mixing asks for its baseline with every set, and describing
+            // for its words, so both are ready before the first.
             let _ = hub.embed(stelly_mix::text::BASELINE).await;
+            if let Err(err) = hub.vocabulary().await {
+                hub.log.push(format!("embedding the describing words failed: {err:#}"));
+            }
         });
     }
 
@@ -560,22 +563,24 @@ impl Hub {
             .context("the worker thread panicked")?
     }
 
-    /// Every word a track can be described with, embedded. The first call
-    /// embeds them all, a few seconds; after that it is free.
+    /// Every word a track can be described with, embedded. Done in the
+    /// background once the tower loads, a second or so; whoever asks before
+    /// it is done waits for it.
     pub async fn vocabulary(&self) -> Result<Arc<Vocabulary>> {
-        let mut held = self.vocabulary.lock().await;
-        if let Some(vocabulary) = held.as_ref() {
-            return Ok(vocabulary.clone());
-        }
-        let mut vocabulary = Vocabulary::default();
-        // Past the cache, which these would fill with phrases no one types.
-        for (word, phrase) in crate::pipeline::labels::vocabulary() {
-            vocabulary.vectors.push(self.encode(&phrase).await?);
-            vocabulary.words.push(word);
-        }
-        let vocabulary = Arc::new(vocabulary);
-        *held = Some(vocabulary.clone());
-        Ok(vocabulary)
+        self.vocabulary
+            .get_or_try_init(|| async {
+                let mut vocabulary = Vocabulary::default();
+                // Past the cache, which these would fill with phrases no one types.
+                for (word, phrase) in crate::pipeline::labels::vocabulary() {
+                    vocabulary.vectors.push(self.encode(&phrase).await?);
+                    vocabulary.words.push(word);
+                }
+                let vocabulary = Arc::new(vocabulary);
+                self.space.set_vocabulary(vocabulary.clone());
+                Ok(vocabulary)
+            })
+            .await
+            .cloned()
     }
 
     /// True while the tower is still loading: a request that steers waits
