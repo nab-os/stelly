@@ -46,6 +46,9 @@ const RECENT_PER_ARTIST: usize = 20;
 /// large database and every app polls them; a stage ending clears them.
 const CORPUS_TTL: Duration = Duration::from_secs(15);
 
+/// Phrases whose embedding is kept, 2 KB each.
+const EMBEDDINGS_HELD: u64 = 1_000;
+
 pub struct Hub {
     paths: Paths,
     env_dir: PathBuf,
@@ -68,10 +71,13 @@ pub struct Hub {
     /// Loaded at start when it is on disk, else on first use, and kept.
     /// `None` inside means the tower has not been exported, which is not an
     /// error, the UI hides steering.
-    text: tokio::sync::OnceCell<Option<tokio::sync::Mutex<TextEncoder>>>,
+    text: tokio::sync::OnceCell<Option<Arc<Mutex<TextEncoder>>>>,
     /// Whether steering is on offer, answered without waiting for the load:
     /// set when the export is on disk, cleared if it then fails to load.
     steerable: AtomicBool,
+    /// Phrases already embedded. The same few come back on every drift and
+    /// mood regenerated, and mixing's baseline on every set.
+    embeddings: moka::future::Cache<String, Arc<Vec<f32>>>,
     /// The describing words, embedded on first use and kept.
     vocabulary: tokio::sync::Mutex<Option<Arc<Vocabulary>>>,
     crawl: Arc<CrawlJob>,
@@ -182,6 +188,7 @@ impl Hub {
             releases: Cache::new(Duration::from_secs(48 * 60 * 60), 10_000),
             text: tokio::sync::OnceCell::new(),
             steerable: AtomicBool::new(steerable),
+            embeddings: moka::future::Cache::new(EMBEDDINGS_HELD),
             vocabulary: tokio::sync::Mutex::new(None),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
@@ -497,14 +504,16 @@ impl Hub {
         }
         let hub = self.clone();
         tokio::spawn(async move {
-            hub.encoder().await;
+            // Mixing asks for its baseline with every set, so it is ready
+            // before the first.
+            let _ = hub.embed(stelly_mix::text::BASELINE).await;
         });
     }
 
     /// The tower, loaded once off the async threads; whoever asks while it
     /// loads waits for that load. A missing export is not an error, it is the
     /// ordinary state of a fresh checkout.
-    async fn encoder(&self) -> Option<&tokio::sync::Mutex<TextEncoder>> {
+    async fn encoder(&self) -> Option<&Arc<Mutex<TextEncoder>>> {
         self.text
             .get_or_init(|| async {
                 let model_dir = self.model_dir.clone();
@@ -520,13 +529,24 @@ impl Hub {
                     }
                 };
                 self.steerable.store(encoder.is_some(), Ordering::SeqCst);
-                encoder.map(tokio::sync::Mutex::new)
+                encoder.map(|encoder| Arc::new(Mutex::new(encoder)))
             })
             .await
             .as_ref()
     }
 
-    pub async fn embed(&self, phrase: &str) -> Result<Vec<f32>> {
+    /// A phrase's embedding, from memory when it has been asked for before.
+    /// Callers asking for the same phrase at once share one run of the tower.
+    pub async fn embed(&self, phrase: &str) -> Result<Arc<Vec<f32>>> {
+        self.embeddings
+            .try_get_with(phrase.to_string(), async { self.encode(phrase).await.map(Arc::new) })
+            .await
+            .map_err(|err| anyhow::anyhow!("{err:#}"))
+    }
+
+    /// Run the tower, off the async threads: milliseconds of ONNX on several
+    /// cores, which would otherwise hold a worker other requests need.
+    async fn encode(&self, phrase: &str) -> Result<Vec<f32>> {
         let encoder = self.encoder().await.ok_or_else(|| {
             anyhow::anyhow!(
                 "text steering needs {}/{}; fetch it with: stelly-server models",
@@ -534,7 +554,10 @@ impl Hub {
                 crate::pipeline::models::CLAP_TEXT
             )
         })?;
-        encoder.lock().await.embed(phrase)
+        let (encoder, phrase) = (encoder.clone(), phrase.to_string());
+        tokio::task::spawn_blocking(move || encoder.lock().unwrap_or_else(|e| e.into_inner()).embed(&phrase))
+            .await
+            .context("the worker thread panicked")?
     }
 
     /// Every word a track can be described with, embedded. The first call
@@ -545,8 +568,9 @@ impl Hub {
             return Ok(vocabulary.clone());
         }
         let mut vocabulary = Vocabulary::default();
+        // Past the cache, which these would fill with phrases no one types.
         for (word, phrase) in crate::pipeline::labels::vocabulary() {
-            vocabulary.vectors.push(self.embed(&phrase).await?);
+            vocabulary.vectors.push(self.encode(&phrase).await?);
             vocabulary.words.push(word);
         }
         let vocabulary = Arc::new(vocabulary);

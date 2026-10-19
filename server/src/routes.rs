@@ -425,7 +425,7 @@ async fn embed(
     Json(body): Json<EmbedBody>,
 ) -> Reply<Embedding> {
     Ok(Json(Embedding {
-        embedding: state.hub.embed(&body.phrase).await?,
+        embedding: state.hub.embed(&body.phrase).await?.to_vec(),
     }))
 }
 
@@ -707,7 +707,7 @@ async fn space_generate(
         _ => None,
     };
     Ok(Json(
-        on_space(&state, move |space| space.generate(&body, embedding.as_deref())).await?,
+        on_space(&state, move |space| space.generate(&body, embedding.as_deref().map(Vec::as_slice))).await?,
     ))
 }
 

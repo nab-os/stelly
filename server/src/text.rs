@@ -11,6 +11,11 @@ use ort::value::TensorRef;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
+/// One phrase is too small to share across every core: past four threads an
+/// embed got no faster, and a radio running beside sixteen of them went from
+/// 84 to 137 ms instead of about 100.
+const THREADS: usize = 4;
+
 pub struct TextEncoder {
     session: Session,
     tokenizer: Tokenizer,
@@ -33,6 +38,8 @@ impl TextEncoder {
 
         let session = Session::builder()
             .context("creating ONNX session builder")?
+            .with_intra_threads(THREADS)
+            .map_err(|e| anyhow::anyhow!("setting ONNX threads: {e}"))?
             .commit_from_file(&onnx_path)
             .with_context(|| format!("loading {}", onnx_path.display()))?;
 
