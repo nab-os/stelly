@@ -63,7 +63,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
 | 2.1 | Device tokens held in memory (TTL or `PRAGMA data_version`); `last_seen` written at most once a minute, off the runtime | `server/src/auth.rs` | S–M | #100 |
-| 2.2 | Text model loaded at start in `spawn_blocking`; `can_steer` an `AtomicBool` | `server/src/hub.rs:462–501` | S | |
+| 2.2 | Text model loaded at start in `spawn_blocking`; `can_steer` an `AtomicBool` | `server/src/hub.rs:462–501` | S | #101 |
 | 2.3 | Embeds in `spawn_blocking`; phrase → embedding LRU; mix `BASELINE` precomputed | `server/src/hub.rs:470`, `routes.rs:880` | S | |
 | 2.4 | Describe vocabulary and baseline built in the background after a reload | `server/src/hub.rs:484`, `space.rs:270` | S | |
 | 2.5 | `/api/corpus` cached 10–30 s, cleared when a stage ends; `db::connect`, not `open_for_write` | `server/src/stages.rs:74` | S | #97 |
