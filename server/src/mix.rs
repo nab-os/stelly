@@ -48,8 +48,9 @@ pub struct Options {
 
 // --------------------------------------------------------------- selecting
 
-/// The catalogued tracks `selection` comes to.
-pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<Vec<i64>> {
+/// The catalogued tracks `selection` comes to. `space` is the server's,
+/// already loaded; the command line has none and loads its own when asked.
+pub async fn select(paths: &Paths, selection: &Selection, job: &Job, space: Option<&Arc<SpaceService>>) -> Result<Vec<i64>> {
     let target = match selection {
         Selection::Track { id } => Some(Target::Track(*id)),
         Selection::Album { id } => Some(Target::Album(id.clone())),
@@ -91,7 +92,7 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
             let encoder = crate::text::TextEncoder::load(&paths.model_dir)?;
             let mut encoder = encoder.context("a mood wants the text tower: stelly-server models")?;
             let embedding = encoder.embed(phrase)?;
-            let space = load_space(paths)?;
+            let space = space_for(paths, space)?;
             let request = GenerateRequest {
                 recipe: Recipe::Mood { phrase: phrase.clone() },
                 count: *count,
@@ -101,11 +102,11 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
             Ok(space.generate(&request, Some(&embedding)).unwrap_or_default().into_iter().map(|s| s.track.track_id).collect())
         }
         Selection::Around { seed, count } => {
-            let space = load_space(paths)?;
+            let space = space_for(paths, space)?;
             Ok(around(&space, &[*seed], *count))
         }
         Selection::ArtistName { name, count } => {
-            let space = load_space(paths)?;
+            let space = space_for(paths, space)?;
             let wanted = squash(name);
             let seeds: Vec<i64> = every_track(&space)
                 .into_iter()
@@ -119,7 +120,7 @@ pub async fn select(paths: &Paths, selection: &Selection, job: &Job) -> Result<V
             Ok(around(&space, &seeds, *count))
         }
         Selection::Space { genres, limit } => {
-            let space = load_space(paths)?;
+            let space = space_for(paths, space)?;
             let genres: Vec<String> = genres.iter().map(|g| g.to_lowercase()).collect();
             Ok(every_track(&space)
                 .into_iter()
@@ -149,8 +150,14 @@ async fn catalogue_each(paths: &Paths, client: &mut Provider, targets: Vec<Targe
     Ok(ids)
 }
 
-fn load_space(paths: &Paths) -> Result<SpaceService> {
-    let space = SpaceService::new(paths.data_dir.clone(), paths.db_path.clone());
+/// The server's space as it is, rather than a second copy of the whole
+/// engine for one selection; loaded first if it has not been yet.
+fn space_for(paths: &Paths, shared: Option<&Arc<SpaceService>>) -> Result<Arc<SpaceService>> {
+    let space = match shared {
+        Some(space) if space.derived().is_some() => return Ok(space.clone()),
+        Some(space) => space.clone(),
+        None => Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone())),
+    };
     space.reload().context("loading the space")?;
     Ok(space)
 }
@@ -275,6 +282,8 @@ pub fn load(db_path: &std::path::Path) -> Result<Mix> {
 /// after each analysis, and the analysis an admin runs in the background.
 pub struct MixService {
     paths: Paths,
+    /// The server's space, which a selection made from it walks.
+    space: Arc<SpaceService>,
     loaded: Arc<tokio::sync::RwLock<Option<Arc<Mix>>>>,
     job: Arc<Mutex<JobStatus>>,
     cancel: Arc<AtomicBool>,
@@ -282,9 +291,10 @@ pub struct MixService {
 }
 
 impl MixService {
-    pub fn new(paths: Paths, log: Arc<LogBuffer>) -> Self {
+    pub fn new(paths: Paths, space: Arc<SpaceService>, log: Arc<LogBuffer>) -> Self {
         Self {
             paths,
+            space,
             loaded: Default::default(),
             job: Default::default(),
             cancel: Default::default(),
@@ -326,6 +336,7 @@ impl MixService {
         }
         self.cancel.store(false, Ordering::SeqCst);
         let (paths, status, log, loaded) = (self.paths.clone(), self.job.clone(), self.log.clone(), self.loaded.clone());
+        let space = self.space.clone();
         let sink = {
             let (status, log) = (status.clone(), log.clone());
             move |line: &str| {
@@ -337,7 +348,7 @@ impl MixService {
         std::thread::Builder::new().name("stelly-mix-job".into()).spawn(move || {
             let outcome = (|| -> Result<Stats> {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                let ids = runtime.block_on(select(&paths, &selection, &job))?;
+                let ids = runtime.block_on(select(&paths, &selection, &job, Some(&space)))?;
                 run(&paths, &ids, &Options::default(), &job)
             })();
             let mut status = status.lock().unwrap_or_else(|e| e.into_inner());

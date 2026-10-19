@@ -57,28 +57,34 @@ fn load_blocked(conn: &mut SqliteConnection) -> Result<HashSet<i64>> {
         .collect())
 }
 
-/// Load CLAP embeddings for the given track order.
+/// Load CLAP embeddings for the given track order. Each row goes straight
+/// into its place in the matrix as it is read, so the blobs are never all
+/// held twice.
 fn load_clap(conn: &mut SqliteConnection, track_ids: &[i64]) -> Result<(Option<Vec<f32>>, usize)> {
-    let stored: HashMap<i64, Vec<f32>> = features::table
+    let rows: HashMap<i64, usize> = track_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let mut matrix: Vec<f32> = Vec::new();
+    let mut dims = 0;
+    let stored = features::table
         .filter(features::clap_f32.is_not_null())
         .select((features::track_id, features::clap_f32.assume_not_null()))
-        .load::<(i64, Vec<u8>)>(conn)?
-        .into_iter()
-        .filter(|(_, blob)| blob.len() % 4 == 0)
-        .map(|(id, blob)| (id, bytemuck::cast_slice::<u8, f32>(&blob).to_vec()))
-        .collect();
-
-    let Some(dims) = stored.values().map(|v| v.len()).next() else {
-        return Ok((None, 0));
-    };
-
-    let mut matrix = vec![0.0f32; track_ids.len() * dims];
-    for (i, id) in track_ids.iter().enumerate() {
-        if let Some(vector) = stored.get(id) {
-            if vector.len() == dims {
-                matrix[i * dims..(i + 1) * dims].copy_from_slice(vector);
-            }
+        .load_iter::<(i64, Vec<u8>), diesel::connection::DefaultLoadingMode>(conn)?;
+    for row in stored {
+        let (id, blob) = row?;
+        if blob.len() % 4 != 0 {
+            continue;
         }
+        // The first vector read sets the width; one of another is left out.
+        if dims == 0 {
+            dims = blob.len() / 4;
+            matrix = vec![0.0f32; track_ids.len() * dims];
+        }
+        let Some(&i) = rows.get(&id) else { continue };
+        if blob.len() == dims * 4 {
+            bytemuck::cast_slice_mut::<f32, u8>(&mut matrix[i * dims..(i + 1) * dims]).copy_from_slice(&blob);
+        }
+    }
+    if dims == 0 {
+        return Ok((None, 0));
     }
     Ok((Some(matrix), dims))
 }

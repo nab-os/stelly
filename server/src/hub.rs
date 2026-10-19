@@ -174,9 +174,10 @@ impl Hub {
     pub fn new(paths: Paths) -> Self {
         let log = Arc::new(LogBuffer::default());
         let steerable = TextEncoder::exported(&paths.model_dir);
+        let space = Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone()));
         Self {
-            mix: Arc::new(crate::mix::MixService::new(paths.clone(), log.clone())),
-            space: Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone())),
+            mix: Arc::new(crate::mix::MixService::new(paths.clone(), space.clone(), log.clone())),
+            space,
             env_dir: paths.env_dir.clone(),
             db_path: paths.db_path.clone(),
             model_dir: paths.model_dir.clone(),
