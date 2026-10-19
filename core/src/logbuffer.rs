@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use tokio::sync::Notify;
 
 /// Keep the log bounded; `analyse` over a large corpus prints thousands of
 /// lines and nobody scrolls back that far.
@@ -20,6 +21,9 @@ pub struct LogBuffer {
     /// How many lines have ever been pushed. Counting rather than indexing
     /// means a cursor taken before an overflow still resolves.
     pushed: AtomicU64,
+    /// Woken on every push, so a stream of the log sleeps until there is
+    /// something to send rather than looking every so often.
+    grown: Notify,
 }
 
 impl LogBuffer {
@@ -30,6 +34,23 @@ impl LogBuffer {
             lines.pop_front();
         }
         self.pushed.fetch_add(1, Ordering::SeqCst);
+        drop(lines);
+        self.grown.notify_waiters();
+    }
+
+    /// Returns once something has been pushed past `since`, at once if it
+    /// already has.
+    pub async fn past(&self, since: u64) {
+        loop {
+            // Listening before looking, so a push in between is not missed.
+            let grown = self.grown.notified();
+            let mut grown = std::pin::pin!(grown);
+            grown.as_mut().enable();
+            if self.cursor() > since {
+                return;
+            }
+            grown.await;
+        }
     }
 
     pub fn clear(&self) {
@@ -61,5 +82,30 @@ impl LogBuffer {
             lines: lines.iter().skip(skip).cloned().collect(),
             cursor: pushed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_reader_wakes_on_the_next_line() {
+        let log = Arc::new(LogBuffer::default());
+        log.push("one");
+        // Already past: no wait.
+        log.past(0).await;
+
+        let waiting = tokio::spawn({
+            let log = log.clone();
+            async move { log.past(1).await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished());
+        log.push("two");
+        tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap().unwrap();
+        assert_eq!(log.since(1).lines, vec!["two".to_string()]);
     }
 }

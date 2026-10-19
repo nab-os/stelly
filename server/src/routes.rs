@@ -21,13 +21,8 @@ use stelly_core::session::{Command, Session, Update};
 use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
-use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::compression::CompressionLayer;
-
-/// How often the SSE task looks for new output. Matches the client's old poll
-/// interval, except now it costs one in-memory read rather than a request.
-const LOG_POLL: Duration = Duration::from_millis(200);
 
 /// The most tracks one generate request gets: the app's slider stops at 60
 /// and its longest list at 500. Radio and path cost a pass over the whole
@@ -594,7 +589,11 @@ async fn pipeline_log(State(state): State<AppState>, _: PlayAuth) -> impl IntoRe
                 }
             }
             cursor = slice.cursor;
-            tokio::time::sleep(LOG_POLL).await;
+            // Asleep until a line comes in, or the client goes.
+            tokio::select! {
+                _ = hub.pipeline_log_past(cursor) => {}
+                _ = sender.closed() => return,
+            }
         }
     });
 

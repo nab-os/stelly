@@ -890,6 +890,11 @@ impl Hub {
         Ok(self.log.since(since))
     }
 
+    /// Returns once the pipeline log holds a line past `since`.
+    pub async fn pipeline_log_past(&self, since: u64) {
+        self.log.past(since).await
+    }
+
     pub async fn pipeline_clear_log(&self) -> Result<()> {
         self.log.clear();
         Ok(())

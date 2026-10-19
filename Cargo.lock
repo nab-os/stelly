@@ -6029,6 +6029,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stelly-provider",
+ "tokio",
 ]
 
 [[package]]
