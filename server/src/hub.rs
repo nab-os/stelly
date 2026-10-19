@@ -902,6 +902,14 @@ async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance
 
         let keep_going = stats.absorb(&result);
 
+        // Counted before the lock is taken: a client reading the status
+        // should not wait on SQL.
+        let tracks = tracks::table.count().get_result(&mut conn).unwrap_or(0);
+        let pending = frontier::table
+            .filter(frontier::state.eq("pending"))
+            .count()
+            .get_result(&mut conn)
+            .unwrap_or(0);
         {
             let mut status = job.status.lock().unwrap();
             status.last = Some(line);
@@ -910,12 +918,8 @@ async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance
             status.tracks_added = stats.tracks_added;
             status.errors = stats.errors;
             status.blocked_skipped = stats.blocked_skipped;
-            status.tracks = tracks::table.count().get_result(&mut conn).unwrap_or(0);
-            status.pending = frontier::table
-                .filter(frontier::state.eq("pending"))
-                .count()
-                .get_result(&mut conn)
-                .unwrap_or(0);
+            status.tracks = tracks;
+            status.pending = pending;
         }
 
         if !keep_going {
