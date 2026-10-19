@@ -65,10 +65,13 @@ pub struct Hub {
     /// interval, which overwrites it, so a client never waits on the provider for an
     /// artist that check has seen.
     releases: Cache,
-    /// Loaded on first use and kept. `None` inside means the tower has not
-    /// been exported, which is not an error, the UI hides steering.
-    text: tokio::sync::Mutex<Option<TextEncoder>>,
-    text_tried: AtomicBool,
+    /// Loaded at start when it is on disk, else on first use, and kept.
+    /// `None` inside means the tower has not been exported, which is not an
+    /// error, the UI hides steering.
+    text: tokio::sync::OnceCell<Option<tokio::sync::Mutex<TextEncoder>>>,
+    /// Whether steering is on offer, answered without waiting for the load:
+    /// set when the export is on disk, cleared if it then fails to load.
+    steerable: AtomicBool,
     /// The describing words, embedded on first use and kept.
     vocabulary: tokio::sync::Mutex<Option<Arc<Vocabulary>>>,
     crawl: Arc<CrawlJob>,
@@ -164,6 +167,7 @@ impl Queue {
 impl Hub {
     pub fn new(paths: Paths) -> Self {
         let log = Arc::new(LogBuffer::default());
+        let steerable = TextEncoder::exported(&paths.model_dir);
         Self {
             mix: Arc::new(crate::mix::MixService::new(paths.clone(), log.clone())),
             space: Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone())),
@@ -176,8 +180,8 @@ impl Hub {
             searches: Cache::new(Duration::from_secs(5 * 60), 500),
             account: Cache::new(Duration::from_secs(2 * 60), 200),
             releases: Cache::new(Duration::from_secs(48 * 60 * 60), 10_000),
-            text: tokio::sync::Mutex::new(None),
-            text_tried: AtomicBool::new(false),
+            text: tokio::sync::OnceCell::new(),
+            steerable: AtomicBool::new(steerable),
             vocabulary: tokio::sync::Mutex::new(None),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
@@ -484,26 +488,53 @@ impl Hub {
 
     // --------------------------------------------------------- text steering
 
-    /// Load the tower once, remembering that we tried. A missing export is not
-    /// an error, it is the ordinary state of a fresh checkout.
-    async fn encoder(&self) -> tokio::sync::MutexGuard<'_, Option<TextEncoder>> {
-        let mut guard = self.text.lock().await;
-        if !self.text_tried.swap(true, Ordering::SeqCst) {
-            *guard = TextEncoder::load(&self.model_dir).unwrap_or(None);
+    /// Load the tower in the background, so the first request that steers
+    /// does not wait for it. Only when it is on disk: fetching
+    /// it is `models`' job, not the server's start.
+    pub fn load_text(self: &Arc<Self>) {
+        if !self.steerable.load(Ordering::SeqCst) {
+            return;
         }
-        guard
+        let hub = self.clone();
+        tokio::spawn(async move {
+            hub.encoder().await;
+        });
+    }
+
+    /// The tower, loaded once off the async threads; whoever asks while it
+    /// loads waits for that load. A missing export is not an error, it is the
+    /// ordinary state of a fresh checkout.
+    async fn encoder(&self) -> Option<&tokio::sync::Mutex<TextEncoder>> {
+        self.text
+            .get_or_init(|| async {
+                let model_dir = self.model_dir.clone();
+                let encoder = match tokio::task::spawn_blocking(move || TextEncoder::load(&model_dir)).await {
+                    Ok(Ok(encoder)) => encoder,
+                    Ok(Err(err)) => {
+                        self.log.push(format!("loading the text tower failed: {err:#}"));
+                        None
+                    }
+                    Err(err) => {
+                        self.log.push(format!("loading the text tower panicked: {err}"));
+                        None
+                    }
+                };
+                self.steerable.store(encoder.is_some(), Ordering::SeqCst);
+                encoder.map(tokio::sync::Mutex::new)
+            })
+            .await
+            .as_ref()
     }
 
     pub async fn embed(&self, phrase: &str) -> Result<Vec<f32>> {
-        let mut guard = self.encoder().await;
-        let encoder = guard.as_mut().ok_or_else(|| {
+        let encoder = self.encoder().await.ok_or_else(|| {
             anyhow::anyhow!(
                 "text steering needs {}/{}; fetch it with: stelly-server models",
                 self.model_dir.display(),
                 crate::pipeline::models::CLAP_TEXT
             )
         })?;
-        encoder.embed(phrase)
+        encoder.lock().await.embed(phrase)
     }
 
     /// Every word a track can be described with, embedded. The first call
@@ -523,8 +554,10 @@ impl Hub {
         Ok(vocabulary)
     }
 
-    pub async fn can_steer(&self) -> Result<bool> {
-        Ok(self.encoder().await.is_some())
+    /// True while the tower is still loading: a request that steers waits
+    /// for it rather than being told there is none.
+    pub fn can_steer(&self) -> bool {
+        self.steerable.load(Ordering::SeqCst)
     }
 
     // ---------------------------------------------------------------- hiding

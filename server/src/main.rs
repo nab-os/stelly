@@ -436,6 +436,7 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
             }
         });
 
+        state.hub.load_text();
         state.hub.import_legacy();
 
         if releases_every > 0 {

@@ -17,14 +17,19 @@ pub struct TextEncoder {
 }
 
 impl TextEncoder {
+    /// Whether the weights and tokenizer are on disk, without loading them.
+    pub fn exported(model_dir: &Path) -> bool {
+        model_dir.join(CLAP_TEXT).is_file() && model_dir.join(CLAP_TOKENIZER).is_file()
+    }
+
     /// Returns Ok(None) when the weights have not been fetched, so the app can
     /// hide text steering rather than refusing to start.
     pub fn load(model_dir: &Path) -> Result<Option<Self>> {
-        let onnx_path = model_dir.join(CLAP_TEXT);
-        let tokenizer_path = model_dir.join(CLAP_TOKENIZER);
-        if !onnx_path.is_file() || !tokenizer_path.is_file() {
+        if !Self::exported(model_dir) {
             return Ok(None);
         }
+        let onnx_path = model_dir.join(CLAP_TEXT);
+        let tokenizer_path = model_dir.join(CLAP_TOKENIZER);
 
         let session = Session::builder()
             .context("creating ONNX session builder")?

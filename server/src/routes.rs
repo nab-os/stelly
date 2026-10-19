@@ -431,7 +431,7 @@ async fn embed(
 
 async fn embed_available(State(state): State<AppState>, _: PlayAuth) -> Reply<Steering> {
     Ok(Json(Steering {
-        available: state.hub.can_steer().await.unwrap_or(false),
+        available: state.hub.can_steer(),
     }))
 }
 
@@ -618,7 +618,7 @@ async fn on_space<T: Send + 'static>(
 }
 
 async fn space_info(State(state): State<AppState>, _: PlayAuth) -> Reply<SpaceInfo> {
-    let tower = state.hub.can_steer().await.unwrap_or(false);
+    let tower = state.hub.can_steer();
     Ok(Json(on_space(&state, move |space| Some(space.info(tower))).await?))
 }
 
