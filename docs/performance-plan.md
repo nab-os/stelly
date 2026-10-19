@@ -66,7 +66,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 2.2 | Text model loaded at start in `spawn_blocking`; `can_steer` an `AtomicBool` | `server/src/hub.rs:462–501` | S | |
 | 2.3 | Embeds in `spawn_blocking`; phrase → embedding LRU; mix `BASELINE` precomputed | `server/src/hub.rs:470`, `routes.rs:880` | S | |
 | 2.4 | Describe vocabulary and baseline built in the background after a reload | `server/src/hub.rs:484`, `space.rs:270` | S | |
-| 2.5 | `/api/corpus` cached 10–30 s, cleared when a stage ends; `db::connect`, not `open_for_write` | `server/src/stages.rs:74` | S | |
+| 2.5 | `/api/corpus` cached 10–30 s, cleared when a stage ends; `db::connect`, not `open_for_write` | `server/src/stages.rs:74` | S | #97 |
 | 2.6 | Partial index on `features(track_id) WHERE clap_f32 IS NOT NULL`, covering `(track_id, extractor_version)` | `schema.sql` | S | |
 | 2.7 | Crawl counts taken before the status mutex | `server/src/hub.rs:860` | S | |
 | 2.8 | Compression on every route; TCP_NODELAY on the listener | `server/src/routes.rs`, `main.rs:446` | S | |
