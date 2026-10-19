@@ -373,11 +373,16 @@ impl Hub {
 
     /// These artists' newest releases, from memory unless `fresh` or never
     /// fetched. An artist that fails is left out rather than failing them all.
+    ///
+    /// `fresh` is the watcher, which no one waits on, so its requests queue
+    /// as bulk and an album opened meanwhile goes ahead of them. A list
+    /// someone asked for and is not cached yet stays interactive.
     async fn artists_recent(&self, artists: Vec<i64>, fresh: bool) -> Vec<RemoteAlbum> {
         use futures_util::StreamExt;
 
         let fetch = |id: i64| async move {
-            self.session().await?.artist_recent_releases(id, RECENT_PER_ARTIST).await
+            let client = if fresh { self.provider().bulk() } else { self.session().await? };
+            client.artist_recent_releases(id, RECENT_PER_ARTIST).await
         };
         // The bucket paces the requests; this only keeps it from idling
         // between them.
