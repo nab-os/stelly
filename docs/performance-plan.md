@@ -73,7 +73,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 2.9 | Partial selection instead of full sorts in neighbours, radio, snap | `core/src/paths.rs:104, 168, 232` | S | #104 |
 | 2.10 | Hidden artists as a per-row bitset; artist ids in their own array; radio penalty as a `Vec<u16>` | `core/src/db.rs:193`, `paths.rs:54–165` | S | #105 |
 | 2.11 | Legacy conversion marked done; space load reads only the space's ids and only the bpm | `server/src/legacy.rs:47`, `core/src/db.rs:88` | S | #108 |
-| 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | |
+| 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | #109 |
 | 2.13 | Layout, dedupe and analyse on all cores but one, or at a lower priority | `server/src/pipeline/layout.rs`, `dedupe.rs` | S | |
 | 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | |
 | 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | done, nginx passes Accept-Encoding |
