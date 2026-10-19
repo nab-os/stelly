@@ -70,7 +70,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 2.6 | Partial index on `features(track_id) WHERE clap_f32 IS NOT NULL`, covering `(track_id, extractor_version)` | `schema.sql` | S | #98 |
 | 2.7 | Crawl counts taken before the status mutex | `server/src/hub.rs:860` | S | #99 |
 | 2.8 | Compression on every route; TCP_NODELAY on the listener | `server/src/routes.rs`, `main.rs:446` | S | |
-| 2.9 | Partial selection instead of full sorts in neighbours, radio, snap | `core/src/paths.rs:104, 168, 232` | S | |
+| 2.9 | Partial selection instead of full sorts in neighbours, radio, snap | `core/src/paths.rs:104, 168, 232` | S | #104 |
 | 2.10 | Hidden artists as a per-row bitset; artist ids in their own array; radio penalty as a `Vec<u16>` | `core/src/db.rs:193`, `paths.rs:54–165` | S | |
 | 2.11 | Legacy conversion marked done; space load reads only the space's ids and only the bpm | `server/src/legacy.rs:47`, `core/src/db.rs:88` | S | |
 | 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | |
