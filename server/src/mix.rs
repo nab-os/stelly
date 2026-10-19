@@ -421,6 +421,7 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
         // Loaded here, so a missing model fails the stage rather than a thread.
         let mut encoder = stelly_audio::clap::AudioEncoder::load(&model_dir, 1)?;
         let handle = std::thread::Builder::new().name(format!("stelly-mix-{n}")).spawn(move || {
+            crate::pipeline::step_back();
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             let client = Provider::from_env(&env_dir, &db_path).bulk();
             let Ok(http) = reqwest::Client::builder().timeout(DOWNLOAD_TIMEOUT).build() else { return };

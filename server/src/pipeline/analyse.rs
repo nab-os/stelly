@@ -206,19 +206,23 @@ impl Workers {
             let report = report.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("stelly-analyse-{n}"))
-                .spawn(move || loop {
-                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).recv();
-                    let Ok((track_id, bytes)) = next else { break };
-                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        analyse_mp3(&mut encoder, bytes)
-                    }));
-                    let outcome = match outcome {
-                        Ok(Ok(features)) => Ok(features),
-                        Ok(Err(err)) => Err(format!("{err:#}")),
-                        Err(_) => Err("extraction panicked".to_string()),
-                    };
-                    if report.send((track_id, outcome)).is_err() {
-                        break;
+                .spawn(move || {
+                    // Requests first: an excerpt can wait a few milliseconds.
+                    super::step_back();
+                    loop {
+                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok((track_id, bytes)) = next else { break };
+                        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            analyse_mp3(&mut encoder, bytes)
+                        }));
+                        let outcome = match outcome {
+                            Ok(Ok(features)) => Ok(features),
+                            Ok(Err(err)) => Err(format!("{err:#}")),
+                            Err(_) => Err("extraction panicked".to_string()),
+                        };
+                        if report.send((track_id, outcome)).is_err() {
+                            break;
+                        }
                     }
                 })
                 .context("spawning an analysis worker")?;
