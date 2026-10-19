@@ -251,13 +251,20 @@ impl Remote {
     }
 
     /// Send one change to the shared session.
+    ///
+    /// Commands go out one at a time, so one that hangs holds up every play
+    /// and skip behind it: hence a short timeout, and the caller catching up
+    /// once it runs out.
     pub async fn session_command(&self, command: &Command) -> Result<Sent> {
-        let response = self
-            .http
-            .post(self.url("/api/session"))
-            .bearer_auth(&self.token)
-            .json(command)
-            .send()
+        let send = || {
+            self.http
+                .post(self.url("/api/session"))
+                .bearer_auth(&self.token)
+                .json(command)
+                .timeout(SESSION_TIMEOUT)
+                .send()
+        };
+        let response = retry_unsent(send)
             .await
             .with_context(|| format!("POST {}", self.url("/api/session")))?;
         match response.status() {
@@ -317,6 +324,7 @@ impl Remote {
             .http
             .delete(self.url(&format!("/api/favourites/{kind}/{id}")))
             .bearer_auth(&self.token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await?;
         Self::check(response).await?;
@@ -360,6 +368,7 @@ impl Remote {
             .http
             .delete(self.url(&format!("/api/blocked/{artist_id}")))
             .bearer_auth(&self.token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await?;
         Self::check(response).await?;
@@ -531,6 +540,7 @@ impl Remote {
             .http
             .get(self.url(path))
             .bearer_auth(&self.token)
+            .timeout(POINTS_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("GET {path}"))?;
@@ -596,6 +606,7 @@ impl Remote {
             .http
             .delete(self.url(&format!("/api/devices/{device_id}")))
             .bearer_auth(&self.token)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await?;
         Self::check(response).await?;
@@ -677,8 +688,10 @@ async fn read_session(
 pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(IDLE_TIMEOUT)
+        .tcp_keepalive(KEEPALIVE)
         .build()
-        .expect("a client with only a connect timeout configured")
+        .expect("a client with only timeouts configured")
 }
 
 /// How long to wait for a server to answer at all. Short: on a phone with a
@@ -694,6 +707,37 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 /// "working…" all along. Generous, since a long favourites list is paged
 /// through Qobuz behind one request.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A session command is small and the server applies it at once, so this
+/// long means the connection is gone, not that the server is busy.
+const SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The map's points run to megabytes, which on a phone's connection can take
+/// a while to come down.
+const POINTS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// A pooled connection unused for this long is closed rather than reused: a
+/// phone that changed networks since has nothing at the other end of it.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Probes on every open connection, so one that died without a word is
+/// noticed by the OS and dropped from the pool. The session stream's own
+/// keep-alive still decides when that one has gone quiet for too long.
+const KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Send, and send again once if the first never got as far as a connection.
+/// Only then: a request that went out may have been applied, and an append
+/// sent twice is a track queued twice.
+async fn retry_unsent<F, Fut, T>(send: F) -> reqwest::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<T>>,
+{
+    match send().await {
+        Err(err) if err.is_connect() => send().await,
+        sent => sent,
+    }
+}
 
 /// Recent releases cost the server one Qobuz request per liked artist when
 /// its cache is cold: five hundred artists at two a second is four minutes.
@@ -746,8 +790,10 @@ pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .tls_certs_only(certs)
         .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(IDLE_TIMEOUT)
+        .tcp_keepalive(KEEPALIVE)
         .build()
-        .expect("a client with only root certificates configured")
+        .expect("a client with only root certificates and timeouts configured")
 }
 
 /// Percent-encode the handful of characters that actually turn up in a search
@@ -764,4 +810,44 @@ fn urlencode(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    /// Count the attempts at one address.
+    async fn attempts(url: &str, timeout: Duration) -> (usize, reqwest::Error) {
+        let http = http_client();
+        let tries = AtomicUsize::new(0);
+        let err = retry_unsent(|| {
+            tries.fetch_add(1, Ordering::SeqCst);
+            http.post(url).timeout(timeout).send()
+        })
+        .await
+        .expect_err("nothing there to answer");
+        (tries.into_inner(), err)
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_tried_again() {
+        // A port that was free a moment ago, and so refuses.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (tries, err) = attempts(&format!("http://127.0.0.1:{port}/"), SESSION_TIMEOUT).await;
+        assert!(err.is_connect());
+        assert_eq!(tries, 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_went_out_is_not_sent_twice() {
+        // Connects, through the backlog, and never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tries, err) = attempts(&format!("http://127.0.0.1:{port}/"), Duration::from_millis(200)).await;
+        assert!(err.is_timeout() && !err.is_connect());
+        assert_eq!(tries, 1);
+        drop(listener);
+    }
 }
