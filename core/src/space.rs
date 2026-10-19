@@ -265,3 +265,85 @@ pub fn argsort_desc(scores: &[f32]) -> Vec<usize> {
     });
     order
 }
+
+/// Indices in `argsort_desc` order, sorted only as far as they are read.
+///
+/// A walk wants the first few of a ranking that its filters accept, and
+/// sorting all of a space for that is most of a radio's time. This selects
+/// the best `first`, sorts those, and selects and sorts twice as many more
+/// from the rest each time they run out. The comparator is a total order, so
+/// what comes out is exactly the full sort, ties included.
+///
+/// `order` is the caller's, so a walk reuses one buffer for every step.
+pub fn ranked<'a>(scores: &'a [f32], order: &'a mut Vec<usize>, first: usize) -> Ranked<'a> {
+    order.clear();
+    order.extend(0..scores.len());
+    Ranked {
+        scores,
+        order,
+        sorted: 0,
+        next: 0,
+        chunk: first.max(1),
+    }
+}
+
+pub struct Ranked<'a> {
+    scores: &'a [f32],
+    order: &'a mut Vec<usize>,
+    /// `order[..sorted]` is in its final place.
+    sorted: usize,
+    next: usize,
+    chunk: usize,
+}
+
+impl Iterator for Ranked<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if self.next == self.sorted {
+            let rest = &mut self.order[self.sorted..];
+            if rest.is_empty() {
+                return None;
+            }
+            let scores = self.scores;
+            let cmp = |&a: &usize, &b: &usize| {
+                scores[b]
+                    .partial_cmp(&scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.cmp(&b))
+            };
+            let k = self.chunk.min(rest.len());
+            if k < rest.len() {
+                rest.select_nth_unstable_by(k, cmp);
+            }
+            rest[..k].sort_unstable_by(cmp);
+            self.sorted += k;
+            self.chunk *= 2;
+        }
+        let i = self.order[self.next];
+        self.next += 1;
+        Some(i)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read to the end from one row, across several widenings, it is the full
+    /// sort: ties in index order, minus infinity last.
+    #[test]
+    fn ranked_reads_as_the_full_sort() {
+        let scores: Vec<f32> = (0..1000)
+            .map(|i| match i % 7 {
+                0 => f32::NEG_INFINITY,
+                n => ((i * 37) % 11) as f32 / n as f32,
+            })
+            .collect();
+        let mut order = Vec::new();
+        for first in [1, 3, 64, 2000] {
+            let read: Vec<usize> = ranked(&scores, &mut order, first).collect();
+            assert_eq!(read, argsort_desc(&scores));
+        }
+    }
+}

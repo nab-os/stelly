@@ -2,7 +2,7 @@
 
 pub use crate::api::Step;
 use crate::db::Catalog;
-use crate::space::{argsort_desc, Space, WeightedSpace};
+use crate::space::{ranked, Space, WeightedSpace};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -34,6 +34,11 @@ impl Default for Constraints {
 /// is tried once more in one twice as wide.
 const CORRIDOR_WAYPOINTS: usize = 16;
 const CORRIDOR_WIDTH: usize = 384;
+
+/// How far down a ranking a walk's step sorts before looking: past the
+/// rows already played, their other releases and a cooldown's artists, the
+/// first one taken is almost always in here. More are sorted when it is not.
+const RANKED_FIRST: usize = 64;
 
 pub struct Navigator {
     pub space: WeightedSpace,
@@ -101,10 +106,11 @@ impl Navigator {
 
         // Nearest first, skipping a release of a song already listed: they
         // sit practically on top of each other, so would come out together.
+        // Twice `k` ranked to begin with leaves room for the skipped ones.
         let mut taken = HashSet::new();
-        argsort_desc(&sims)
-            .into_iter()
-            .filter(|&j| sims[j].is_finite())
+        let mut order = Vec::new();
+        ranked(&sims, &mut order, (2 * k).max(RANKED_FIRST))
+            .take_while(|&j| sims[j].is_finite())
             .filter(|&j| {
                 let fresh = !taken.contains(&j);
                 if fresh {
@@ -142,9 +148,11 @@ impl Navigator {
         self.take(&mut used, start);
         let mut similarity: Vec<Option<f32>> = vec![None];
 
+        let mut sims = vec![0.0f32; self.space.n_tracks];
+        let mut order = Vec::new();
         while chosen.len() < steps {
             let current = *chosen.last().expect("seeded above");
-            let mut sims = self.space.similarities(self.space.row(current));
+            self.space.similarities_into(self.space.row(current), &mut sims);
             for &i in &used {
                 sims[i] = f32::NEG_INFINITY;
             }
@@ -166,9 +174,9 @@ impl Navigator {
             }
 
             // The first candidate the constraints accept, in descending order.
-            let pick = argsort_desc(&sims)
-                .into_iter()
-                .find(|&j| sims[j].is_finite() && self.allowed(j, &chosen, c));
+            let pick = ranked(&sims, &mut order, RANKED_FIRST)
+                .take_while(|&j| sims[j].is_finite())
+                .find(|&j| self.allowed(j, &chosen, c));
 
             let Some(pick) = pick else { break };
             similarity.push(Some(sims[pick]));
@@ -222,17 +230,20 @@ impl Navigator {
         true
     }
 
+    /// The track nearest `waypoint` that the constraints accept. `scratch`
+    /// is the caller's, kept from one waypoint to the next.
     fn snap(
         &self,
         waypoint: &[f32],
         chosen: &[usize],
         used: &HashSet<usize>,
         c: &Constraints,
+        scratch: &mut (Vec<f32>, Vec<usize>),
     ) -> Option<usize> {
-        let sims = self.space.similarities(waypoint);
-        argsort_desc(&sims)
-            .into_iter()
-            .find(|&j| !used.contains(&j) && self.allowed(j, chosen, c))
+        let (sims, order) = scratch;
+        sims.resize(self.space.n_tracks, 0.0);
+        self.space.similarities_into(waypoint, sims);
+        ranked(sims, order, RANKED_FIRST).find(|&j| !used.contains(&j) && self.allowed(j, chosen, c))
     }
 
     // ----------------------------------------------------------------- modes
@@ -259,10 +270,11 @@ impl Navigator {
         self.take(&mut used, a);
         self.take(&mut used, b);
 
+        let mut scratch = Default::default();
         for step in 1..steps.saturating_sub(1) {
             let t = step as f32 / (steps - 1) as f32;
             let waypoint: Vec<f32> = (0..d).map(|k| (1.0 - t) * start[k] + t * end[k]).collect();
-            match self.snap(&waypoint, &chosen, &used, c) {
+            match self.snap(&waypoint, &chosen, &used, c, &mut scratch) {
                 Some(pick) => {
                     chosen.push(pick);
                     self.take(&mut used, pick);
@@ -619,6 +631,7 @@ impl Navigator {
         let mut used: HashSet<usize> = HashSet::new();
         self.take(&mut used, start_index);
 
+        let mut scratch = Default::default();
         for step in 1..steps {
             let t = step as f32 / (steps - 1) as f32;
             let waypoint: Vec<f32> = start
@@ -626,7 +639,7 @@ impl Navigator {
                 .zip(&target)
                 .map(|(s, g)| (1.0 - t) * s + t * g)
                 .collect();
-            match self.snap(&waypoint, &chosen, &used, c) {
+            match self.snap(&waypoint, &chosen, &used, c, &mut scratch) {
                 Some(pick) => {
                     chosen.push(pick);
                     self.take(&mut used, pick);
