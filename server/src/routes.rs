@@ -29,6 +29,11 @@ use tower_http::compression::CompressionLayer;
 /// interval, except now it costs one in-memory read rather than a request.
 const LOG_POLL: Duration = Duration::from_millis(200);
 
+/// The most tracks one generate request gets: the app's slider stops at 60
+/// and its longest list at 500. Radio and path cost a pass over the whole
+/// space per track, and every client waits on the engine while one runs.
+const GENERATE_CAP: usize = 500;
+
 type Reply<T> = Result<Json<T>, Failure>;
 
 pub fn router(state: AppState) -> Router {
@@ -690,8 +695,11 @@ async fn space_search(
 async fn space_generate(
     State(state): State<AppState>,
     _: PlayAuth,
-    Json(body): Json<GenerateRequest>,
+    Json(mut body): Json<GenerateRequest>,
 ) -> Reply<Vec<Step>> {
+    // Clamped rather than refused, so a client asking for more still gets a
+    // list.
+    body.count = body.count.min(GENERATE_CAP);
     // Embedded here rather than by the client, which saves a phone one round
     // trip and 512 floats each way.
     let embedding = match &body.recipe {
