@@ -82,20 +82,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pipeline/log", get(pipeline_log))
         // ------------------------------------------------------------ space
         .route("/api/space", get(space_info))
-        // zstd, for whoever asks: the index and the map are the only big
-        // bodies here, the map's labels most of all.
-        .route("/api/space/index", get(space_index).layer(CompressionLayer::new()))
-        .route("/api/space/points", get(space_points).layer(CompressionLayer::new()))
-        .route("/api/space/points/meta", get(space_points_meta).layer(CompressionLayer::new()))
+        .route("/api/space/index", get(space_index))
+        .route("/api/space/points", get(space_points))
+        .route("/api/space/points/meta", get(space_points_meta))
         .route("/api/space/tracks", post(space_tracks))
-        .route("/api/space/search", get(space_search).layer(CompressionLayer::new()))
+        .route("/api/space/search", get(space_search))
         .route("/api/space/generate", post(space_generate))
         .route("/api/space/order", post(space_order))
         .route("/api/space/describe/{id}", get(space_describe))
         .route("/api/mix/status", get(mix_status))
-        .route("/api/mix/library", get(mix_library).layer(CompressionLayer::new()))
-        .route("/api/mix/tracks", post(mix_tracks).layer(CompressionLayer::new()))
-        .route("/api/mix/tracks/{id}", get(mix_track).layer(CompressionLayer::new()))
+        .route("/api/mix/library", get(mix_library))
+        .route("/api/mix/tracks", post(mix_tracks))
+        .route("/api/mix/tracks/{id}", get(mix_track))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
         .route("/api/mix/find", get(mix_find))
@@ -109,6 +107,11 @@ pub fn router(state: AppState) -> Router {
         // ----------------------------------------------------------- health
         .route("/api/health", get(health))
         .with_state(state)
+        // zstd, for whoever asks, on every route: favourites, search,
+        // generate and the session are tens to hundreds of KB of JSON. The
+        // default predicate leaves the event streams alone, so they are not
+        // buffered, and skips bodies too small to gain anything.
+        .layer(CompressionLayer::new())
 }
 
 // ------------------------------------------------------------------ queries

@@ -45,6 +45,7 @@ use argh::FromArgs;
 use auth::AuthStore;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::serve::ListenerExt;
 use hub::Hub;
 use pipeline::Paths;
 use std::net::SocketAddr;
@@ -444,7 +445,11 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
             tokio::spawn(state.hub.clone().watch_releases(every, auto_add_days));
         }
 
-        let listener = tokio::net::TcpListener::bind(address).await?;
+        // Without TCP_NODELAY a small reply, or an event pushed on a stream,
+        // can wait on Nagle for the client's delayed ack.
+        let listener = tokio::net::TcpListener::bind(address).await?.tap_io(|socket| {
+            let _ = socket.set_nodelay(true);
+        });
         println!("stelly-server listening on http://{address}");
 
         axum::serve(listener, routes::router(state))
