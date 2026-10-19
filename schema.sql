@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS features (
 );
 
 CREATE INDEX IF NOT EXISTS idx_features_version ON features(extractor_version);
+-- The tracks with an embedding, for the counts that ask for them: without
+-- it they read every row, embedding and all.
+CREATE INDEX IF NOT EXISTS idx_features_clap ON features(track_id) WHERE clap_f32 IS NOT NULL;
 
 -- Resumable crawl queue. kind is 'artist' | 'album' | 'track'.
 CREATE TABLE IF NOT EXISTS frontier (
