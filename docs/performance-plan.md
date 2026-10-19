@@ -62,7 +62,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 2.1 | Device tokens held in memory (TTL or `PRAGMA data_version`); `last_seen` written at most once a minute, off the runtime | `server/src/auth.rs` | S–M | |
+| 2.1 | Device tokens held in memory (TTL or `PRAGMA data_version`); `last_seen` written at most once a minute, off the runtime | `server/src/auth.rs` | S–M | #100 |
 | 2.2 | Text model loaded at start in `spawn_blocking`; `can_steer` an `AtomicBool` | `server/src/hub.rs:462–501` | S | |
 | 2.3 | Embeds in `spawn_blocking`; phrase → embedding LRU; mix `BASELINE` precomputed | `server/src/hub.rs:470`, `routes.rs:880` | S | |
 | 2.4 | Describe vocabulary and baseline built in the background after a reload | `server/src/hub.rs:484`, `space.rs:270` | S | |
@@ -76,7 +76,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | |
 | 2.13 | Layout, dedupe and analyse on all cores but one, or at a lower priority | `server/src/pipeline/layout.rs`, `dedupe.rs` | S | |
 | 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | |
-| 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | |
+| 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | done, nginx passes Accept-Encoding |
 
 ## Phase 3: app quick wins
 
