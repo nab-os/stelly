@@ -44,7 +44,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
 | 0.1 | `bench/` scripts replaying the measurements above: routes, concurrent radios, search under load, a held write lock, providers, relay ranges | `bench/` | S | #95 |
-| 0.2 | App baselines: launch to favourites, page open, search, time to sound, map open (WebKit inspector, Android DevTools) | app | S | |
+| 0.2 | App baselines: launch to favourites, page open, search, time to sound, map open (`STELLY_TIMINGS=1`, `debug.stelly.timings`) | app | S | #96, baseline to record |
 | 0.3 | The same route timings on the production server, read-only, sequential | prod | S | done, above |
 
 ## Phase 1: broken or dangerous
