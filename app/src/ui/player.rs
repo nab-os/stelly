@@ -306,6 +306,7 @@ fn follow(player: Player) {
             }
         }
         _ => {
+            crate::timings::start("play");
             mirror.loaded = Some((cue, track.id));
             mirror.tickets += 1;
             let ticket = mirror.tickets;
@@ -319,6 +320,7 @@ fn follow(player: Player) {
     if mirror.loading.is_none() {
         let playing = mirror.session().playing;
         if playing && !mirror.sounding {
+            crate::timings::begin("play");
             transport("stellyResume");
         } else if !playing && mirror.sounding {
             transport("stellyPause");
@@ -335,6 +337,7 @@ async fn load(mut player: Player, track: RemoteTrack, index: usize, ticket: u64)
             mirror.loading = None;
         }
         drop(mirror);
+        crate::timings::end("play-failed", "play", "");
         player.status.set(Some(message));
     };
 
@@ -354,8 +357,12 @@ async fn load(mut player: Player, track: RemoteTrack, index: usize, ticket: u64)
     player.position.set((0.0, track.duration.unwrap_or(0) as f64));
     let quality = *player.quality.peek();
 
+    let presigned = crate::timings::enabled() && signed().fresh((track.id, quality)).is_some();
     let url = match stream_url(track.id, quality).await {
-        Ok(url) => url,
+        Ok(url) => {
+            crate::timings::span("play-url", "play", if presigned { "presigned" } else { "signed" });
+            url
+        }
         Err(err) => {
             give_up(player, format!("{err:#}"));
             return;
@@ -370,6 +377,10 @@ async fn load(mut player: Player, track: RemoteTrack, index: usize, ticket: u64)
         }
         (mirror.clocked.position(), mirror.session().playing)
     };
+    if !autoplay {
+        // Cued paused, as at startup: the next press of play is its own span.
+        crate::timings::end("play-cued", "play", "");
+    }
 
     player.status.set(None);
     // The signed URL is short-lived and this is the app's own webview, so
@@ -1010,7 +1021,8 @@ fn OutputPicker() -> Element {
 pub fn use_transport(player: Player) {
     use_future(move || async move {
         let mut player = player;
-        let mut handle = document::eval(include_str!("../../assets/player.js"));
+        let script = format!("{}{}", crate::timings::script_flag(), include_str!("../../assets/player.js"));
+        let mut handle = document::eval(&script);
 
         while let Ok(message) = handle.recv::<serde_json::Value>().await {
             let number = |key| message.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1042,6 +1054,7 @@ pub fn use_transport(player: Player) {
                     sounding(player, playing, number("position"));
                     announce();
                 }
+                Some("heard") => crate::timings::end("play-heard", "play", ""),
                 Some("loaded") => {
                     loaded(player);
                     announce();

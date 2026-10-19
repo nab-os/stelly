@@ -58,10 +58,12 @@ optional = true
 
 # The JNI entry point and logging; see src/mobile.rs. `jni` and `ndk-context`
 # are the versions tao already uses, for the playback notification in
-# src/ui/now_playing.rs.
+# src/ui/now_playing.rs. `libc` reads the system property that turns on
+# src/timings.rs, an app having no environment to set.
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
 jni = "0.21"
+libc = "0.2"
 log = "0.4"
 ndk-context = "0.1"
 

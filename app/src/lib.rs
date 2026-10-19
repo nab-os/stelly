@@ -10,6 +10,7 @@
 
 pub mod backend;
 pub mod cache;
+pub mod timings;
 pub mod update;
 
 pub use stelly_core::{api, catalogue, logbuffer, recording, session};

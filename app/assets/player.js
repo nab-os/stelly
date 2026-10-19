@@ -104,6 +104,11 @@
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
     dioxus.send({ type: "playing", playing: true, position: audio.currentTime || 0 });
   });
+  // `play` is the element being asked, `playing` the sound starting. Only
+  // timed, see src/timings.rs.
+  if (window.stellyTimings) {
+    audio.addEventListener("playing", () => dioxus.send({ type: "heard" }));
+  }
   audio.addEventListener("pause", () => {
     if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
     dioxus.send({ type: "playing", playing: false, position: audio.currentTime || 0 });

@@ -750,8 +750,22 @@ fn Shell() -> Element {
 
     // Long-lived eval: runs the map, then waits for selection messages.
     use_future(move || async move {
-        let mut handle = document::eval(include_str!("../assets/map.js"));
+        let script = format!("{}{}", crate::timings::script_flag(), include_str!("../assets/map.js"));
+        let mut handle = document::eval(&script);
         while let Ok(message) = handle.recv::<serde_json::Value>().await {
+            // Only sent with timings on: the points read, and the first frame
+            // drawn after the map was opened.
+            if message.get("type").and_then(|v| v.as_str()) == Some("timing") {
+                let name = message.get("name").and_then(|v| v.as_str()).unwrap_or("map");
+                let detail = message.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                if name == "map-drawn" {
+                    crate::timings::end(name, "map", detail);
+                } else {
+                    crate::timings::span(name, "map", detail);
+                }
+                continue;
+            }
+
             // Match on `type` first. A menu message carries a `track_id` too,
             // so the selection arm below would otherwise swallow it and the
             // menu would never open.
@@ -893,6 +907,9 @@ fn Shell() -> Element {
     let map = MapView { map_open, map_route };
     let mut panel_open = generator.panel_open;
     let covered = narrow() && panel_open();
+
+    // Once, after the first render: the window has the app in it now.
+    use_effect(|| crate::timings::mark("shell-rendered", ""));
 
     rsx! {
         div { class: "app",

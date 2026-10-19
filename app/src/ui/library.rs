@@ -679,6 +679,9 @@ impl Library {
             // shown in the meantime, not only at startup the way home's is.
             .or_else(|| (target == View::Releases).then(|| crate::cache::read(RELEASES_CACHE)).flatten());
 
+        if crate::timings::enabled() {
+            crate::timings::nav_asked(timing_name(&target), *self.epoch.peek() + 1, known.is_some());
+        }
         self.view.set(target.clone());
         self.error.set(None);
         self.notice.set(None);
@@ -732,6 +735,7 @@ impl Library {
 
             match loaded {
                 Ok(shelf) => {
+                    crate::timings::nav_landed(epoch);
                     if let Some(name) = cache {
                         crate::cache::write(name, &shelf);
                     }
@@ -750,6 +754,22 @@ impl Library {
 impl Default for Library {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// What a view is called in a timing line: the kind of page, never what is on
+/// it.
+fn timing_name(view: &View) -> &'static str {
+    match view {
+        View::Search { .. } => "search",
+        View::Favourites { .. } => "favourites",
+        View::Playlists => "playlists",
+        View::Playlist { .. } => "playlist",
+        View::Album(_) => "album",
+        View::Artist(_) => "artist",
+        View::Track(_) => "track",
+        View::Settings => "settings",
+        View::Releases => "releases",
     }
 }
 
@@ -830,6 +850,7 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
         // Clicking the search tab before typing anything is not a query.
         View::Search { query, .. } if query.trim().is_empty() => {}
         View::Search { query, scope } if space_only => {
+            crate::timings::span("search-sent", "search", "space");
             let (albums, artists) = space_groups(&query).await?;
             if scope.albums() {
                 shelf.albums = albums;
@@ -839,6 +860,7 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
             }
         }
         View::Search { query, scope } => {
+            crate::timings::span("search-sent", "search", "catalogue");
             let found = backend().search(&query, SEARCH_LIMIT, only.as_deref()).await?;
             if scope.tracks() {
                 shelf.tracks = found.tracks;
@@ -990,6 +1012,17 @@ pub fn MainScreen() -> Element {
     // window, rather than in `show`: see the comment there.
     use_effect(move || library.drive());
 
+    // After every render the shelf or the loading flag asked for, which is
+    // how a navigation's timing knows its page is on screen. With timings off
+    // it reads neither, so it never runs again.
+    use_effect(move || {
+        if !crate::timings::enabled() {
+            return;
+        }
+        let _ = library.shelf.read();
+        crate::timings::nav_rendered(*library.loading.read());
+    });
+
     // After the render the new page came in with, so the scroll lands on it
     // and not on the page it replaced. See `Library::restore`.
     use_effect(move || {
@@ -1133,7 +1166,11 @@ fn SearchBar() -> Element {
                     class: "search",
                     placeholder: "artist, title or album, any order",
                     value: "{query}",
-                    oninput: move |e| query.set(e.value()),
+                    oninput: move |e| {
+                        // A search is timed from its last keystroke.
+                        crate::timings::start("search");
+                        query.set(e.value());
+                    },
                     // Enter skips the debounce. The local list has already
                     // filtered; this is impatience with the round trip.
                     onkeydown: move |event| {
