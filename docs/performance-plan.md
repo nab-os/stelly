@@ -43,7 +43,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 0.1 | `bench/` scripts replaying the measurements above: routes, concurrent radios, search under load, a held write lock, providers, relay ranges | `bench/` | S | |
+| 0.1 | `bench/` scripts replaying the measurements above: routes, concurrent radios, search under load, a held write lock, providers, relay ranges | `bench/` | S | #95 |
 | 0.2 | App baselines: launch to favourites, page open, search, time to sound, map open (WebKit inspector, Android DevTools) | app | S | |
 | 0.3 | The same route timings on the production server, read-only, sequential | prod | S | done, above |
 
@@ -54,7 +54,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 1.1 | A stream YouTube refuses is a 502 that says why, not a promised body never sent | ytmusic `routes.rs` | S | ytmusic#3 |
 | 1.2 | A URL found under a minute ago is not re-extracted on refusal | ytmusic `streams.rs` | S | ytmusic#3 |
 | 1.3 | The release watcher on the bulk lane | `server/src/hub.rs:182` | S | #91 |
-| 1.4 | Cap `count` on generate and order; a time budget on the 768-wide path retry | `server/src/space.rs`, `core/src/paths.rs:453` | S | |
+| 1.4 | Cap `count` on generate (500, clamped); a 500 ms budget on the 768-wide path retry; order already bounded by `SORT_CAP` | `server/src/routes.rs`, `core/src/paths.rs:453` | S | #94 |
 | 1.5 | Auth answers 503, not 401, on a database error; a failed `last_seen` write lets the request through | `server/src/auth.rs:332` | S | #93 |
 | 1.6 | A timeout and one connect-error retry on session commands; pool idle timeout and TCP keepalive | `app/src/backend/remote.rs:254, 677` | S | #92 |
 
