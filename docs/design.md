@@ -211,6 +211,37 @@ the server's routes, the generate recipes, the space under load and behind a
 held write lock, and a provider's routes and file ranges, on a copy of the
 data, so a change can be checked before and after.
 
+### Timing the app
+
+The app says how long things take when asked to, one line per event, so a
+baseline is just a session of using it with the lines saved:
+
+```sh
+STELLY_TIMINGS=1 cargo run -p stelly 2>&1 | grep '^timing'
+```
+
+An Android app has no environment to set, so there a system property does it,
+read once at start. The lines go to logcat with the rest of stderr:
+
+```sh
+adb shell setprop debug.stelly.timings 1
+adb shell am force-stop fr.glargh.stelly
+adb logcat -c
+adb shell monkey -p fr.glargh.stelly -c android.intent.category.LAUNCHER 1
+adb logcat -v raw -s RustStdoutStderr | grep '^timing'
+```
+
+`adb shell setprop debug.stelly.timings 0` turns it off again; a reboot does
+too. Each line is `timing <name> <ms since the process started> <ms the span
+took, or -> [detail]`. Launch is `main`, `launch` and `shell-rendered`, then
+`nav-favourites` from the disk cache and `nav-favourites-refreshed` from the
+server. A page is `nav-<kind>`, from the click to its data rendered, `cached`
+when it came from memory; a search adds `search-sent` and `search-shown`,
+timed from the last keystroke. Playing is `play-url` and `play-heard`, the
+map `map-points` and `map-drawn`, and every request to the server an `http`
+line with its method, path, status and size. What they measure, and nothing
+of what was searched or played, is in `app/src/timings.rs`.
+
 ## Not yet verified
 
 Whether Qobuz's signed file URLs are IP-bound. `track/getFileUrl` returns an

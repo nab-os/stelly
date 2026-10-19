@@ -21,6 +21,16 @@
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
 
+  // Sent only when the app was started with STELLY_TIMINGS, see
+  // src/timings.rs.
+  const timing = (name, detail) => {
+    if (window.stellyTimings) dioxus.send({ type: "timing", name, detail });
+  };
+  // Whether the canvas has a rect, and whether the frame that came with
+  // getting one, the map opening, is still to be reported.
+  let showing = false;
+  let unreported = false;
+
   const PALETTE = [
     "#7aa2f7", "#9ece6a", "#e0af68", "#f7768e", "#bb9af7",
     "#7dcfff", "#ff9e64", "#73daca", "#c0caf5", "#b4f9f8",
@@ -71,6 +81,7 @@
   }
 
   async function loadPoints() {
+    const began = performance.now();
     meta = await (await fetch("/points/meta")).json();
     const buffer = await (await fetch("/points/data")).arrayBuffer();
     n = meta.n;
@@ -90,6 +101,7 @@
     for (let i = 0; i < n; i++) rank[i] = rankOf(ids[i]);
     buildGrid();
     cloud.valid = false;
+    timing("map-points", `${n} points, ${(performance.now() - began).toFixed(1)}ms to read`);
   }
 
   // ------------------------------------------------------------------- grid
@@ -685,6 +697,7 @@
   }
 
   function draw() {
+    const began = unreported ? performance.now() : 0;
     if (!meta.has_layout) {
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = "#8b90a3";
@@ -749,6 +762,11 @@
     if (hover >= 0 && hover !== selected) marker(hover, "#7aa2f7", false);
 
     placeCard();
+
+    if (unreported && n > 0) {
+      unreported = false;
+      timing("map-drawn", `${n} points, ${(performance.now() - began).toFixed(1)}ms to draw`);
+    }
   }
 
   // The selected point's card: Rust renders it, with the track's cover and
@@ -1240,7 +1258,16 @@
   // waits for a real rect for the same reason.
   function measured() {
     const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
+    if (rect.width <= 0 || rect.height <= 0) {
+      showing = false;
+      return;
+    }
+    // A rect again after none is the map opening, whose first frame with
+    // points in it is timed.
+    if (!showing) {
+      showing = true;
+      unreported = Boolean(window.stellyTimings);
+    }
     if (!fitted) fitted = fit();
     resize();
   }

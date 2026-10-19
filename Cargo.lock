@@ -5988,6 +5988,7 @@ dependencies = [
  "dioxus",
  "futures-util",
  "jni 0.21.1",
+ "libc",
  "log",
  "ndk-context",
  "reqwest 0.13.5",

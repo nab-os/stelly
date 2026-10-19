@@ -8,6 +8,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() {
+    // First, so the line says how long the process took to get here.
+    stelly::timings::mark("main", "");
+
     // Paired through STELLY_SERVER/STELLY_TOKEN or a stored pairing. Without
     // either, or with a server that does not answer, the window opens on the
     // setup screen rather than refusing to start.
@@ -17,6 +20,9 @@ fn main() {
         #[cfg(feature = "mobile")]
         let _ = err;
     }
+
+    #[cfg(feature = "mobile")]
+    stelly::timings::mark("launch", "");
 
     // Release builds of dioxus-desktop cancel every `contextmenu` from the
     // document. On Android that is also the long press that brings up a text
@@ -52,6 +58,7 @@ fn main() {
         {
             config = config.with_icon(icon);
         }
+        stelly::timings::mark("launch", "");
         dioxus::LaunchBuilder::desktop()
             .with_cfg(config)
             .launch(stelly::app::App);

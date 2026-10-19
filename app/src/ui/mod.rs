@@ -338,6 +338,7 @@ impl MapView {
     /// Open the map to look around. Nothing is dimmed: there is no route in
     /// question, and a corpus at 18% is not a thing you can browse.
     pub fn browse(mut self) {
+        crate::timings::start("map");
         self.map_route.set(false);
         self.map_open.set(true);
     }
@@ -345,6 +346,7 @@ impl MapView {
     /// Open the map to show a produced sequence, dimming the rest so the line
     /// through it can be read.
     pub fn show_route(mut self) {
+        crate::timings::start("map");
         self.map_route.set(true);
         self.map_open.set(true);
     }

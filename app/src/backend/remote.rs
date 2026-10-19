@@ -133,15 +133,10 @@ impl Remote {
     }
 
     async fn get_within<T: DeserializeOwned>(&self, path: &str, timeout: std::time::Duration) -> Result<T> {
-        let response = self
-            .http
-            .get(self.url(path))
-            .bearer_auth(&self.token)
-            .timeout(timeout)
-            .send()
-            .await
-            .with_context(|| format!("GET {}", self.url(path)))?;
-        Ok(Self::check(response).await?.json().await?)
+        let body = self
+            .exchange("GET", path, self.http.get(self.url(path)).timeout(timeout))
+            .await?;
+        Ok(serde_json::from_slice(body.as_ref())?)
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
@@ -154,16 +149,32 @@ impl Remote {
         body: &B,
         timeout: std::time::Duration,
     ) -> Result<T> {
-        let response = self
-            .http
-            .post(self.url(path))
-            .bearer_auth(&self.token)
-            .json(body)
-            .timeout(timeout)
-            .send()
-            .await
-            .with_context(|| format!("POST {}", self.url(path)))?;
-        Ok(Self::check(response).await?.json().await?)
+        let body = self
+            .exchange("POST", path, self.http.post(self.url(path)).json(body).timeout(timeout))
+            .await?;
+        Ok(serde_json::from_slice(body.as_ref())?)
+    }
+
+    /// Send a request and read all of the answer, or say what the server
+    /// refused it with. Everything but the session command and the two
+    /// streams comes through here, which is where `timings` sees it.
+    async fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<impl AsRef<[u8]>> {
+        let started = crate::timings::clock();
+        let sent = request.bearer_auth(&self.token).send().await;
+        let status = sent.as_ref().ok().map(|response| response.status().as_u16());
+        let body = async {
+            let response = sent.with_context(|| format!("{method} {}", self.url(path)))?;
+            anyhow::Ok(Self::check(response).await?.bytes().await?)
+        }
+        .await;
+        let bytes = body.as_ref().map_or(0, |body| body.len());
+        crate::timings::http(method, path, status, started, bytes);
+        body
     }
 
     // -------------------------------------------------------------- browsing
@@ -256,6 +267,7 @@ impl Remote {
     /// and skip behind it: hence a short timeout, and the caller catching up
     /// once it runs out.
     pub async fn session_command(&self, command: &Command) -> Result<Sent> {
+        let started = crate::timings::clock();
         let send = || {
             self.http
                 .post(self.url("/api/session"))
@@ -264,9 +276,10 @@ impl Remote {
                 .timeout(SESSION_TIMEOUT)
                 .send()
         };
-        let response = retry_unsent(send)
-            .await
-            .with_context(|| format!("POST {}", self.url("/api/session")))?;
+        let sent = retry_unsent(send).await;
+        let status = sent.as_ref().ok().map(|response| response.status().as_u16());
+        crate::timings::http("POST", "/api/session", status, started, 0);
+        let response = sent.with_context(|| format!("POST {}", self.url("/api/session")))?;
         match response.status() {
             reqwest::StatusCode::CONFLICT => return Ok(Sent::Stale),
             // Axum's answer to a body it cannot read: an op newer than the
@@ -320,14 +333,8 @@ impl Remote {
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str) -> Result<()> {
-        let response = self
-            .http
-            .delete(self.url(&format!("/api/favourites/{kind}/{id}")))
-            .bearer_auth(&self.token)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await?;
-        Self::check(response).await?;
+        let path = format!("/api/favourites/{kind}/{id}");
+        self.exchange("DELETE", &path, self.http.delete(self.url(&path)).timeout(REQUEST_TIMEOUT)).await?;
         Ok(())
     }
 
@@ -364,14 +371,8 @@ impl Remote {
     }
 
     pub async fn unblock_artist(&self, artist_id: i64) -> Result<()> {
-        let response = self
-            .http
-            .delete(self.url(&format!("/api/blocked/{artist_id}")))
-            .bearer_auth(&self.token)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await?;
-        Self::check(response).await?;
+        let path = format!("/api/blocked/{artist_id}");
+        self.exchange("DELETE", &path, self.http.delete(self.url(&path)).timeout(REQUEST_TIMEOUT)).await?;
         Ok(())
     }
 
@@ -462,7 +463,11 @@ impl Remote {
             // connection is ordinary, so it backs off rather than freezing the
             // view on the last line it saw.
             loop {
-                match http.get(&url).bearer_auth(&token).send().await {
+                let started = crate::timings::clock();
+                let sent = http.get(&url).bearer_auth(&token).send().await;
+                let status = sent.as_ref().ok().map(|response| response.status().as_u16());
+                crate::timings::http("GET", "/api/pipeline/log", status, started, 0);
+                match sent {
                     Ok(response) if response.status().is_success() => {
                         let mut stream = response.bytes_stream();
                         let mut buffer = String::new();
@@ -536,15 +541,7 @@ impl Remote {
     /// The map's points, `map::payload`'s binary, or with `meta` its JSON.
     pub async fn space_points(&self, meta: bool) -> Result<Vec<u8>> {
         let path = if meta { "/api/space/points/meta" } else { "/api/space/points" };
-        let response = self
-            .http
-            .get(self.url(path))
-            .bearer_auth(&self.token)
-            .timeout(POINTS_TIMEOUT)
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        Ok(Self::check(response).await?.bytes().await?.to_vec())
+        Ok(self.exchange("GET", path, self.http.get(self.url(path)).timeout(POINTS_TIMEOUT)).await?.as_ref().to_vec())
     }
 
     /// A track of the space in words, the ones it sounds like most next to
@@ -602,14 +599,8 @@ impl Remote {
     }
 
     pub async fn revoke_device(&self, device_id: i64) -> Result<()> {
-        let response = self
-            .http
-            .delete(self.url(&format!("/api/devices/{device_id}")))
-            .bearer_auth(&self.token)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await?;
-        Self::check(response).await?;
+        let path = format!("/api/devices/{device_id}");
+        self.exchange("DELETE", &path, self.http.delete(self.url(&path)).timeout(REQUEST_TIMEOUT)).await?;
         Ok(())
     }
 }
@@ -640,7 +631,11 @@ async fn read_session(
     token: &str,
     sender: &tokio::sync::mpsc::UnboundedSender<SessionFeed>,
 ) -> Followed {
-    let response = match http.get(url).bearer_auth(token).send().await {
+    let started = crate::timings::clock();
+    let sent = http.get(url).bearer_auth(token).send().await;
+    let status = sent.as_ref().ok().map(|response| response.status().as_u16());
+    crate::timings::http("GET", "/api/session/events", status, started, 0);
+    let response = match sent {
         Ok(response) => response,
         Err(err) => {
             eprintln!("session stream: {err}");
