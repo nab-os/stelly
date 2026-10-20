@@ -12,8 +12,10 @@ use super::search_history::SearchHistory;
 use super::settings::SettingsScreen;
 use super::{
     artist_link, open_remote_track, open_track, Blocklist, Cover, LocalIds, MapView,
-    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
+    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, row_keys, space_mark, LIST_CAP,
+    SEARCH_LIMIT,
 };
+use dioxus::core::Task;
 use dioxus::prelude::*;
 use crate::api::Target;
 use crate::backend::backend;
@@ -294,6 +296,12 @@ pub struct Library {
     loaded: Signal<Shelf>,
     pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
+    /// Loading, but a refined search's previous results stay on screen
+    /// meanwhile rather than "loading…" in their place. See `keeps_results`.
+    pub refining: Signal<bool>,
+    /// The search fetch in flight, cancelled when another is asked for: its
+    /// answer would only be thrown away, see `epoch`.
+    searching: CopyValue<Option<Task>>,
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button, each with how
     /// far down it was scrolled when it was left.
@@ -402,6 +410,16 @@ impl Liked {
             _ => {}
         }
     }
+
+    /// Whether one id is in its set. `kind` and `id` as for `set`.
+    fn has(&self, kind: &str, id: &str) -> bool {
+        match kind {
+            "track" => id.parse().is_ok_and(|id: i64| self.tracks.contains(&id)),
+            "album" => self.albums.contains(id),
+            "artist" => id.parse().is_ok_and(|id: i64| self.artists.contains(&id)),
+            _ => false,
+        }
+    }
 }
 
 /// One like or unlike the hearts show before the loaded sets have it.
@@ -440,6 +458,15 @@ fn with_flips(base: Option<&Liked>, flips: &[Flip]) -> Liked {
     liked
 }
 
+/// Whether one id shows as liked: its last flip if it has one, or else the
+/// loaded sets. `with_flips` for a single id, without copying the sets.
+fn holds(base: Option<&Liked>, flips: &[Flip], kind: &str, id: &str) -> bool {
+    match flips.iter().rev().find(|flip| flip.kind == kind && flip.id == id) {
+        Some(flip) => flip.liked,
+        None => base.is_some_and(|liked| liked.has(kind, id)),
+    }
+}
+
 /// Let go of the flips an answer to fetch `asked` already has: those saved
 /// before it was sent. The rest still show over it.
 fn drop_seen(flips: &mut Vec<Flip>, asked: u64) {
@@ -455,6 +482,8 @@ impl Library {
             loaded: Signal::new(Shelf::default()),
             sort: Signal::new(Sort::default()),
             loading: Signal::new(true),
+            refining: Signal::new(false),
+            searching: CopyValue::new(None),
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
             forward: Signal::new(Vec::new()),
@@ -560,8 +589,12 @@ impl Library {
     /// duty as "nothing is confirmed liked yet" while the fetch is still in
     /// flight, rather than needing a separate loading state every caller has
     /// to handle.
+    ///
+    /// The sets only while the filter is on: off, nothing reads them, and
+    /// copying them on every render was for nothing.
     fn liked_state(&self) -> (bool, Liked) {
-        (*self.liked_only.read(), self.liked())
+        let only = *self.liked_only.read();
+        (only, if only { self.liked() } else { Liked::default() })
     }
 
     /// The favourited-id cache alone, regardless of whether the "liked"
@@ -574,6 +607,13 @@ impl Library {
     /// Likes and unlikes not yet saved show as if they were.
     pub(crate) fn liked(&self) -> Liked {
         with_flips(self.liked.read().as_ref(), &self.flips.read())
+    }
+
+    /// Whether one track, album or artist shows as liked, which is all a
+    /// heart needs: read in place rather than copying every set as `liked`
+    /// does. `kind` is "track", "album" or "artist".
+    pub(crate) fn is_liked(&self, kind: &str, id: &str) -> bool {
+        holds(self.liked.read().as_ref(), &self.flips.read(), kind, id)
     }
 
     /// Show a like or unlike at once, before the server has it. Undone by
@@ -824,6 +864,7 @@ impl Library {
         if crate::timings::enabled() {
             crate::timings::nav_asked(timing_name(&target), *self.epoch.peek() + 1, known.is_some());
         }
+        let refining = known.is_none() && keeps_results(&self.view.peek(), &target);
         self.view.set(target.clone());
         self.error.set(None);
         self.notice.set(None);
@@ -834,11 +875,15 @@ impl Library {
                 self.shelf.set(shelf.sorted(sort));
                 self.loading.set(false);
             }
+            None if refining => self.loading.set(true),
             None => {
                 self.shelf.set(Shelf::default());
                 self.loaded.set(Shelf::default());
                 self.loading.set(true);
             }
+        }
+        if *self.refining.peek() != refining {
+            self.refining.set(refining);
         }
         self.pending.set(Some(target));
         *self.epoch.write() += 1;
@@ -856,8 +901,12 @@ impl Library {
         // Already showing what `kept` had for this view: a failed refresh
         // leaves that up rather than swapping it for an error.
         let refreshing = !*self.loading.peek();
+        if let Some(task) = self.searching.take() {
+            task.cancel();
+        }
+        let search = matches!(target, View::Search { .. });
 
-        spawn(async move {
+        let task = spawn(async move {
             let mut library = self;
             let cache = if target == home() {
                 Some(HOME_CACHE)
@@ -902,11 +951,35 @@ impl Library {
                     library.shelf.set(shelf.sorted(sort));
                 }
                 Err(_) if refreshing => {}
-                Err(err) => library.error.set(Some(format!("{err:#}"))),
+                Err(err) => {
+                    // A refined search kept the last answer up meanwhile;
+                    // it is not this query's, so "play all" must not reach it.
+                    if *library.refining.peek() {
+                        library.loaded.set(Shelf::default());
+                        library.shelf.set(Shelf::default());
+                    }
+                    library.error.set(Some(format!("{err:#}")));
+                }
             }
             library.loading.set(false);
+            if *library.refining.peek() {
+                library.refining.set(false);
+            }
         });
+        if search {
+            self.searching.set(Some(task));
+        }
     }
+}
+
+/// Whether going from `from` to `to` keeps what is on screen until the new
+/// answer lands: a search refined in place, by its text or its chips. The
+/// list stays put and is replaced in one go, rather than emptied for
+/// "loading…" and rebuilt on every keystroke. An emptied box is not a
+/// search, and clears at once.
+fn keeps_results(from: &View, to: &View) -> bool {
+    matches!(from, View::Search { .. })
+        && matches!(to, View::Search { query, .. } if !query.trim().is_empty())
 }
 
 impl Shelf {
@@ -1126,10 +1199,16 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
         View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
         View::Artist(artist) => {
-            shelf.albums = backend().artist_albums(artist.id, LIST_CAP).await?;
+            // Asked together: neither needs the other, and one after the
+            // other the page waited out both round trips.
+            let (albums, similar) = tokio::join!(
+                backend().artist_albums(artist.id, LIST_CAP),
+                backend().similar_artists(artist.id, 20),
+            );
+            shelf.albums = albums?;
             // Not fatal: an artist with no similar list should still show a
             // discography rather than an error.
-            shelf.similar = backend().similar_artists(artist.id, 20).await.unwrap_or_default();
+            shelf.similar = similar.unwrap_or_default();
         }
         // Pages that carry what they show, or fetch it themselves.
         View::Track(_) | View::Settings => {}
@@ -1517,6 +1596,10 @@ fn BrowseScreen() -> Element {
                 }
             }
             span { class: "spacer" }
+            // The results below are the last query's until this one lands.
+            if *library.refining.read() {
+                span { class: "busy-dot", title: "searching" }
+            }
             SortMenu {}
             if mixed {
                 GroupingToggle {}
@@ -1557,7 +1640,7 @@ fn BrowseScreen() -> Element {
             p { class: "muted notice", "{message}" }
         }
 
-        if *library.loading.read() {
+        if *library.loading.read() && !*library.refining.read() {
             p { class: "muted", "loading…" }
         } else if let Some(message) = library.error.read().clone() {
             p { class: "muted error", "{message}" }
@@ -1752,6 +1835,16 @@ impl Item {
             _ => None,
         }
     }
+
+    /// Its id, told apart by kind: a track and an album may share a number.
+    fn id(&self) -> String {
+        match self {
+            Item::Track(_, track) => format!("track-{}", track.id),
+            Item::Album(_, album) => format!("album-{}", album.id),
+            Item::Artist(_, artist) => format!("artist-{}", artist.id),
+            Item::Space(row) => format!("space-{}", row.track_id),
+        }
+    }
 }
 
 /// A mixed view's list: tracks, albums and artists together, in one order.
@@ -1817,6 +1910,10 @@ fn MixedRows() -> Element {
     }
     let sort = *library.sort.read();
     let items = sort.apply(items, |item, key| item.sort_value(key));
+    // Keyed here rather than on the `li`: `row` is called from a loop, and
+    // the loop's own nodes are what get matched up between renders.
+    let keys = row_keys(items.iter().map(Item::id));
+    let items: Vec<(String, Item)> = keys.into_iter().zip(items).collect();
 
     if items.is_empty() {
         return rsx! {};
@@ -1830,8 +1927,10 @@ fn MixedRows() -> Element {
         match item {
             Item::Track(index, track) => rsx! {
                 li {
-                    key: "track-{index}-{track.id}",
                     class: if now_playing == Some(track.id) { "{tile} playing" } else { "{tile}" },
+                    // The highlight follows the track from here, see
+                    // `use_playing_highlight`.
+                    "data-track": "{track.id}",
                     onclick: {
                         let track = track.clone();
                         move |_| open_remote_track(library, selection, &local, track.clone())
@@ -1862,7 +1961,6 @@ fn MixedRows() -> Element {
             },
             Item::Album(index, album) => rsx! {
                 li {
-                    key: "album-{index}-{album.id}",
                     class: "{tile}",
                     onclick: {
                         let album = album.clone();
@@ -1892,7 +1990,6 @@ fn MixedRows() -> Element {
             },
             Item::Artist(index, artist) => rsx! {
                 li {
-                    key: "artist-{index}-{artist.id}",
                     class: "{tile}",
                     onclick: {
                         let artist = artist.clone();
@@ -1921,7 +2018,6 @@ fn MixedRows() -> Element {
             },
             Item::Space(row) => rsx! {
                 li {
-                    key: "space-{row.track_id}",
                     class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
                     onclick: {
                         let id = row.track_id;
@@ -1954,12 +2050,12 @@ fn MixedRows() -> Element {
 
     // Split, the sort still orders each section; it just no longer
     // interleaves them. Artists, albums, then tracks, as in a narrowed view.
-    let sections: Vec<(&str, Vec<Item>)> = if split {
+    let sections: Vec<(&str, Vec<(String, Item)>)> = if split {
         let mut artists = Vec::new();
         let mut albums = Vec::new();
         let mut tracks = Vec::new();
         for item in items {
-            match item {
+            match item.1 {
                 Item::Artist(..) => artists.push(item),
                 Item::Album(..) => albums.push(item),
                 Item::Track(..) | Item::Space(_) => tracks.push(item),
@@ -1985,8 +2081,8 @@ fn MixedRows() -> Element {
                 h3 { class: "shelf-head", "{heading}" }
             }
             ul { class: if grid { "tiles" } else { "list" },
-                for item in items {
-                    {row(item)}
+                for (key, item) in items {
+                    Fragment { key: "{key}", {row(item)} }
                 }
             }
         }
@@ -2052,13 +2148,15 @@ fn SpaceRows() -> Element {
     } else {
         (rows, total)
     };
-    let searching = !search.text.read().trim().is_empty();
+    // Whether the box is empty, not what is in it: read directly, every
+    // keystroke would draw all these rows again.
+    let searching = use_memo(move || !search.text.read().trim().is_empty());
     let visible = shown().min(rows.len());
     let grid = library.layout() == TracksView::Grid;
 
     if total == 0 {
         return rsx! {
-            if searching {
+            if searching() {
                 h3 { class: "shelf-head source-head", "In your space" }
                 if liked_only {
                     p { class: "muted", "Nothing you've liked matches." }
@@ -2227,6 +2325,7 @@ fn TrackRows() -> Element {
     let now_playing = player.current().map(|t| t.id);
     let grid = library.layout() == TracksView::Grid;
     let count = tracks.len();
+    let keys = row_keys(tracks.iter().map(|(_, track)| track.id));
 
     if tracks.is_empty() {
         return rsx! {};
@@ -2244,9 +2343,9 @@ fn TrackRows() -> Element {
             }
         }
         ul { class: if grid { "tiles" } else { "list" },
-            for (index, track) in tracks {
+            for ((index, track), key) in tracks.into_iter().zip(keys) {
                 li {
-                    key: "{index}-{track.id}",
+                    key: "{key}",
                     class: {
                         let base = if grid { "tile" } else { "row" };
                         if now_playing == Some(track.id) {
@@ -2255,6 +2354,7 @@ fn TrackRows() -> Element {
                             base.to_string()
                         }
                     },
+                    "data-track": "{track.id}",
                     // Opens the track's page, as an album or artist tile opens
                     // theirs. Playing is the page's button, the menu's, or
                     // "play all" above.
@@ -2318,6 +2418,7 @@ fn AlbumRows() -> Element {
         .enumerate()
         .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
         .collect();
+    let keys = row_keys(albums.iter().map(|(_, album)| &album.id));
     // How recent is the point of new releases, so they say when, and what
     // sort of release when it is not a whole album.
     let releases = *library.view.read() == View::Releases;
@@ -2325,9 +2426,9 @@ fn AlbumRows() -> Element {
     rsx! {
         h3 { class: "shelf-head", "Albums" }
         ul { class: "tiles",
-            for (index, album) in albums {
+            for ((index, album), key) in albums.into_iter().zip(keys) {
                 li {
-                    key: "{index}-{album.id}",
+                    key: "{key}",
                     class: "tile",
                     // Straight to the tracklist: the album page carries the
                     // same cover, badges and actions the sheet would have,
@@ -2390,13 +2491,14 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
         .enumerate()
         .filter(|(_, a)| similar || !liked_only || liked.artists.contains(&a.id))
         .collect();
+    let keys = row_keys(artists.iter().map(|(_, artist)| artist.id));
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
         ul { class: "tiles",
-            for (index, artist) in artists {
+            for ((index, artist), key) in artists.into_iter().zip(keys) {
                 li {
-                    key: "{index}-{artist.id}",
+                    key: "{key}",
                     class: "tile",
                     onclick: {
                         let artist = artist.clone();
@@ -2424,13 +2526,14 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
 fn PlaylistRows() -> Element {
     let library = use_context::<Library>();
     let playlists = library.shelf.read().playlists.clone();
+    let keys = row_keys(playlists.iter().map(|playlist| &playlist.id));
 
     rsx! {
         h3 { class: "shelf-head", "Playlists" }
         ul { class: "list",
-            for (index, playlist) in playlists.into_iter().enumerate() {
+            for ((index, playlist), key) in playlists.into_iter().enumerate().zip(keys) {
                 li {
-                    key: "{index}-{playlist.id}",
+                    key: "{key}",
                     class: "row",
                     onclick: move |_| {
                         let target = {
@@ -2458,6 +2561,26 @@ fn PlaylistRows() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search(query: &str) -> View {
+        View::Search { query: query.into(), scope: Scope::Everything }
+    }
+
+    #[test]
+    fn a_refined_search_keeps_its_results() {
+        assert!(keeps_results(&search("radio"), &search("radiohead")));
+        let narrowed = View::Search { query: "radio".into(), scope: Scope::Albums };
+        assert!(keeps_results(&search("radio"), &narrowed));
+    }
+
+    #[test]
+    fn only_a_refined_search_keeps_its_results() {
+        // An emptied box clears at once, and a search opened from elsewhere
+        // has nothing of its own to keep.
+        assert!(!keeps_results(&search("radio"), &search(" ")));
+        assert!(!keeps_results(&home(), &search("radio")));
+        assert!(!keeps_results(&search("radio"), &home()));
+    }
 
     fn album(id: &str) -> View {
         View::Album(RemoteAlbum { id: id.into(), ..Default::default() })
@@ -2487,6 +2610,20 @@ mod tests {
         let flips = [flip(0, "album", "a", false, None), flip(1, "album", "a", true, None)];
         assert!(with_flips(Some(&base), &flips).albums.contains("a"));
         assert!(!with_flips(Some(&base), &flips[..1]).albums.contains("a"));
+    }
+
+    #[test]
+    fn one_id_reads_the_same_as_the_whole_sets() {
+        let mut base = Liked::default();
+        base.tracks.insert(7);
+        base.albums.insert("a".into());
+        let flips = [flip(0, "album", "a", false, None), flip(1, "artist", "3", true, None)];
+        let whole = with_flips(Some(&base), &flips);
+        for (kind, id) in [("track", "7"), ("track", "8"), ("album", "a"), ("artist", "3"), ("artist", "4")] {
+            assert_eq!(holds(Some(&base), &flips, kind, id), whole.has(kind, id), "{kind} {id}");
+        }
+        assert!(holds(None, &flips, "artist", "3"));
+        assert!(!holds(None, &[], "track", "7"));
     }
 
     #[test]

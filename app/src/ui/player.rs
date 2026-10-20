@@ -48,6 +48,9 @@ pub struct Player {
 }
 
 impl Player {
+    /// What is playing, peeked: a list reading it is not drawn again on
+    /// every change of track. Its rows' highlight is moved instead, see
+    /// `use_playing_highlight`.
     pub fn current(&self) -> Option<RemoteTrack> {
         let index = *self.index.peek();
         self.queue.peek().get(index).cloned()
@@ -94,6 +97,9 @@ struct Mirror {
     /// The server could not read a volume op, being older than it, so there
     /// is no sending another.
     volume_refused: bool,
+    /// The volume slider is held. This device's level follows it, but is
+    /// only told to the others, or overruled by them, once it is let go.
+    turning: bool,
 }
 
 impl Default for Mirror {
@@ -111,6 +117,7 @@ impl Default for Mirror {
             reported: None,
             local: None,
             volume_refused: false,
+            turning: false,
         }
     }
 }
@@ -548,6 +555,9 @@ fn heard_volume(player: Player, level: f64) {
     let report = {
         let mut mirror = mirror();
         mirror.local = Some(level);
+        if mirror.turning {
+            return;
+        }
         mirror.is_output()
             && !mirror.volume_refused
             && !mirror.session().volume.is_some_and(|wanted| same_level(wanted, level))
@@ -564,7 +574,7 @@ fn heard_volume(player: Player, level: f64) {
 fn follow_volume(player: Player) {
     let op = {
         let mut mirror = mirror();
-        if !mirror.is_output() || mirror.volume_refused {
+        if !mirror.is_output() || mirror.volume_refused || mirror.turning {
             return;
         }
         let Some(local) = mirror.local else {
@@ -608,6 +618,30 @@ pub fn set_volume(player: Player, level: f64) {
         #[cfg(not(target_os = "android"))]
         heard_volume(player, level);
     }
+}
+
+/// The volume slider moved under a finger or the mouse. Heard at once when
+/// the sound is this device's, so the level can be found by ear; another
+/// device's is only asked for on release, see `let_go_volume`.
+fn turn_volume(level: f64) {
+    let local = {
+        let mut mirror = mirror();
+        if mirror.is_remote() {
+            false
+        } else {
+            mirror.turning = true;
+            true
+        }
+    };
+    if local {
+        set_local(level.clamp(0.0, 1.0));
+    }
+}
+
+/// The volume slider let go at `level`: the one change the others hear of.
+fn let_go_volume(player: Player, level: f64) {
+    mirror().turning = false;
+    set_volume(player, level);
 }
 
 pub fn quality_label(quality: Quality) -> &'static str {
@@ -833,6 +867,104 @@ fn clock(seconds: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+/// Where the track is and how long it is, in seconds, and how far along as
+/// the seek line's 0 to 1000. A held seek line's place stands in for the
+/// position. The audio element's own duration is authoritative once it has
+/// loaded; `listed`, the provider's, fills the gap before that, and on every
+/// device that is not the output.
+fn timeline(position: f64, duration: f64, listed: f64, held: Option<f64>) -> (f64, f64, f64) {
+    let total = if duration > 0.0 { duration } else { listed };
+    let progress = match held {
+        Some(held) => held,
+        None if total > 0.0 => (position / total * 1000.0).clamp(0.0, 1000.0),
+        None => 0.0,
+    };
+    let position = if held.is_some() { progress / 1000.0 * total } else { position };
+    (position, total, progress)
+}
+
+/// The thin seek line along the top of the player bar. Its own component,
+/// with `Clock`, so the position updates, twice a second while playing,
+/// redraw these two and not the whole bar.
+#[component]
+fn SeekLine(seeking: Signal<Option<f64>>, listed: f64) -> Element {
+    let player = use_context::<Player>();
+    let (position, duration) = *player.position.read();
+    let (position, total, progress) = timeline(position, duration, listed, seeking());
+    let filled = progress / 10.0;
+    // The end of a drag. A range input says so with `change`, but not when
+    // it is let go where it was taken, nor when a touch is cancelled, so the
+    // pointer and touch ends say it too; whichever comes first sends.
+    let mut released = move || {
+        if let Some(held) = seeking.take() {
+            seek(player, held / 1000.0 * total);
+        }
+    };
+
+    rsx! {
+        input {
+            class: "seek-line",
+            r#type: "range",
+            min: "0",
+            max: "1000",
+            value: "{progress}",
+            style: "--filled: {filled}%",
+            disabled: total <= 0.0,
+            title: "{clock(position)} / {clock(total)}",
+            oninput: move |event| {
+                if let Ok(value) = event.value().parse::<f64>() {
+                    seeking.set(Some(value));
+                }
+            },
+            onchange: move |_| released(),
+            onpointerup: move |_| released(),
+            onpointercancel: move |_| released(),
+            ontouchend: move |_| released(),
+            ontouchcancel: move |_| released(),
+        }
+    }
+}
+
+/// The time beside the transport, the seek line's other half.
+#[component]
+fn Clock(seeking: Signal<Option<f64>>, listed: f64) -> Element {
+    let player = use_context::<Player>();
+    let (position, duration) = *player.position.read();
+    let (position, total, _) = timeline(position, duration, listed, seeking());
+
+    rsx! {
+        span { class: "time muted", "{clock(position)} / {clock(total)}" }
+    }
+}
+
+/// Keep the "playing" highlight on the rows of the track playing. Lists
+/// read `Player::current` without subscribing, as a change of track redrawing
+/// every list on screen, up to hundreds of rows each, is a lot for one class
+/// on two rows. So this moves the class itself, on whatever rows carry the
+/// track's `data-track`. A list drawn later reads the track as it is then.
+fn use_playing_highlight(player: Player) {
+    let playing = use_memo(move || {
+        let index = *player.index.read();
+        player.queue.read().get(index).map(|track| track.id)
+    });
+    use_effect(move || {
+        let id = playing().map(|id| id.to_string()).unwrap_or_default();
+        document::eval(&format!(
+            r#"(() => {{
+                const id = "{id}";
+                for (const row of document.querySelectorAll("[data-track].playing")) {{
+                    if (row.dataset.track !== id) row.classList.remove("playing");
+                }}
+                if (id) {{
+                    for (const row of document.querySelectorAll(`[data-track="${{id}}"]`)) {{
+                        row.classList.add("playing");
+                    }}
+                }}
+            }})();"#
+        ));
+    });
+}
+
 /// The bar along the bottom of the window, the full width of it, under the
 /// main area and the generate panel alike.
 ///
@@ -847,8 +979,9 @@ pub fn PlayerBar() -> Element {
     let selection = use_context::<Selection>().0;
     let local = use_context::<LocalIds>();
 
+    use_playing_highlight(player);
+
     let current = player.current();
-    let (position, duration) = *player.position.read();
     let queue_length = player.queue.read().len();
     let index = *player.index.read();
     let playing = *player.playing.read();
@@ -856,25 +989,25 @@ pub fn PlayerBar() -> Element {
     let level = volume.unwrap_or(0.0);
     // What unmuting goes back to.
     let mut unmuted = use_signal(|| 1.0);
+    // Where the seek line and the volume are held, while they are: drawn
+    // from here rather than from the player, so the position updates do not
+    // pull the thumb back under the finger, and nothing is sent until it is
+    // let go. See `SeekLine`.
+    let seeking = use_signal(|| None::<f64>);
+    let mut turning = use_signal(|| None::<f64>);
     let mut queue_open = player.queue_open;
 
     library.ensure_liked_loaded();
-    let liked = current.as_ref().is_some_and(|t| library.liked().tracks.contains(&t.id));
+    let liked = current.as_ref().is_some_and(|t| library.is_liked("track", &t.id.to_string()));
+    let listed = current.as_ref().and_then(|t| t.duration).unwrap_or(0) as f64;
 
-    // The audio element's own duration is authoritative once it has loaded;
-    // Qobuz's metadata fills the gap before that, and on every device that is
-    // not the output.
-    let total = if duration > 0.0 {
-        duration
-    } else {
-        current.as_ref().and_then(|t| t.duration).unwrap_or(0) as f64
+    let level = turning().unwrap_or(level);
+    // The end of a drag, as for the seek line.
+    let mut volume_released = move || {
+        if let Some(held) = turning.take() {
+            let_go_volume(player, held);
+        }
     };
-    let progress = if total > 0.0 {
-        (position / total * 1000.0).clamp(0.0, 1000.0)
-    } else {
-        0.0
-    };
-    let filled = progress / 10.0;
 
     rsx! {
         footer { class: "player",
@@ -882,21 +1015,7 @@ pub fn PlayerBar() -> Element {
             // would duplicate every button.
             audio { id: "player" }
 
-            input {
-                class: "seek-line",
-                r#type: "range",
-                min: "0",
-                max: "1000",
-                value: "{progress}",
-                style: "--filled: {filled}%",
-                disabled: total <= 0.0,
-                title: "{clock(position)} / {clock(total)}",
-                oninput: move |event| {
-                    if let Ok(value) = event.value().parse::<f64>() {
-                        seek(player, value / 1000.0 * total);
-                    }
-                },
-            }
+            SeekLine { seeking, listed }
 
             div { class: "now",
                 if let Some(track) = current.clone() {
@@ -965,7 +1084,7 @@ pub fn PlayerBar() -> Element {
                     onclick: move |_| step(player, 1),
                     {icons::next()}
                 }
-                span { class: "time muted", "{clock(position)} / {clock(total)}" }
+                Clock { seeking, listed }
             }
 
             div { class: "player-meta",
@@ -1010,9 +1129,15 @@ pub fn PlayerBar() -> Element {
                         style: "--filled: {level * 100.0}%",
                         oninput: move |event| {
                             if let Ok(percent) = event.value().parse::<f64>() {
-                                set_volume(player, percent / 100.0);
+                                turning.set(Some(percent / 100.0));
+                                turn_volume(percent / 100.0);
                             }
                         },
+                        onchange: move |_| volume_released(),
+                        onpointerup: move |_| volume_released(),
+                        onpointercancel: move |_| volume_released(),
+                        ontouchend: move |_| volume_released(),
+                        ontouchcancel: move |_| volume_released(),
                     }
                 }
                 button {
@@ -1323,6 +1448,18 @@ pub fn use_session(player: Player) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_timeline_prefers_the_elements_duration() {
+        assert_eq!(timeline(30.0, 120.0, 100.0, None), (30.0, 120.0, 250.0));
+        assert_eq!(timeline(30.0, 0.0, 120.0, None), (30.0, 120.0, 250.0));
+        assert_eq!(timeline(30.0, 0.0, 0.0, None), (30.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_held_seek_line_stands_in_for_the_position() {
+        assert_eq!(timeline(30.0, 120.0, 0.0, Some(500.0)), (60.0, 120.0, 500.0));
+    }
 
     const LOSSLESS: Quality = Quality::Lossless;
 
