@@ -156,15 +156,17 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 7.1 | Gateway cache with single-flight: metadata 24 h+, discographies 6–24 h, search 5 min, file URLs until near expiry | qobuz | M | |
-| 7.2 | Browse cache with single-flight; stream URLs kept in ids.db with their real `expire=` | ytmusic | M | |
-| 7.3 | One shared pause on a 429; interactive calls get one short retry, then fail | qobuz `queue.rs`, `qobuz.rs:197` | M | |
-| 7.4 | Superseded searches dropped from the lane | qobuz `queue.rs` | S–M | |
-| 7.5 | Stream URLs warmed ahead: next queued track, first tracks of an opened album | stelly, qobuz, ytmusic | M | |
-| 7.6 | Docker: yt-dlp cache on a volume, the zipapp rather than PyInstaller | ytmusic `Dockerfile` | S | |
-| 7.7 | A resident yt-dlp instead of a process per track | ytmusic | L | |
-| 7.8 | Compression between gateway and server, for gateways off loopback | qobuz, provider | S | |
-| 7.9 | yt-dlp kept current: a scheduled image rebuild on new releases, and a start-up check that a stream answers past its first MB | ytmusic | S–M | |
+| 7.1 | Gateway cache with single-flight: metadata 24 h+, discographies 6–24 h, search 5 min, file URLs until near expiry | qobuz | M | qobuz#7 |
+| 7.2 | Browse cache with single-flight; stream URLs kept in ids.db with their real `expire=` | ytmusic | M | ytmusic#12 |
+| 7.3 | One shared pause on a 429; interactive calls get one short retry, then fail | qobuz `queue.rs`, `qobuz.rs:197` | M | qobuz#8 |
+| 7.4 | Superseded searches dropped from the lane | qobuz `queue.rs` | S–M | qobuz#9 (needs 7.11) |
+| 7.5 | Stream URLs warmed ahead: next queued track, first tracks of an opened album | stelly, qobuz, ytmusic | M | #115, qobuz#7, ytmusic#12; album-open warming left out: it spends Qobuz's 2 req/s on guesses |
+| 7.6 | Docker: yt-dlp cache on a volume, the zipapp rather than PyInstaller | ytmusic `Dockerfile` | S | ytmusic#14 |
+| 7.7 | A resident yt-dlp instead of a process per track | ytmusic | L | ytmusic#16 |
+| 7.8 | Compression between gateway and server, for gateways off loopback | qobuz, provider | S | qobuz#10, ytmusic#13; the server already asks for zstd |
+| 7.9 | yt-dlp kept current: a scheduled image rebuild on new releases, and a start-up check that a stream answers past its first MB | ytmusic | S–M | ytmusic#15 |
+| 7.10 | A freshly found YouTube URL warmed with a 1-byte range before it is handed out: its first range often takes ~5 s | ytmusic `streams.rs` | S | |
+| 7.11 | The server sends `x-search-session` per device, so the gateway drops superseded searches | `server/src/provider.rs`, provider | S | |
 
 ## Phase 8: scale, before the space passes ~150k
 
