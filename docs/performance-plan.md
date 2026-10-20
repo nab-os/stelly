@@ -90,7 +90,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 3.6 | Likes flip at once, roll back on error | `app/src/ui/screens.rs:26` | S | #117 |
 | 3.7 | Liked ids from the home answer and `favourites.json`, not fetched twice | `app/src/ui/library.rs:428` | S | #118 |
 | 3.8 | Map points loaded on the first map open, not at launch | `app/src/app.rs:353, 752`, `assets/map.js:150` | S | #119 |
-| 3.9 | Space cache written only on a new stamp, off the UI thread; parsed off it too | `app/src/app.rs:354, 1065` | S | |
+| 3.9 | Space cache written only on a new stamp, off the UI thread; parsed off it too | `app/src/app.rs:354, 1065` | S | #120 |
 | 3.10 | Rows keyed by id, not index | `app/src/ui/library.rs`, `queue.rs:160`, `screens.rs` | S | |
 | 3.11 | Search keeps its results while refining; a cancellable 150 ms debounce | `app/src/ui/library.rs:692`, `app.rs:698, 830` | S | |
 | 3.12 | Seek and volume commit on release | `app/src/ui/player.rs:787, 904` | S | |
