@@ -429,6 +429,7 @@ pub fn PipelineControls() -> Element {
 /// go on, how long the rest should take.
 fn progress_row(progress: &Progress) -> Element {
     let percent = progress.fraction() * 100.0;
+    let fill = progress.fraction();
     let mut detail = Vec::new();
     if progress.step == "catalogue" {
         detail.push("cataloguing".to_string());
@@ -447,7 +448,9 @@ fn progress_row(progress: &Progress) -> Element {
     }
     rsx! {
         div { class: "stage-progress",
-            div { class: "bar", div { style: "width: {percent:.1}%" } }
+            // Scaled rather than sized, so each step it moves is composited
+            // rather than laid out.
+            div { class: "bar", div { style: "transform: scaleX({fill:.4})" } }
             span { class: "muted", {detail.join(" · ")} }
         }
     }

@@ -42,9 +42,11 @@
     return y((lo + hi) / 2);
   };
 
+  // The last layer's URL: a hero lays a larger copy over the one its tile
+  // shows, and it is that one the two have in common.
   const urlOf = (cover) => {
     if (cover.dataset.cover) return cover.dataset.cover;
-    const match = /url\(["']?(.*?)["']?\)/.exec(cover.style.backgroundImage || "");
+    const match = /.*url\(["']?(.*?)["']?\)/.exec(cover.style.backgroundImage || "");
     return match ? match[1] : "";
   };
 

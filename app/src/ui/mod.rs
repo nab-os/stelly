@@ -66,6 +66,10 @@ pub(crate) const SEARCH_LIMIT: usize = 50;
 /// where a counter starts to look stuck. Only while one is watched, see `pace`.
 pub(crate) const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How long the search box waits after a keystroke before asking the
+/// server. Each keystroke starts it again, so only the last one asks.
+pub(crate) const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 // ------------------------------------------------------------------ context
 
 /// Track ids in the analysed space and not hidden. A memo, not a snapshot,
@@ -86,6 +90,22 @@ pub(crate) fn space_mark(in_space: bool) -> Element {
         return rsx! {};
     }
     rsx! { span { class: "space-mark", title: "in your space" } }
+}
+
+/// One key per row, from the row's own id rather than its place: a sort or
+/// a removal then moves the rows it touches instead of rebuilding every one
+/// after it, and their covers do not blink back to the placeholder. Keys
+/// must be unique, so an id listed again gets its occurrence after it.
+pub(crate) fn row_keys<T: std::fmt::Display>(ids: impl IntoIterator<Item = T>) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    ids.into_iter()
+        .map(|id| {
+            let id = id.to_string();
+            let count = seen.entry(id.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 { id } else { format!("{id}~{count}") }
+        })
+        .collect()
 }
 
 /// The map/generator's notion of "the track in hand", what a neighbours
@@ -555,6 +575,17 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
     // `eager` opts out, for the few covers that are always on screen.
     let eager = class.split_whitespace().any(|c| c == "eager");
 
+    // A page's hero is four times a row's cover in area, and the URL a
+    // provider gives is sized for the row. Layered over that one rather than
+    // replacing it: the small one is usually cached from the tile just
+    // tapped, so it shows at once, and it stays showing if the large one
+    // turns out not to exist.
+    let hero = class.split_whitespace().any(|c| c == "hero-art");
+    let background = art.as_ref().map(|url| match larger(url).filter(|_| hero) {
+        Some(large) => format!("background-image:url('{large}'),url('{url}')"),
+        None => format!("background-image:url('{url}')"),
+    });
+
     rsx! {
         div {
             class: "cover {class}",
@@ -562,10 +593,48 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
                 (Some(url), false) => url.clone(),
                 _ => String::new(),
             },
-            style: match (&art, eager) {
-                (Some(url), true) => format!("background-image:url('{url}')"),
+            style: match (background, eager) {
+                (Some(background), true) => background,
                 _ => String::new(),
             },
         }
+    }
+}
+
+/// The same cover at 600px, where the URL says how to ask for it. Qobuz
+/// album covers come at 230px, `…_230.jpg`, beside a `…_600.jpg`. Others,
+/// YouTube's already 544px and Qobuz's artist portraits, have no such sibling
+/// worth guessing at.
+fn larger(url: &str) -> Option<String> {
+    let stem = url
+        .strip_prefix("https://static.qobuz.com/images/covers/")?
+        .strip_suffix("_230.jpg")?;
+    Some(format!("https://static.qobuz.com/images/covers/{stem}_600.jpg"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn larger_covers_only_for_qobuz_albums() {
+        assert_eq!(
+            larger("https://static.qobuz.com/images/covers/48/38/3610159663848_230.jpg").as_deref(),
+            Some("https://static.qobuz.com/images/covers/48/38/3610159663848_600.jpg")
+        );
+        assert_eq!(larger("https://static.qobuz.com/images/artists/covers/medium/abc.jpg"), None);
+        assert_eq!(larger("https://lh3.googleusercontent.com/x=w544-h544-l90-rj"), None);
+    }
+
+    #[test]
+    fn row_keys_follow_the_id_not_the_place() {
+        assert_eq!(row_keys([3, 1, 2]), ["3", "1", "2"]);
+        // Reordered, every row keeps the key it had.
+        assert_eq!(row_keys([2, 3, 1]), ["2", "3", "1"]);
+    }
+
+    #[test]
+    fn row_keys_number_only_repeats() {
+        assert_eq!(row_keys([5, 7, 5, 5]), ["5", "7", "5~2", "5~3"]);
     }
 }
