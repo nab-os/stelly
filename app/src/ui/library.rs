@@ -949,6 +949,11 @@ impl Library {
             None
         };
         let page = page_name(&target);
+        // An artist's newest albums first, while nothing of the page is up.
+        let first_albums = match &target {
+            View::Artist(artist) if *self.loading.peek() => Some(artist.id),
+            _ => None,
+        };
         // Releases can take minutes to fetch cold, so last time's list is
         // shown in the meantime, not only at startup the way home's is. So
         // is an album or artist page seen before, which is often the next
@@ -967,7 +972,11 @@ impl Library {
                 View::Favourites { scope } => Some((*scope, ask_liked())),
                 _ => None,
             };
-            let loaded = load(target, space_only, only).await.map(|mut shelf| {
+            let loaded = match first_albums {
+                Some(artist_id) => library.artist_in_two(artist_id, epoch).await,
+                None => load(target, space_only, only).await,
+            };
+            let loaded = loaded.map(|mut shelf| {
                 if let Some((scope, asked)) = favourites {
                     // Every like, before the tiles stand in for some: what a
                     // page opening would otherwise fetch again for its heart.
@@ -1002,6 +1011,10 @@ impl Library {
                         crate::cache::write_soon_among(PAGES, name, KEPT_PAGES, shelf.clone());
                     }
                     let sorted = in_order(&shelf, *library.sort.peek());
+                    // In place of the first of it, which may be scrolled.
+                    if first_albums.is_some() && !*library.loading.peek() {
+                        hold_scroll();
+                    }
                     library.loaded.set(shelf);
                     library.shelf.set(sorted);
                 }
@@ -1032,22 +1045,49 @@ impl Library {
     /// the UI thread, unless its fetch has landed first or it was left.
     fn from_disk(self, epoch: u64, name: String) {
         spawn(async move {
-            let mut library = self;
             let read = tokio::task::spawn_blocking(move || crate::cache::read::<Shelf>(&name)).await;
             let Ok(Some(shelf)) = read else { return };
-            if *library.epoch.peek() != epoch || !*library.loading.peek() {
+            if *self.epoch.peek() != epoch || !*self.loading.peek() {
                 return;
             }
             crate::timings::nav_from_disk(epoch);
-            let shelf = Arc::new(shelf);
-            let sorted = in_order(&shelf, *library.sort.peek());
-            library.loaded.set(shelf);
-            library.shelf.set(sorted);
-            library.loading.set(false);
-            if *library.refining.peek() {
-                library.refining.set(false);
-            }
+            self.put_up(shelf);
         });
+    }
+
+    /// An artist's page fetched at `epoch` in two steps: their newest
+    /// `FIRST_ALBUMS` albums with the rest of the page, put up as soon as
+    /// that lands, then every album. The first step is only put up while
+    /// nothing else of the page is, from the disk; the second replaces it.
+    ///
+    /// The second is not always the first with more after it: a provider's
+    /// albums past the first hundred can be newer than another's within
+    /// them. Where rows go is the server's order either way, and
+    /// `hold_scroll` keeps the one looked at in its place.
+    async fn artist_in_two(self, artist_id: i64, epoch: u64) -> anyhow::Result<Shelf> {
+        let mut shelf = artist_page(artist_id, FIRST_ALBUMS).await?;
+        // Fewer than asked for is all of them.
+        if shelf.albums.len() < FIRST_ALBUMS {
+            return Ok(shelf);
+        }
+        if *self.epoch.peek() == epoch && *self.loading.peek() {
+            crate::timings::nav_first(epoch);
+            self.put_up(shelf.clone());
+        }
+        shelf.albums = backend().artist_albums(artist_id, LIST_CAP).await?;
+        Ok(shelf)
+    }
+
+    /// Show `shelf` for the view asked for, its fetch not landed yet.
+    fn put_up(mut self, shelf: Shelf) {
+        let shelf = Arc::new(shelf);
+        let sorted = in_order(&shelf, *self.sort.peek());
+        self.loaded.set(shelf);
+        self.shelf.set(sorted);
+        self.loading.set(false);
+        if *self.refining.peek() {
+            self.refining.set(false);
+        }
     }
 }
 
@@ -1198,6 +1238,46 @@ fn scroll_to(top: f64) {
     ));
 }
 
+/// Keep the row at the top of the main area where it is on screen while
+/// the list it is in is replaced, for the next second and a half or until
+/// the wheel, a finger or a key moves it. Rows that come in above it would
+/// otherwise push it down out of view. Nothing at the very top: what comes
+/// in then is below what is looked at.
+///
+/// Measured now, before the new rows are drawn, and found again by its
+/// `data-key` each frame after, which the window keeps drawn.
+fn hold_scroll() {
+    document::eval(
+        r#"(() => {
+            const el = document.querySelector('.screen-body');
+            if (!el || el.scrollTop <= 0) return;
+            const top = el.getBoundingClientRect().top;
+            const first = [...el.querySelectorAll('li[data-key]')].find(li => li.getBoundingClientRect().bottom > top);
+            if (!first) return;
+            const key = `li[data-key="${CSS.escape(first.dataset.key)}"]`;
+            const at = first.getBoundingClientRect().top;
+            const until = performance.now() + 1500;
+            let stop = false;
+            const quit = () => { stop = true; };
+            const events = ['wheel', 'touchstart', 'keydown', 'pointerdown'];
+            for (const e of events) el.addEventListener(e, quit, { once: true, passive: true });
+            const step = () => {
+                const row = el.querySelector(key);
+                if (!stop && row) {
+                    const moved = row.getBoundingClientRect().top - at;
+                    if (Math.abs(moved) > 0.5) el.scrollTop += moved;
+                }
+                if (!stop && performance.now() < until) {
+                    requestAnimationFrame(step);
+                } else {
+                    for (const e of events) el.removeEventListener(e, quit);
+                }
+            };
+            requestAnimationFrame(step);
+        })();"#,
+    );
+}
+
 /// First load, so the app shell does not have to reach into navigation.
 /// Favourites, because that is also what the crawl seeds from.
 ///
@@ -1338,26 +1418,39 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
         View::Playlists => shelf.playlists = backend().playlists(LIST_CAP).await?,
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
         View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
-        View::Artist(artist) => {
-            // Asked together: neither needs the other, and one after the
-            // other the page waited out both round trips.
-            let (albums, similar, about) = tokio::join!(
-                backend().artist_albums(artist.id, LIST_CAP),
-                backend().similar_artists(artist.id, 20),
-                backend().artist(artist.id),
-            );
-            shelf.albums = albums?;
-            // Not fatal: an artist with no similar list should still show a
-            // discography rather than an error. Nor is a server from before
-            // the portrait and biography, which answers 404 for them.
-            shelf.similar = similar.unwrap_or_default();
-            shelf.about = about.ok();
-        }
+        View::Artist(artist) => shelf = artist_page(artist.id, LIST_CAP).await?,
         // Pages that carry what they show, or fetch it themselves.
         View::Track(_) | View::Settings => {}
     }
 
     Ok(shelf)
+}
+
+/// How many of an artist's albums their page asks for first, when it has
+/// nothing of the page to show yet: one page of the provider's listing, and
+/// more than a window opens with. The rest, up to `LIST_CAP`, come behind.
+/// A discography of hundreds took seconds to page through before anything
+/// of the page showed.
+const FIRST_ALBUMS: usize = 100;
+
+/// An artist's page with up to `cap` of their albums.
+async fn artist_page(artist_id: i64, cap: usize) -> anyhow::Result<Shelf> {
+    // Asked together: neither needs the other, and one after the other the
+    // page waited out every round trip.
+    let (albums, similar, about) = tokio::join!(
+        backend().artist_albums(artist_id, cap),
+        backend().similar_artists(artist_id, 20),
+        backend().artist(artist_id),
+    );
+    Ok(Shelf {
+        albums: albums?,
+        // Not fatal: an artist with no similar list should still show a
+        // discography rather than an error. Nor is a server from before the
+        // portrait and biography, which answers 404 for them.
+        similar: similar.unwrap_or_default(),
+        about: about.ok(),
+        ..Default::default()
+    })
 }
 
 /// The albums and artists behind the space's tracks matching `query`, for a

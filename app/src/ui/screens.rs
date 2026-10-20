@@ -678,7 +678,8 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     // further down starts only once those above it are drawn in full.
     let lengths: Vec<usize> = grouped.iter().map(|(_, albums, _)| albums.len()).collect();
     let count: usize = lengths.iter().sum();
-    let drawn = split_window(&lengths, window.shown());
+    let keys = grouped.iter().flat_map(|(_, _, keys)| keys.iter().map(String::as_str));
+    let drawn = split_window(&lengths, window.shown_keeping(keys));
     let visible: usize = drawn.iter().sum();
     let sections: Vec<(&str, &[(usize, RemoteAlbum)], &[String])> = grouped
         .iter()
@@ -799,6 +800,9 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                         for ((index, album), key) in albums.iter().map(|(index, album)| (*index, album)).zip(keys) {
                             li {
                                 key: "{key}",
+                                // What a row looked at is kept in place by
+                                // when the whole discography comes in.
+                                "data-key": "{key}",
                                 class: if grid { "tile" } else { "row" },
                                 onclick: {
                                     let album = album.clone();

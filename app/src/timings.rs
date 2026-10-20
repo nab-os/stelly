@@ -183,7 +183,7 @@ struct Nav {
     /// `Library::epoch` when asked, which is how a fetch says it was this
     /// page's.
     epoch: u64,
-    /// "cached", "disk" or "fetched": what it is first shown from.
+    /// "cached", "disk", "first" or "fetched": what it is first shown from.
     from: &'static str,
     shown: bool,
     landed: bool,
@@ -218,6 +218,18 @@ pub fn nav_from_disk(epoch: u64) {
     }
     if let Some(nav) = nav().as_mut().filter(|nav| nav.epoch == epoch && !nav.shown) {
         nav.from = "disk";
+    }
+}
+
+/// The page asked for at `epoch` has the first of its fetch in the shelf,
+/// the rest still coming: an artist's newest albums. Its `-refreshed` line
+/// is then the rest landing.
+pub fn nav_first(epoch: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Some(nav) = nav().as_mut().filter(|nav| nav.epoch == epoch && !nav.shown) {
+        nav.from = "first";
     }
 }
 

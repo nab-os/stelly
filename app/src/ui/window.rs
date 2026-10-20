@@ -11,6 +11,7 @@
 
 use super::library::Library;
 use dioxus::prelude::*;
+use std::collections::HashSet;
 
 /// How many rows a list opens with. Enough to fill the column on a tall
 /// screen, in tiles or in rows; each growth triples it.
@@ -66,17 +67,63 @@ impl Window {
     }
 }
 
+/// What a list's last draw drew, on which visit: how long the list was,
+/// the rows drawn by key, and the least to draw from now on. See
+/// `Rows::shown_keeping`.
+#[derive(Default)]
+struct Drawn {
+    visit: u64,
+    rows: usize,
+    keys: HashSet<String>,
+    least: usize,
+}
+
+impl Drawn {
+    /// How many rows to draw on `visit`, of a list whose rows have `keys`
+    /// in page order, for a window of `shown`; kept for the next draw.
+    fn draw<'k>(&mut self, visit: u64, shown: usize, keys: impl Iterator<Item = &'k str> + Clone) -> usize {
+        if self.visit != visit {
+            *self = Drawn { visit, ..Drawn::default() };
+        }
+        let rows = keys.clone().count();
+        if rows > self.rows {
+            let last = keys.clone().enumerate().filter(|(_, key)| self.keys.contains(*key)).map(|(at, _)| at).last();
+            if let Some(last) = last {
+                self.least = self.least.max(last + 1);
+            }
+        }
+        let shown = shown.max(self.least);
+        self.rows = rows;
+        self.keys = keys.take(shown).map(str::to_string).collect();
+        shown
+    }
+}
+
 /// A list's window. `Copy`, so a row's handler or `MoreRows` can hold it.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Rows {
     window: Signal<Window>,
     visit: CopyValue<Visit>,
+    drawn: CopyValue<Drawn>,
 }
 
 impl Rows {
     /// How many rows to draw. Read, so growing draws the list again.
     pub(crate) fn shown(&self) -> usize {
         self.window.read().shown(*self.visit.peek())
+    }
+
+    /// How many rows to draw of a list whose rows, in page order, have
+    /// `keys`: `shown`, or down to the last row drawn before when the list
+    /// has grown since. An artist's whole discography comes in where its
+    /// first page was, much of it in sections above rows that may be the
+    /// ones looked at, and those stay drawn rather than fall out of the
+    /// window under them. For the rest of the visit, too: a later draw for
+    /// anything else would drop them again.
+    pub(crate) fn shown_keeping<'k>(&self, keys: impl Iterator<Item = &'k str> + Clone) -> usize {
+        let shown = self.shown();
+        // Not something a draw reacts to: written on every one.
+        self.drawn.write_unchecked().draw(self.visit.peek().number, shown, keys)
     }
 
     fn grow(mut self) {
@@ -90,7 +137,8 @@ impl Rows {
 pub(crate) fn use_rows() -> Rows {
     let visit = use_context::<Library>().visit;
     let window = use_signal(|| Window::opening(*visit.peek()));
-    Rows { window, visit }
+    let drawn = use_hook(|| CopyValue::new(Drawn::default()));
+    Rows { window, visit, drawn }
 }
 
 /// How many of each section's rows a window of `shown` draws, sections
@@ -172,6 +220,20 @@ mod tests {
         assert_eq!(grown.grown(then).shown(then), FIRST_SHOWN * 3);
         let back = then.next(2000.0);
         assert_eq!(grown.shown(back), FIRST_SHOWN + 100);
+    }
+
+    /// A list that grows under the rows drawn keeps them drawn, wherever
+    /// they went; one the same length, re-sorted, draws its window.
+    #[test]
+    fn rows_drawn_stay_drawn_when_the_list_grows_above_them() {
+        let mut drawn = Drawn::default();
+        let first = ["a1", "a2", "s1", "s2"];
+        assert_eq!(drawn.draw(1, 3, first.into_iter()), 3);
+        let whole = ["a1", "a2", "a3", "a4", "a5", "s1", "s2", "s3"];
+        assert_eq!(drawn.draw(1, 3, whole.into_iter()), 6, "down to s1");
+        assert_eq!(drawn.draw(1, 3, whole.into_iter()), 6, "and on every draw after");
+        assert_eq!(drawn.draw(1, 3, whole.into_iter().rev()), 6);
+        assert_eq!(drawn.draw(2, 3, whole.into_iter()), 3, "a new visit starts again");
     }
 
     #[test]
