@@ -144,7 +144,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 |---|---|---|---|---|
 | 6.1 | Every long list rendered in growing windows, or `content-visibility: auto` | `app/src/ui/library.rs:1533, 1977`, `screens.rs:522, 743` | S–M | #151 |
 | 6.2 | Queue rows mounted once the drawer has opened | `app/src/ui/queue.rs:122` | S–M | #152 |
-| 6.3 | Transitions: visible clone only, cover flown with `transform`, no per-frame mask, page-in on `.hero-meta` | `app/assets/transitions.js` | M | |
+| 6.3 | Transitions: visible clone only, cover flown with `transform`, no per-frame mask, page-in on `.hero-meta` | `app/assets/transitions.js` | M | #153 |
 | 6.4 | Scroll position kept in JS, not sent to Rust per event | `app/src/ui/library.rs:1065` | M | |
 | 6.5 | Shelves shared by `Rc`, disk writes in the background | `app/src/ui/library.rs:664, 680, 736` | S–M | |
 | 6.6 | Recent album and artist pages, portrait and bio cached on disk | `app/src/ui/library.rs`, `screens.rs:626` | M | |
