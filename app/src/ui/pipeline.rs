@@ -120,9 +120,8 @@ impl Default for Pipeline {
     }
 }
 
-/// Keep the status, the log and the counts fresh. Mounted once. One future
-/// rather than three, so the log cursor and the status cannot disagree about
-/// whether a stage is running.
+/// Keep the status and the counts fresh. Mounted once. The log is
+/// `PipelineLog`'s own, followed only while it is shown.
 ///
 /// Also the app's pulse: the space is only asked for when it moves, so this
 /// is what notices a server going away mid-session, and coming back, for the
@@ -157,15 +156,6 @@ pub fn use_pipeline_watch(pipeline: Pipeline, space: Space) {
                     }
                 }
                 Err(_) => {}
-            }
-
-            // A mirror, not an accumulation, the backend's buffer is
-            // already bounded and authoritative, so a reconnecting log shows
-            // the tail once.
-            if let Ok(lines) = backend().pipeline_log().await {
-                if *pipeline.log.peek() != lines {
-                    pipeline.log.set(lines);
-                }
             }
 
             // Counted from the view opening, so it opens on fresh counts.
@@ -477,9 +467,34 @@ fn span_of(seconds: f64) -> String {
 /// the newest line unless scrolled up to read an older one.
 #[component]
 pub fn PipelineLog() -> Element {
-    let pipeline = use_context::<Pipeline>();
+    let mut pipeline = use_context::<Pipeline>();
     let me = use_context::<Me>().0;
     let admin = me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin);
+
+    // Followed only while shown. The server replays what it retains on each
+    // connect, so reopening still shows the tail. The backend is held, not
+    // asked again, so a pairing changed meanwhile drops the right socket.
+    let remote = use_hook(|| {
+        let remote = backend();
+        remote.follow_pipeline_log();
+        remote
+    });
+    use_drop(move || remote.unfollow_pipeline_log());
+
+    // A mirror, not an accumulation: the backend's buffer is already bounded
+    // and authoritative. Asleep until a line comes in.
+    use_future(move || async move {
+        loop {
+            // Taken before the lines, so one pushed in between still wakes.
+            let cursor = remote.pipeline_log_cursor();
+            let lines = remote.pipeline_log();
+            if *pipeline.log.peek() != lines {
+                pipeline.log.set(lines);
+            }
+            remote.pipeline_log_past(cursor).await;
+        }
+    });
+
     let log = pipeline.log.read().clone();
     let count = log.len();
 
