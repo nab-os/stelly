@@ -245,11 +245,10 @@ impl Hub {
         });
     }
 
-    /// What the provider is and can do; it does not change while it runs.
+    /// What the providers are and can do, from what each said once. Not
+    /// cached here: one that was down is counted once it has said.
     pub async fn capabilities(&self) -> Result<Capabilities> {
-        self.catalogue
-            .get_or("capabilities".to_string(), async { self.provider().capabilities().await })
-            .await
+        self.provider().capabilities().await
     }
 
     /// `only` names the providers to ask; none is all of them.
@@ -262,9 +261,7 @@ impl Hub {
 
     /// Each provider, most preferred first: what it is called and can do.
     pub async fn providers(&self) -> Result<Vec<Capabilities>> {
-        self.catalogue
-            .get_or("providers".to_string(), async { self.provider().each_capabilities().await })
-            .await
+        self.provider().each_capabilities().await
     }
 
     /// One person's likes, from the database alone. Named favourites on the
