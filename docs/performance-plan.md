@@ -166,7 +166,10 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 7.8 | Compression between gateway and server, for gateways off loopback | qobuz, provider | S | qobuz#10, ytmusic#13; the server already asks for zstd |
 | 7.9 | yt-dlp kept current: a scheduled image rebuild on new releases, and a start-up check that a stream answers past its first MB | ytmusic | S–M | ytmusic#15 |
 | 7.10 | A freshly found YouTube URL warmed with a 1-byte range before it is handed out: its first range often takes ~5 s | ytmusic `streams.rs` | S | |
-| 7.11 | The server sends `x-search-session` per device, so the gateway drops superseded searches | `server/src/provider.rs`, provider | S | |
+| 7.11 | The server sends `x-search-session` per device, so the gateway drops superseded searches | `server/src/provider.rs`, provider | S | #165; needs stelly-provider#1 released |
+| 7.12 | Search answers say where their time went (Server-Timing: each provider's wait, then its id resolution) | `server/src/provider.rs`, `routes.rs` | S | #163 |
+| 7.13 | Each provider's search results resolved to ids as soon as it answers, providers in parallel, merged in provider order | `server/src/provider.rs` | S | |
+| 7.14 | An artist's first albums shown in about a second, the rest filled in behind, rows looked at kept in place; Server-Timing on artist, discography, similar and album answers | `app/src/ui/library.rs`, `server/src/routes.rs` | S–M | #166, #167 |
 
 ## Phase 8: scale, before the space passes ~150k
 

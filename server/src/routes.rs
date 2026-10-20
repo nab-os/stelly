@@ -6,6 +6,7 @@
 //! Bounded gestures are `play`, unbounded jobs are `pipeline`.
 
 use crate::auth::{AdminAuth, PlayAuth};
+use crate::provider::{self, Timings};
 use crate::space::Prepared;
 use crate::{AppState, Failure};
 use axum::extract::{Path, Query, State};
@@ -20,9 +21,10 @@ use stelly_core::api::{
     Target, TrackMeta, TracksRequest, User, Word,
 };
 use stelly_core::session::{Command, Session};
-use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack};
 use serde::Deserialize;
 use std::convert::Infallible;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::compression::CompressionLayer;
 
@@ -30,6 +32,10 @@ use tower_http::compression::CompressionLayer;
 /// and its longest list at 500. Radio and path cost a pass over the whole
 /// space per track, and every client waits on the engine while one runs.
 const GENERATE_CAP: usize = 500;
+
+/// A search, or a page's album, artist or discography, past this is logged
+/// with where its time went.
+const SLOW_BROWSE: Duration = Duration::from_secs(2);
 
 type Reply<T> = Result<Json<T>, Failure>;
 
@@ -171,12 +177,36 @@ struct QualityQuery {
 
 // ----------------------------------------------------------------- browsing
 
+/// Answered with a `Server-Timing` saying where the time went: each
+/// provider's wait for its answer, then its items' ids. One slow enough to
+/// notice says so in the log as well. Each device searches as a search box
+/// of its own: a provider that queues searches drops the device's last one
+/// once its next comes, and never another device's.
 async fn search(
     State(state): State<AppState>,
-    _: PlayAuth,
+    PlayAuth(device): PlayAuth,
     Query(query): Query<SearchQuery>,
-) -> Reply<SearchResults> {
-    Ok(Json(state.hub.search(&query.q, query.limit, &names(query.providers.as_deref())).await?))
+) -> Result<Response, Failure> {
+    let timings = Timings::default();
+    let (only, session) = (names(query.providers.as_deref()), provider::search_session(device.id));
+    timed("a search", &timings, state.hub.search(&query.q, query.limit, &only, &session, &timings)).await
+}
+
+/// `answer`, with a `Server-Timing` saying where `timings` says its time
+/// went, and the whole of it as `total`. One slow enough to notice says so
+/// in the log as well, as `what`: never an id or a name.
+async fn timed<T: serde::Serialize>(
+    what: &str,
+    timings: &Timings,
+    answer: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<Response, Failure> {
+    let started = Instant::now();
+    let answer = answer.await;
+    let took = timings.header(started.elapsed());
+    if started.elapsed() >= SLOW_BROWSE {
+        eprintln!("{what} took {:.1}s: {took}", started.elapsed().as_secs_f64());
+    }
+    Ok(([(header::HeaderName::from_static("server-timing"), took)], Json(answer?)).into_response())
 }
 
 /// The asking device's user's likes, nobody else's.
@@ -230,29 +260,38 @@ async fn playlist_tracks(
     Ok(Json(state.hub.playlist_tracks(id, query.cap).await?))
 }
 
+// An album's, an artist's, their discography and those like them: each
+// answered with a `Server-Timing` as a search is, each provider's wait and
+// its items' ids, or `cache` alone when what was held answered.
+
 async fn album_tracks(
     State(state): State<AppState>,
     _: PlayAuth,
     Path(id): Path<String>,
-) -> Reply<Vec<RemoteTrack>> {
-    Ok(Json(state.hub.album_tracks(&id).await?))
+) -> Result<Response, Failure> {
+    let timings = Timings::default();
+    timed("an album", &timings, state.hub.album_tracks(&id, &timings)).await
 }
 
 async fn artist(
     State(state): State<AppState>,
     _: PlayAuth,
     Path(id): Path<i64>,
-) -> Reply<RemoteArtist> {
-    Ok(Json(state.hub.artist(id).await?))
+) -> Result<Response, Failure> {
+    let timings = Timings::default();
+    timed("an artist", &timings, state.hub.artist(id, &timings)).await
 }
 
+/// Up to `cap`, newest first. A shorter ask is not always the start of a
+/// longer one: see `Provider::releases`.
 async fn artist_albums(
     State(state): State<AppState>,
     _: PlayAuth,
     Path(id): Path<i64>,
     Query(query): Query<CapQuery>,
-) -> Reply<Vec<RemoteAlbum>> {
-    Ok(Json(state.hub.artist_albums(id, query.cap).await?))
+) -> Result<Response, Failure> {
+    let timings = Timings::default();
+    timed("a discography", &timings, state.hub.artist_albums(id, query.cap, &timings)).await
 }
 
 async fn similar_artists(
@@ -260,8 +299,9 @@ async fn similar_artists(
     _: PlayAuth,
     Path(id): Path<i64>,
     Query(query): Query<LimitQuery>,
-) -> Reply<Vec<RemoteArtist>> {
-    Ok(Json(state.hub.similar_artists(id, query.limit).await?))
+) -> Result<Response, Failure> {
+    let timings = Timings::default();
+    timed("an artist's similar artists", &timings, state.hub.similar_artists(id, query.limit, &timings)).await
 }
 
 // ----------------------------------------------------------------- playback

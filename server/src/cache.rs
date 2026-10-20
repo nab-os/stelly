@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use std::any::Any;
 use std::collections::HashSet;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -109,18 +109,35 @@ impl Revalidating {
             }
             Some(_) => self.fetch_and_keep(key, fetch).await,
             None => {
+                // Not this one's own fetch when another ask was already
+                // making one, which may not fit this: a first page, asked
+                // for just before the whole listing.
+                let fetched = AtomicBool::new(false);
+                let mut fetch = Box::pin(fetch);
                 let entry = self
                     .held
-                    .try_get_with(key.clone(), async { fetch.await.map(|v| (Instant::now(), Arc::new(v) as Entry)) })
+                    .try_get_with(key.clone(), async {
+                        fetched.store(true, Ordering::SeqCst);
+                        (&mut fetch).await.map(|v| (Instant::now(), Arc::new(v) as Entry))
+                    })
                     .await
                     .map_err(|err| anyhow!("{err:#}"))?
                     .1;
-                entry
+                let value = entry
                     .downcast_ref::<T>()
                     .cloned()
-                    .with_context(|| format!("cache entry {key:?} holds another type"))
+                    .with_context(|| format!("cache entry {key:?} holds another type"))?;
+                if fetched.load(Ordering::SeqCst) || fits(&value) {
+                    return Ok(value);
+                }
+                self.fetch_and_keep(key, fetch).await
             }
         }
+    }
+
+    /// What is held for `key`, however old, without fetching anything.
+    pub async fn peek<T: Clone + 'static>(&self, key: &str) -> Option<T> {
+        Some(self.held::<T>(key).await?.1)
     }
 
     /// For reads no one waits on, the crawl's and the stages': what is held
@@ -249,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_reads_share_what_browsing_fetched() {
         let cache = Revalidating::new(Duration::from_millis(50), Duration::from_secs(60), 10);
-        let fits = |cap: usize| move |(held, items): &(usize, Vec<i32>)| *held == cap || (items.len() < *held && items.len() < cap);
+        let fits = |cap: usize| move |(held, items): &(usize, Vec<i32>)| *held >= cap || items.len() < *held;
 
         let browsed = cache.get_or_fitting("a".into(), fits(2), async { Ok((2, vec![1, 2])) }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -260,5 +277,26 @@ mod tests {
         assert_eq!(more, (5, vec![1, 2, 3]), "two of up to two may have left some out");
         let fewer = async { anyhow::bail!("fetched again") };
         assert_eq!(cache.get_or_fitting("a".into(), fits(4), fewer).await.unwrap().1, vec![1, 2, 3], "three of five is all of them");
+    }
+
+    /// An ask that comes while a smaller one is fetching, and finds the
+    /// smaller answer does not fit it, fetches its own, which is kept.
+    #[tokio::test]
+    async fn a_longer_ask_does_not_take_a_shorter_one_fetching() {
+        let cache = Revalidating::new(Duration::from_secs(60), Duration::from_secs(60), 10);
+        let fits = |cap: usize| move |(held, items): &(usize, Vec<i32>)| *held >= cap || items.len() < *held;
+        let first = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok((2, vec![1, 2]))
+        };
+        let whole = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cache.get_or_fitting("a".into(), fits(4), async { Ok((4, vec![1, 2, 3, 4])) }).await
+        };
+        let (first, whole) = tokio::join!(cache.get_or_fitting("a".into(), fits(2), first), whole);
+        assert_eq!(first.unwrap().1, vec![1, 2]);
+        assert_eq!(whole.unwrap().1, vec![1, 2, 3, 4]);
+        let unasked = async { anyhow::bail!("fetched again") };
+        assert_eq!(cache.get_or_fitting("a".into(), fits(2), unasked).await.unwrap().1, vec![1, 2, 3, 4], "the longer one answers both");
     }
 }

@@ -7,7 +7,7 @@
 use crate::db::{coalesce, least};
 use crate::pipeline::Job;
 use crate::likes::Liked;
-use crate::provider::{Provider, RemoteAlbum, RemoteArtist, RemoteTrack};
+use crate::provider::{Provider, RemoteAlbum, RemoteArtist, RemoteTrack, Timings};
 use crate::schema::{albums, artists, blocked_artists, frontier, tracks};
 use anyhow::{Context, Result};
 use diesel::prelude::*;
@@ -266,7 +266,7 @@ pub async fn expand_artist(
     distance: i64,
     max_distance: i64,
 ) -> Result<()> {
-    for album in client.artist_albums(artist_id, 1000).await? {
+    for album in client.artist_albums(artist_id, 1000, &Timings::default()).await? {
         upsert_album(conn, &album, true)?;
         enqueue(conn, "album", &album.id, distance)?;
     }
@@ -277,7 +277,7 @@ pub async fn expand_artist(
 
     if distance < max_distance {
         let blocked = blocked_ids(conn)?;
-        for similar in client.similar_artists(artist_id, 50).await? {
+        for similar in client.similar_artists(artist_id, 50, &Timings::default()).await? {
             let id = upsert_artist(conn, &similar, true)?;
             // A blocked artist is a dead end, not just a hidden one:
             // following them would pull their whole neighbourhood in.
@@ -297,7 +297,7 @@ pub async fn expand_album(
     album_id: &str,
     distance: i64,
 ) -> Result<usize> {
-    let (album, tracks) = client.album_tracks(album_id).await?;
+    let (album, tracks) = client.album_tracks(album_id, &Timings::default()).await?;
     upsert_album(conn, &album, true)?;
     for track in &tracks {
         upsert_track(conn, track, album.artist_id, distance)?;
@@ -483,7 +483,7 @@ pub async fn catalogue_target(
             // Their own releases, not every album that credits them, the
             // same ones the artist page counts for its in-space badge.
             let own: Vec<RemoteAlbum> = client
-                .artist_albums(*artist_id, 1000)
+                .artist_albums(*artist_id, 1000, &Timings::default())
                 .await?
                 .into_iter()
                 .filter(|album| album.artist_id.is_none_or(|id| id == *artist_id))
