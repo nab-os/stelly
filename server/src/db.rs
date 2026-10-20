@@ -13,7 +13,7 @@ use diesel::upsert::excluded;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stelly_core::api::BlockedArtist;
 
 /// The schema, embedded at compile time.
@@ -218,6 +218,61 @@ impl Db {
             *waits = wait;
         }
         f(conn)
+    }
+}
+
+// ------------------------------------------------------------ for stages
+
+/// How long a stage holds the write lock at a time, at most about.
+const CHUNK: Duration = Duration::from_millis(50);
+
+/// A stage's writes, committed every `CHUNK` rather than all at once: a
+/// request's write waits behind one chunk, not the whole stage. Each piece
+/// of work must leave the database whole on its own, since a stop between
+/// two chunks keeps the first. A chunk not committed is rolled back when
+/// this is dropped.
+pub struct Chunked<'c> {
+    conn: &'c mut SqliteConnection,
+    since: Option<Instant>,
+}
+
+impl<'c> Chunked<'c> {
+    pub fn new(conn: &'c mut SqliteConnection) -> Self {
+        Self { conn, since: None }
+    }
+
+    /// The connection, in a transaction holding the write lock: the one
+    /// open, or a new one once that has had its time.
+    pub fn conn(&mut self) -> Result<&mut SqliteConnection> {
+        if self.since.is_some_and(|since| since.elapsed() >= CHUNK) {
+            self.commit()?;
+        }
+        if self.since.is_none() {
+            self.conn.batch_execute("BEGIN IMMEDIATE")?;
+            self.since = Some(Instant::now());
+        }
+        Ok(self.conn)
+    }
+
+    /// Commit what is open.
+    pub fn finish(mut self) -> Result<()> {
+        self.commit()
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        if self.since.is_some() {
+            self.conn.batch_execute("COMMIT")?;
+            self.since = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Chunked<'_> {
+    fn drop(&mut self) {
+        if self.since.is_some() {
+            let _ = self.conn.batch_execute("ROLLBACK");
+        }
     }
 }
 
@@ -493,6 +548,33 @@ mod tests {
         // And all of it again is nothing.
         ensure_schema(conn).unwrap();
         AuthStore::new(&db_path).unwrap();
+    }
+
+    /// A stage stopped halfway keeps the chunks it committed, and only them;
+    /// another connection writes between two.
+    #[test]
+    fn a_stage_commits_as_it_goes() {
+        let dir = scratch("chunked");
+        let db_path = dir.join("stelly.db");
+        let conn = &mut open_for_write(&db_path).unwrap();
+        let other = &mut connect(&db_path, Duration::from_secs(1)).unwrap();
+        let queued = |conn: &mut SqliteConnection| frontier::table.count().get_result::<i64>(conn).unwrap();
+        {
+            let mut chunks = Chunked::new(conn);
+            crawl::enqueue(chunks.conn().unwrap(), "artist", "1", 0).unwrap();
+            std::thread::sleep(CHUNK);
+            crawl::enqueue(chunks.conn().unwrap(), "artist", "2", 0).unwrap();
+            assert_eq!(queued(other), 1);
+            // The lock is held only for the open chunk.
+            assert!(crawl::enqueue(other, "artist", "3", 0).is_err());
+        }
+        assert_eq!(queued(conn), 1);
+        crawl::enqueue(other, "artist", "3", 0).unwrap();
+        let mut chunks = Chunked::new(conn);
+        crawl::enqueue(chunks.conn().unwrap(), "artist", "4", 0).unwrap();
+        chunks.finish().unwrap();
+        assert_eq!(queued(other), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Catalogued is not enough to skip an album: only analysed or given up on.

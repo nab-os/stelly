@@ -13,6 +13,7 @@ use super::{Job, Paths};
 use crate::db;
 use crate::schema::layout;
 use anyhow::{bail, Result};
+use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,6 +47,16 @@ const EPOCH_COST: f64 = 120.0;
 /// Progress is reported in thousandths of the whole layout.
 const SCALE: u64 = 1000;
 
+// The new layout before it replaces the old, in the connection's own
+// temporary database.
+diesel::table! {
+    layout_next (track_id) {
+        track_id -> BigInt,
+        x -> Double,
+        y -> Double,
+    }
+}
+
 /// Lay out the space as it stands, and store the coordinates. Returns how many
 /// tracks were placed.
 pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<usize> {
@@ -64,15 +75,33 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<usize> {
     }
 
     let mut conn = db::open_for_write(&paths.db_path)?;
+    // Written aside first, to a table of this connection's own that locks
+    // nothing anyone else uses, then swapped in by two statements: requests'
+    // writes wait milliseconds behind the swap, not behind every row going
+    // in. Stopped before it, the layout before stays whole.
+    conn.batch_execute("CREATE TEMP TABLE layout_next (track_id INTEGER PRIMARY KEY, x REAL NOT NULL, y REAL NOT NULL);")?;
+    let rows: Vec<_> = space
+        .manifest
+        .track_ids
+        .iter()
+        .zip(&coords)
+        .map(|(id, &(x, y))| (layout_next::track_id.eq(id), layout_next::x.eq(x), layout_next::y.eq(y)))
+        .collect();
+    conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        // Under SQLite's limit on bound values, three a row.
+        for batch in rows.chunks(10_000) {
+            diesel::insert_into(layout_next::table).values(batch).execute(conn)?;
+        }
+        Ok(())
+    })?;
     // Rewritten wholesale rather than upserted: the layout is a function of
     // the space, so a track that has left it must not keep its coordinates.
-    let stale = conn.transaction::<_, diesel::result::Error, _>(|conn| {
+    let stale = conn.immediate_transaction::<_, diesel::result::Error, _>(|conn| {
         let stale = diesel::delete(layout::table).execute(conn)?;
-        for (id, &(x, y)) in space.manifest.track_ids.iter().zip(&coords) {
-            diesel::insert_into(layout::table)
-                .values((layout::track_id.eq(id), layout::x.eq(x), layout::y.eq(y)))
-                .execute(conn)?;
-        }
+        diesel::insert_into(layout::table)
+            .values(layout_next::table.select((layout_next::track_id, layout_next::x, layout_next::y)))
+            .into_columns((layout::track_id, layout::x, layout::y))
+            .execute(conn)?;
         Ok(stale)
     })?;
 
