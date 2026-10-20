@@ -155,6 +155,33 @@ fn fits<T>(cap: usize) -> impl Fn(&(usize, Vec<T>)) -> bool {
     move |(held, items)| *held == cap || (items.len() < *held && items.len() < cap)
 }
 
+/// Where one search's time went, step by step, for its `Server-Timing`.
+/// Only what ran for this request: one served from the cache, or joined to
+/// another's, has no steps of its own.
+#[derive(Default)]
+pub struct Timings(Mutex<Vec<(String, Duration)>>);
+
+impl Timings {
+    /// `name` took `took`. Names are kept to a token's characters, as the
+    /// header wants.
+    pub fn add(&self, name: &str, took: Duration) {
+        let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push((name, took));
+    }
+
+    /// `Server-Timing`'s value, `total` last: `qobuz-ask;dur=812.0, …`.
+    pub fn header(&self, total: Duration) -> String {
+        let steps = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let ms = |d: &Duration| d.as_secs_f64() * 1000.0;
+        let each = steps.iter().map(|(name, took)| format!("{name};dur={:.1}", ms(took)));
+        each.chain([format!("total;dur={:.1}", ms(&total))]).collect::<Vec<_>>().join(", ")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+}
+
 /// How an item is given Stelly's ids: by reading alone, or writing what is
 /// new.
 enum Ids<'c> {
@@ -601,9 +628,13 @@ impl Provider {
     // ------------------------------------------------------------ browsing
 
     /// Every provider's results, the first one's first, each item once; or
-    /// only those of the providers `only` names, when it names any.
-    pub async fn search(&self, query: &str, limit: usize, only: &[String]) -> Result<SearchResults> {
+    /// only those of the providers `only` names, when it names any. Each
+    /// provider's wait for its answer, and the time its items took to get
+    /// Stelly's ids, go in `timings`.
+    pub async fn search(&self, query: &str, limit: usize, only: &[String], timings: &Timings) -> Result<SearchResults> {
+        let started = Instant::now();
         self.ready().await?;
+        timings.add("ready", started.elapsed());
         let mut asked = Vec::new();
         for name in only {
             asked.push(self.named(name).await?);
@@ -613,10 +644,13 @@ impl Provider {
         }
         let asks = asked.into_iter().map(|source| async move {
             let client = self.client(source);
+            let asking = Instant::now();
             let answer = match tokio::time::timeout(SEARCH_WAIT, client.send(api::search(query, limit))).await {
                 Ok(answer) => answer,
                 Err(_) => Err(anyhow::anyhow!("no answer in {}s", SEARCH_WAIT.as_secs())),
             };
+            let name = self.name(source).unwrap_or_else(|_| source.to_string());
+            timings.add(&format!("{name}-ask"), asking.elapsed());
             (source, answer)
         });
         let answers = futures_util::future::join_all(asks).await;
@@ -633,9 +667,16 @@ impl Provider {
                 }
             };
             let name = self.name(source)?;
-            out.tracks.extend(self.own_tracks(&name, found.tracks).await?.into_iter().filter(|t| tracks.insert(t.id)));
-            out.albums.extend(self.own_albums(&name, found.albums).await?.into_iter().filter(|a| albums.insert(a.id.clone())));
-            out.artists.extend(self.own_artists(&name, found.artists).await?.into_iter().filter(|a| artists.insert(a.id)));
+            let owning = Instant::now();
+            let (found_tracks, found_albums, found_artists) = (
+                self.own_tracks(&name, found.tracks).await?,
+                self.own_albums(&name, found.albums).await?,
+                self.own_artists(&name, found.artists).await?,
+            );
+            timings.add(&format!("{name}-ids"), owning.elapsed());
+            out.tracks.extend(found_tracks.into_iter().filter(|t| tracks.insert(t.id)));
+            out.albums.extend(found_albums.into_iter().filter(|a| albums.insert(a.id.clone())));
+            out.artists.extend(found_artists.into_iter().filter(|a| artists.insert(a.id)));
         }
         match failed {
             // Nobody answered: say why rather than that nothing was found.
@@ -913,6 +954,45 @@ mod tests {
         let unbounded = tokio::time::timeout(Duration::from_millis(200), bulk.within(0, Duration::from_millis(50), std::future::pending::<Result<()>>()));
         assert!(unbounded.await.is_err(), "bulk calls have no deadline");
         drop(hung);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A search's `Server-Timing` names each provider's wait, at least as
+    /// long as it took to answer, and its ids.
+    #[tokio::test]
+    async fn a_search_says_where_its_time_went() {
+        let slow = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = slow.local_addr().unwrap();
+        let capabilities = Capabilities { name: "slow".into(), title: "Slow".into(), ..Default::default() };
+        let found = SearchResults { tracks: vec![RemoteTrack { id: 1, title: "T".into(), artist: "A".into(), ..Default::default() }], ..Default::default() };
+        let app = axum::Router::new()
+            .route("/v1/capabilities", axum::routing::get(move || async move { axum::Json(capabilities) }))
+            .route(
+                "/v1/search",
+                axum::routing::get(move || async move {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    axum::Json(found)
+                }),
+            );
+        tokio::spawn(async move { axum::serve(slow, app).await });
+
+        let dir = std::env::temp_dir().join(format!("stelly-provider-timings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), format!("STELLY_PROVIDERS=http://{at}\n")).unwrap();
+        crate::db::open_for_write(&dir.join("stelly.db")).unwrap();
+        let provider = Provider::from_env(&dir, &dir.join("stelly.db"));
+
+        let timings = Timings::default();
+        assert_eq!(provider.search("q", 10, &[], &timings).await.unwrap().tracks.len(), 1);
+        let header = timings.header(Duration::from_millis(250));
+        let dur = |name: &str| -> f64 {
+            let step = header.split(", ").find(|s| s.starts_with(&format!("{name};"))).unwrap_or_else(|| panic!("no {name} in {header}"));
+            step.split("dur=").nth(1).unwrap().parse().unwrap()
+        };
+        assert!(dur("slow-ask") >= 200.0, "{header}");
+        assert!(dur("slow-ids") >= 0.0);
+        assert_eq!(dur("total"), 250.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -6,6 +6,7 @@
 //! Bounded gestures are `play`, unbounded jobs are `pipeline`.
 
 use crate::auth::{AdminAuth, PlayAuth};
+use crate::provider::Timings;
 use crate::space::Prepared;
 use crate::{AppState, Failure};
 use axum::extract::{Path, Query, State};
@@ -20,9 +21,10 @@ use stelly_core::api::{
     Target, TrackMeta, TracksRequest, User, Word,
 };
 use stelly_core::session::{Command, Session};
-use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack};
 use serde::Deserialize;
 use std::convert::Infallible;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::compression::CompressionLayer;
 
@@ -30,6 +32,9 @@ use tower_http::compression::CompressionLayer;
 /// and its longest list at 500. Radio and path cost a pass over the whole
 /// space per track, and every client waits on the engine while one runs.
 const GENERATE_CAP: usize = 500;
+
+/// A search past this is logged with where its time went.
+const SLOW_SEARCH: Duration = Duration::from_secs(2);
 
 type Reply<T> = Result<Json<T>, Failure>;
 
@@ -171,12 +176,21 @@ struct QualityQuery {
 
 // ----------------------------------------------------------------- browsing
 
+/// Answered with a `Server-Timing` saying where the time went: each
+/// provider's wait for its answer, then its items' ids. One slow enough to
+/// notice says so in the log as well.
 async fn search(
     State(state): State<AppState>,
     _: PlayAuth,
     Query(query): Query<SearchQuery>,
-) -> Reply<SearchResults> {
-    Ok(Json(state.hub.search(&query.q, query.limit, &names(query.providers.as_deref())).await?))
+) -> Result<Response, Failure> {
+    let (timings, started) = (Timings::default(), Instant::now());
+    let found = state.hub.search(&query.q, query.limit, &names(query.providers.as_deref()), &timings).await;
+    let took = timings.header(started.elapsed());
+    if started.elapsed() >= SLOW_SEARCH {
+        eprintln!("a search took {:.1}s: {took}", started.elapsed().as_secs_f64());
+    }
+    Ok(([(header::HeaderName::from_static("server-timing"), took)], Json(found?)).into_response())
 }
 
 /// The asking device's user's likes, nobody else's.

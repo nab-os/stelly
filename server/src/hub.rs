@@ -7,7 +7,7 @@
 
 use crate::cache::{Cache, Revalidating};
 use crate::pipeline::{progress_of, Job, Paths, ProgressSlot};
-use crate::provider::{Capabilities, Provider, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
+use crate::provider::{Capabilities, Provider, Quality, Timings, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::schema::{frontier, tracks};
 use crate::stages;
 use crate::text::TextEncoder;
@@ -253,12 +253,20 @@ impl Hub {
         self.provider().capabilities().await
     }
 
-    /// `only` names the providers to ask; none is all of them.
-    pub async fn search(&self, query: &str, limit: usize, only: &[String]) -> Result<SearchResults> {
+    /// `only` names the providers to ask; none is all of them. Where the
+    /// time went goes in `timings`; a search the cache answered, or another
+    /// request already asking, has only that wait.
+    pub async fn search(&self, query: &str, limit: usize, only: &[String], timings: &Timings) -> Result<SearchResults> {
         let key = format!("search:{limit}:{}:{query}", only.join(","));
-        self.searches
-            .get_or(key, async { self.session().await?.search(query, limit, only).await })
-            .await
+        let started = Instant::now();
+        let found = self
+            .searches
+            .get_or(key, async { self.session().await?.search(query, limit, only, timings).await })
+            .await;
+        if timings.is_empty() {
+            timings.add("cache", started.elapsed());
+        }
+        found
     }
 
     /// Each provider, most preferred first: what it is called and can do.
