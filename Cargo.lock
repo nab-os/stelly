@@ -6055,7 +6055,7 @@ dependencies = [
 [[package]]
 name = "stelly-provider"
 version = "0.2.0"
-source = "git+https://github.com/nab-os/stelly-provider?tag=v0.2.0#90e0cd03ac38f4042a657616566e6956d06c675b"
+source = "git+https://github.com/nab-os/stelly-provider?branch=search-session#795a3e74b6c60fd14a9b8ac6b1c80b6cdeb0322d"
 dependencies = [
  "anyhow",
  "reqwest 0.13.5",

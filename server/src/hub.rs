@@ -253,16 +253,26 @@ impl Hub {
         self.provider().capabilities().await
     }
 
-    /// `only` names the providers to ask; none is all of them. Where the
-    /// time went goes in `timings`; a search the cache answered, or another
-    /// request already asking, has only that wait.
-    pub async fn search(&self, query: &str, limit: usize, only: &[String], timings: &Timings) -> Result<SearchResults> {
+    /// `only` names the providers to ask; none is all of them, and
+    /// `session` the search box it came from. Where the time went goes in
+    /// `timings`; a search the cache answered, or another request already
+    /// asking, has only that wait.
+    pub async fn search(&self, query: &str, limit: usize, only: &[String], session: &str, timings: &Timings) -> Result<SearchResults> {
         let key = format!("search:{limit}:{}:{query}", only.join(","));
         let started = Instant::now();
-        let found = self
-            .searches
-            .get_or(key, async { self.session().await?.search(query, limit, only, timings).await })
-            .await;
+        let asked = AtomicBool::new(false);
+        let ask = || async {
+            asked.store(true, Ordering::Relaxed);
+            self.session().await?.search(query, limit, only, session, timings).await
+        };
+        let mut found = self.searches.get_or(key.clone(), ask()).await;
+        // Another device's search of the same query, which failed: perhaps
+        // only because a newer one from that device replaced it, which says
+        // nothing of this one. Asked once more, in this one's own name.
+        if found.is_err() && !asked.load(Ordering::Relaxed) {
+            timings.add("cache", started.elapsed());
+            found = self.searches.get_or(key, ask()).await;
+        }
         if timings.is_empty() {
             timings.add("cache", started.elapsed());
         }

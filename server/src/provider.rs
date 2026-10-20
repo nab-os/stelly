@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use stelly_provider::wire::SEARCH_SESSION_HEADER;
 use stelly_provider::{api, AlbumTracks, Client, Config, FileUrl, Kind, Priority, ProviderError};
 use tokio::sync::watch;
 
@@ -153,6 +154,21 @@ pub fn share_catalogue(db_path: &Path, cache: Revalidating) {
 /// anything out.
 fn fits<T>(cap: usize) -> impl Fn(&(usize, Vec<T>)) -> bool {
     move |(held, items)| *held == cap || (items.len() < *held && items.len() < cap)
+}
+
+/// The search box `device`'s searches come from, for a provider that drops
+/// a search a newer one from the same box replaced: one per device, so one
+/// device's typing never replaces another's search. Unique to this server
+/// too, should two share a provider.
+pub fn search_session(device: i64) -> String {
+    static SERVER: OnceLock<u64> = OnceLock::new();
+    format!("{:016x}-{device}", SERVER.get_or_init(rand::random))
+}
+
+/// A provider gave up on this search because a newer one from the same
+/// search box came: nobody wants its answer any more.
+fn superseded(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<ProviderError>().is_some_and(|e| e.status == 409)
 }
 
 /// Where one search's time went, step by step, for its `Server-Timing`.
@@ -630,8 +646,9 @@ impl Provider {
     /// Every provider's results, the first one's first, each item once; or
     /// only those of the providers `only` names, when it names any. Each
     /// provider's wait for its answer, and the time its items took to get
-    /// Stelly's ids, go in `timings`.
-    pub async fn search(&self, query: &str, limit: usize, only: &[String], timings: &Timings) -> Result<SearchResults> {
+    /// Stelly's ids, go in `timings`. `session` names the search box it
+    /// came from; a provider that queues searches drops the one before it.
+    pub async fn search(&self, query: &str, limit: usize, only: &[String], session: &str, timings: &Timings) -> Result<SearchResults> {
         let started = Instant::now();
         self.ready().await?;
         timings.add("ready", started.elapsed());
@@ -645,7 +662,7 @@ impl Provider {
         let asks = asked.into_iter().map(|source| async move {
             let client = self.client(source);
             let asking = Instant::now();
-            let answer = match tokio::time::timeout(SEARCH_WAIT, client.send(api::search(query, limit))).await {
+            let answer = match tokio::time::timeout(SEARCH_WAIT, client.send(api::search(query, limit).header(SEARCH_SESSION_HEADER, session))).await {
                 Ok(answer) => answer,
                 Err(_) => Err(anyhow::anyhow!("no answer in {}s", SEARCH_WAIT.as_secs())),
             };
@@ -653,7 +670,12 @@ impl Provider {
             timings.add(&format!("{name}-ask"), asking.elapsed());
             (source, answer)
         });
-        let answers = futures_util::future::join_all(asks).await;
+        let mut answers = futures_util::future::join_all(asks).await;
+        // Replaced at one provider: no answer at all, since what the others
+        // found alone would be held as this query's results.
+        if let Some(at) = answers.iter().position(|(_, answer)| answer.as_ref().is_err_and(superseded)) {
+            return Err(answers.swap_remove(at).1.err().expect("found failed"));
+        }
         let mut out = SearchResults::default();
         let (mut tracks, mut albums, mut artists) = (HashSet::new(), HashSet::new(), HashSet::new());
         let mut failed = None;
@@ -984,7 +1006,7 @@ mod tests {
         let provider = Provider::from_env(&dir, &dir.join("stelly.db"));
 
         let timings = Timings::default();
-        assert_eq!(provider.search("q", 10, &[], &timings).await.unwrap().tracks.len(), 1);
+        assert_eq!(provider.search("q", 10, &[], "box", &timings).await.unwrap().tracks.len(), 1);
         let header = timings.header(Duration::from_millis(250));
         let dur = |name: &str| -> f64 {
             let step = header.split(", ").find(|s| s.starts_with(&format!("{name};"))).unwrap_or_else(|| panic!("no {name} in {header}"));
@@ -993,6 +1015,50 @@ mod tests {
         assert!(dur("slow-ask") >= 200.0, "{header}");
         assert!(dur("slow-ids") >= 0.0);
         assert_eq!(dur("total"), 250.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each search names its search box to every provider; one a provider
+    /// gave up on for a newer search from that box is not answered with
+    /// what the others found.
+    #[tokio::test]
+    async fn a_search_names_its_box_and_one_replaced_is_not_answered() {
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut urls = Vec::new();
+        for (name, replaced) in [("gateway", true), ("other", false)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            urls.push(format!("http://{}", listener.local_addr().unwrap()));
+            let capabilities = Capabilities { name: name.into(), title: name.into(), ..Default::default() };
+            let sessions = sessions.clone();
+            let search = move |headers: axum::http::HeaderMap| async move {
+                let session = headers.get(SEARCH_SESSION_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+                sessions.lock().unwrap().push(session.to_string());
+                let status = if replaced { axum::http::StatusCode::CONFLICT } else { axum::http::StatusCode::OK };
+                (status, axum::Json(SearchResults::default()))
+            };
+            let app = axum::Router::new()
+                .route("/v1/capabilities", axum::routing::get(move || async move { axum::Json(capabilities) }))
+                .route("/v1/search", axum::routing::get(search));
+            tokio::spawn(async move { axum::serve(listener, app).await });
+        }
+
+        let dir = std::env::temp_dir().join(format!("stelly-provider-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), format!("STELLY_PROVIDERS={}\n", urls.join(","))).unwrap();
+        crate::db::open_for_write(&dir.join("stelly.db")).unwrap();
+        let provider = Provider::from_env(&dir, &dir.join("stelly.db"));
+        provider.each_capabilities().await.unwrap();
+        while provider.answering().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let session = search_session(7);
+        let answer = provider.search("q", 10, &[], &session, &Timings::default()).await;
+        assert!(answer.is_err_and(|err| superseded(&err)));
+        assert_eq!(*sessions.lock().unwrap(), [session.clone(), session.clone()]);
+        assert_eq!(search_session(7), session, "the same box across a burst");
+        assert_ne!(search_session(8), session, "never another device's");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

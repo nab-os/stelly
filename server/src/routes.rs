@@ -6,7 +6,7 @@
 //! Bounded gestures are `play`, unbounded jobs are `pipeline`.
 
 use crate::auth::{AdminAuth, PlayAuth};
-use crate::provider::Timings;
+use crate::provider::{self, Timings};
 use crate::space::Prepared;
 use crate::{AppState, Failure};
 use axum::extract::{Path, Query, State};
@@ -178,14 +178,17 @@ struct QualityQuery {
 
 /// Answered with a `Server-Timing` saying where the time went: each
 /// provider's wait for its answer, then its items' ids. One slow enough to
-/// notice says so in the log as well.
+/// notice says so in the log as well. Each device searches as a search box
+/// of its own: a provider that queues searches drops the device's last one
+/// once its next comes, and never another device's.
 async fn search(
     State(state): State<AppState>,
-    _: PlayAuth,
+    PlayAuth(device): PlayAuth,
     Query(query): Query<SearchQuery>,
 ) -> Result<Response, Failure> {
     let (timings, started) = (Timings::default(), Instant::now());
-    let found = state.hub.search(&query.q, query.limit, &names(query.providers.as_deref()), &timings).await;
+    let (only, session) = (names(query.providers.as_deref()), provider::search_session(device.id));
+    let found = state.hub.search(&query.q, query.limit, &only, &session, &timings).await;
     let took = timings.header(started.elapsed());
     if started.elapsed() >= SLOW_SEARCH {
         eprintln!("a search took {:.1}s: {took}", started.elapsed().as_secs_f64());
