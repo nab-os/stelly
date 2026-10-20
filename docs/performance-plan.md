@@ -82,7 +82,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 3.1 | Poll every 5–10 s unless the pipeline view is open or a job runs; a slow heartbeat for offline | `app/src/ui/crawler.rs:68`, `pipeline.rs:128` | S | |
+| 3.1 | Poll every 5–10 s unless the pipeline view is open or a job runs; a slow heartbeat for offline | `app/src/ui/crawler.rs:68`, `pipeline.rs:128` | S | #112 |
 | 3.2 | Status set only when it changed; the "add" badge its own component | `app/src/ui/pipeline.rs:141`, `crawler.rs:73`, `screens.rs:105` | S | |
 | 3.3 | Pipeline log stream open only while the log is shown | `app/src/ui/pipeline.rs:157` | S | |
 | 3.4 | The output presigns the next track | `app/src/ui/player.rs:288, 357` | S | |
