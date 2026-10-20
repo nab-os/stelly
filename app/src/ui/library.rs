@@ -410,6 +410,16 @@ impl Liked {
             _ => {}
         }
     }
+
+    /// Whether one id is in its set. `kind` and `id` as for `set`.
+    fn has(&self, kind: &str, id: &str) -> bool {
+        match kind {
+            "track" => id.parse().is_ok_and(|id: i64| self.tracks.contains(&id)),
+            "album" => self.albums.contains(id),
+            "artist" => id.parse().is_ok_and(|id: i64| self.artists.contains(&id)),
+            _ => false,
+        }
+    }
 }
 
 /// One like or unlike the hearts show before the loaded sets have it.
@@ -446,6 +456,15 @@ fn with_flips(base: Option<&Liked>, flips: &[Flip]) -> Liked {
         liked.set(flip.kind, &flip.id, flip.liked);
     }
     liked
+}
+
+/// Whether one id shows as liked: its last flip if it has one, or else the
+/// loaded sets. `with_flips` for a single id, without copying the sets.
+fn holds(base: Option<&Liked>, flips: &[Flip], kind: &str, id: &str) -> bool {
+    match flips.iter().rev().find(|flip| flip.kind == kind && flip.id == id) {
+        Some(flip) => flip.liked,
+        None => base.is_some_and(|liked| liked.has(kind, id)),
+    }
 }
 
 /// Let go of the flips an answer to fetch `asked` already has: those saved
@@ -570,8 +589,12 @@ impl Library {
     /// duty as "nothing is confirmed liked yet" while the fetch is still in
     /// flight, rather than needing a separate loading state every caller has
     /// to handle.
+    ///
+    /// The sets only while the filter is on: off, nothing reads them, and
+    /// copying them on every render was for nothing.
     fn liked_state(&self) -> (bool, Liked) {
-        (*self.liked_only.read(), self.liked())
+        let only = *self.liked_only.read();
+        (only, if only { self.liked() } else { Liked::default() })
     }
 
     /// The favourited-id cache alone, regardless of whether the "liked"
@@ -584,6 +607,13 @@ impl Library {
     /// Likes and unlikes not yet saved show as if they were.
     pub(crate) fn liked(&self) -> Liked {
         with_flips(self.liked.read().as_ref(), &self.flips.read())
+    }
+
+    /// Whether one track, album or artist shows as liked, which is all a
+    /// heart needs: read in place rather than copying every set as `liked`
+    /// does. `kind` is "track", "album" or "artist".
+    pub(crate) fn is_liked(&self, kind: &str, id: &str) -> bool {
+        holds(self.liked.read().as_ref(), &self.flips.read(), kind, id)
     }
 
     /// Show a like or unlike at once, before the server has it. Undone by
@@ -2576,6 +2606,20 @@ mod tests {
         let flips = [flip(0, "album", "a", false, None), flip(1, "album", "a", true, None)];
         assert!(with_flips(Some(&base), &flips).albums.contains("a"));
         assert!(!with_flips(Some(&base), &flips[..1]).albums.contains("a"));
+    }
+
+    #[test]
+    fn one_id_reads_the_same_as_the_whole_sets() {
+        let mut base = Liked::default();
+        base.tracks.insert(7);
+        base.albums.insert("a".into());
+        let flips = [flip(0, "album", "a", false, None), flip(1, "artist", "3", true, None)];
+        let whole = with_flips(Some(&base), &flips);
+        for (kind, id) in [("track", "7"), ("track", "8"), ("album", "a"), ("artist", "3"), ("artist", "4")] {
+            assert_eq!(holds(Some(&base), &flips, kind, id), whole.has(kind, id), "{kind} {id}");
+        }
+        assert!(holds(None, &flips, "artist", "3"));
+        assert!(!holds(None, &[], "track", "7"));
     }
 
     #[test]

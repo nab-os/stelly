@@ -233,7 +233,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     let status = use_signal(|| None::<String>);
 
     library.ensure_liked_loaded();
-    let liked = library.liked().tracks.contains(&track.id);
+    let liked = library.is_liked("track", &track.id.to_string());
     let in_space = local.0.read().contains(&track.id);
 
     // The space's own row: genre, tempo, where the crawl found it, where it
@@ -438,7 +438,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
     let status = use_signal(|| None::<String>);
 
     library.ensure_liked_loaded();
-    let liked = library.liked().albums.contains(&album.id);
+    let liked = library.is_liked("album", &album.id);
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
     // `ShelfTrack` indices address the same list.
@@ -648,7 +648,7 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let mut expanded = use_signal(|| false);
 
     library.ensure_liked_loaded();
-    let followed = library.liked().artists.contains(&artist.id);
+    let followed = library.is_liked("artist", &artist.id.to_string());
 
     // The portrait and biography, which nothing that links here carries. A
     // server from before that route answers 404; the page just goes without.

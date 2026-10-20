@@ -864,6 +864,76 @@ fn clock(seconds: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+/// Where the track is and how long it is, in seconds, and how far along as
+/// the seek line's 0 to 1000. A held seek line's place stands in for the
+/// position. The audio element's own duration is authoritative once it has
+/// loaded; `listed`, the provider's, fills the gap before that, and on every
+/// device that is not the output.
+fn timeline(position: f64, duration: f64, listed: f64, held: Option<f64>) -> (f64, f64, f64) {
+    let total = if duration > 0.0 { duration } else { listed };
+    let progress = match held {
+        Some(held) => held,
+        None if total > 0.0 => (position / total * 1000.0).clamp(0.0, 1000.0),
+        None => 0.0,
+    };
+    let position = if held.is_some() { progress / 1000.0 * total } else { position };
+    (position, total, progress)
+}
+
+/// The thin seek line along the top of the player bar. Its own component,
+/// with `Clock`, so the position updates, twice a second while playing,
+/// redraw these two and not the whole bar.
+#[component]
+fn SeekLine(seeking: Signal<Option<f64>>, listed: f64) -> Element {
+    let player = use_context::<Player>();
+    let (position, duration) = *player.position.read();
+    let (position, total, progress) = timeline(position, duration, listed, seeking());
+    let filled = progress / 10.0;
+    // The end of a drag. A range input says so with `change`, but not when
+    // it is let go where it was taken, nor when a touch is cancelled, so the
+    // pointer and touch ends say it too; whichever comes first sends.
+    let mut released = move || {
+        if let Some(held) = seeking.take() {
+            seek(player, held / 1000.0 * total);
+        }
+    };
+
+    rsx! {
+        input {
+            class: "seek-line",
+            r#type: "range",
+            min: "0",
+            max: "1000",
+            value: "{progress}",
+            style: "--filled: {filled}%",
+            disabled: total <= 0.0,
+            title: "{clock(position)} / {clock(total)}",
+            oninput: move |event| {
+                if let Ok(value) = event.value().parse::<f64>() {
+                    seeking.set(Some(value));
+                }
+            },
+            onchange: move |_| released(),
+            onpointerup: move |_| released(),
+            onpointercancel: move |_| released(),
+            ontouchend: move |_| released(),
+            ontouchcancel: move |_| released(),
+        }
+    }
+}
+
+/// The time beside the transport, the seek line's other half.
+#[component]
+fn Clock(seeking: Signal<Option<f64>>, listed: f64) -> Element {
+    let player = use_context::<Player>();
+    let (position, duration) = *player.position.read();
+    let (position, total, _) = timeline(position, duration, listed, seeking());
+
+    rsx! {
+        span { class: "time muted", "{clock(position)} / {clock(total)}" }
+    }
+}
+
 /// The bar along the bottom of the window, the full width of it, under the
 /// main area and the generate panel alike.
 ///
@@ -879,7 +949,6 @@ pub fn PlayerBar() -> Element {
     let local = use_context::<LocalIds>();
 
     let current = player.current();
-    let (position, duration) = *player.position.read();
     let queue_length = player.queue.read().len();
     let index = *player.index.read();
     let playing = *player.playing.read();
@@ -890,38 +959,17 @@ pub fn PlayerBar() -> Element {
     // Where the seek line and the volume are held, while they are: drawn
     // from here rather than from the player, so the position updates do not
     // pull the thumb back under the finger, and nothing is sent until it is
-    // let go. See `release`.
-    let mut seeking = use_signal(|| None::<f64>);
+    // let go. See `SeekLine`.
+    let seeking = use_signal(|| None::<f64>);
     let mut turning = use_signal(|| None::<f64>);
     let mut queue_open = player.queue_open;
 
     library.ensure_liked_loaded();
-    let liked = current.as_ref().is_some_and(|t| library.liked().tracks.contains(&t.id));
+    let liked = current.as_ref().is_some_and(|t| library.is_liked("track", &t.id.to_string()));
+    let listed = current.as_ref().and_then(|t| t.duration).unwrap_or(0) as f64;
 
-    // The audio element's own duration is authoritative once it has loaded;
-    // Qobuz's metadata fills the gap before that, and on every device that is
-    // not the output.
-    let total = if duration > 0.0 {
-        duration
-    } else {
-        current.as_ref().and_then(|t| t.duration).unwrap_or(0) as f64
-    };
-    let progress = match seeking() {
-        Some(held) => held,
-        None if total > 0.0 => (position / total * 1000.0).clamp(0.0, 1000.0),
-        None => 0.0,
-    };
-    let position = if seeking().is_some() { progress / 1000.0 * total } else { position };
-    let filled = progress / 10.0;
     let level = turning().unwrap_or(level);
-    // The end of a drag. A range input says so with `change`, but not when
-    // it is let go where it was taken, nor when a touch is cancelled, so the
-    // pointer and touch ends say it too; whichever comes first sends.
-    let mut seek_released = move || {
-        if let Some(held) = seeking.take() {
-            seek(player, held / 1000.0 * total);
-        }
-    };
+    // The end of a drag, as for the seek line.
     let mut volume_released = move || {
         if let Some(held) = turning.take() {
             let_go_volume(player, held);
@@ -934,26 +982,7 @@ pub fn PlayerBar() -> Element {
             // would duplicate every button.
             audio { id: "player" }
 
-            input {
-                class: "seek-line",
-                r#type: "range",
-                min: "0",
-                max: "1000",
-                value: "{progress}",
-                style: "--filled: {filled}%",
-                disabled: total <= 0.0,
-                title: "{clock(position)} / {clock(total)}",
-                oninput: move |event| {
-                    if let Ok(value) = event.value().parse::<f64>() {
-                        seeking.set(Some(value));
-                    }
-                },
-                onchange: move |_| seek_released(),
-                onpointerup: move |_| seek_released(),
-                onpointercancel: move |_| seek_released(),
-                ontouchend: move |_| seek_released(),
-                ontouchcancel: move |_| seek_released(),
-            }
+            SeekLine { seeking, listed }
 
             div { class: "now",
                 if let Some(track) = current.clone() {
@@ -1022,7 +1051,7 @@ pub fn PlayerBar() -> Element {
                     onclick: move |_| step(player, 1),
                     {icons::next()}
                 }
-                span { class: "time muted", "{clock(position)} / {clock(total)}" }
+                Clock { seeking, listed }
             }
 
             div { class: "player-meta",
@@ -1386,6 +1415,18 @@ pub fn use_session(player: Player) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_timeline_prefers_the_elements_duration() {
+        assert_eq!(timeline(30.0, 120.0, 100.0, None), (30.0, 120.0, 250.0));
+        assert_eq!(timeline(30.0, 0.0, 120.0, None), (30.0, 120.0, 250.0));
+        assert_eq!(timeline(30.0, 0.0, 0.0, None), (30.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_held_seek_line_stands_in_for_the_position() {
+        assert_eq!(timeline(30.0, 120.0, 0.0, Some(500.0)), (60.0, 120.0, 500.0));
+    }
 
     const LOSSLESS: Quality = Quality::Lossless;
 
