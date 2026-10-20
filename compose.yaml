@@ -19,7 +19,7 @@ services:
   server:
     # Pinned rather than `latest`, so that `compose pull` on a bad day cannot
     # swap the running server for a release nobody here has tried.
-    image: stellymusic/stelly:v2.0.1
+    image: stellymusic/stelly:v2.1.0
 
     # The whole pipeline is in this one image. The CLAP weights (~620MB) are
     # fetched into the data volume on first use, or up front with:
@@ -78,7 +78,7 @@ services:
   # URLs are Qobuz's own. Publish 127.0.0.1:7710:7710 too for stelly-mix on
   # the host.
   qobuz:
-    image: stellymusic/stelly-qobuz:v0.2.0
+    image: stellymusic/stelly-qobuz:v0.3.0
     command: ["serve", "--bind", "0.0.0.0:7710"]
     # The account, QOBUZ_APP_ID, QOBUZ_APP_SECRETS, QOBUZ_USER_AUTH_TOKEN, as
     # `stelly-qobuz login` wrote them on a machine with a browser: its
@@ -101,7 +101,7 @@ services:
   # sign-in is browser.json in its volume, from `stelly-ytmusic login` on a
   # machine with a browser, copied in as above.
   ytmusic:
-    image: stellymusic/stelly-ytmusic:v0.2.0
+    image: stellymusic/stelly-ytmusic:v0.3.0
     environment:
       PUBLIC_URL: ${YTMUSIC_PUBLIC_URL:?set YTMUSIC_PUBLIC_URL in .env, how devices reach port 7712}
     env_file:
