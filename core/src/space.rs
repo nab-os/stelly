@@ -5,11 +5,13 @@
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// The space format this build understands, and the one the server writes.
 ///
@@ -218,12 +220,13 @@ impl WeightedSpace {
     /// per track and a fresh vector each time is pure churn. The arithmetic is
     /// deliberately identical to `similarities`: a different summation order
     /// can reorder near-ties between the two. Every product in the space goes
-    /// through `dot` or `dots` for the same reason.
+    /// through `dot` or `dots` for the same reason, and splitting a scan
+    /// changes no sum, only which thread works it out.
     pub fn similarities_into(&self, query: &[f32], out: &mut [f32]) {
         let norm = dot(query, query).sqrt().max(1e-9);
         let n = self.n_tracks.min(out.len());
         let out = &mut out[..n];
-        dots(query, out, |i| self.row(i));
+        par_dots(query, out, |i| self.row(i));
         for slot in out {
             *slot /= norm;
         }
@@ -323,6 +326,69 @@ pub fn dots<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]
         return unsafe { dots_avx2(query, out, row) };
     }
     dots_lanes(query, out, row)
+}
+
+/// The same, shared out over `pool` when the scan is big enough to be
+/// worth waking it for, a space past about fifty thousand tracks, and no
+/// other request is running. Otherwise on the caller's thread.
+///
+/// Requests running together already keep the cores busy between them, and
+/// splitting their scans as well only crowds the cores: with sixteen
+/// running, splitting a scan whenever no other was mid-scan still made
+/// them slower. Alone, a split scan has every core.
+pub fn par_dots<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32] + Sync) {
+    if out.len() * query.len() < PARALLEL_FROM || REQUESTS.load(Ordering::Relaxed) > 1 {
+        return dots(query, out, row);
+    }
+    let rows = (CHUNK / query.len().max(1)).max(1);
+    pool().install(|| {
+        out.par_chunks_mut(rows)
+            .enumerate()
+            .for_each(|(chunk, out)| dots(query, out, |i| row(chunk * rows + i)));
+    });
+}
+
+/// Requests working through the space right now.
+static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+
+/// One request working through the space, counted in `REQUESTS` while it
+/// lasts, so that `par_dots` can tell whether it is alone.
+pub struct Request(());
+
+impl Request {
+    pub fn start() -> Self {
+        REQUESTS.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        REQUESTS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Floats a scan reads before it is worth splitting: below this, waking
+/// the pool costs about what it saves.
+const PARALLEL_FROM: usize = 4 << 20;
+
+/// Floats each piece of a split scan reads, 2 MB.
+const CHUNK: usize = 1 << 19;
+
+/// The threads every request's scans share, started once. Every core but
+/// one, as the pipeline's stages take, so the server's runtime always has
+/// one to answer on; however many requests run at once, they divide these
+/// rather than each starting its own.
+pub fn pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(1).max(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("scan-{i}"))
+            .build()
+            .expect("starting the scan threads")
+    })
 }
 
 /// Indices of the `k` highest scores, ordered as `argsort_desc` would.
