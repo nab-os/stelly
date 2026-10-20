@@ -97,7 +97,8 @@ pub fn QueueView() -> Element {
 
     // Long-lived: this component stays mounted whether or not the drawer is
     // open, so the channel outlives any one gesture. The script delegates
-    // from the document, so it does not care that the rows come and go.
+    // from the document and the drawer, so it does not care that the rows
+    // come and go.
     use_future(move || async move {
         let mut handle = document::eval(include_str!("../../assets/queue-drag.js"));
         while let Ok(message) = handle.recv::<serde_json::Value>().await {

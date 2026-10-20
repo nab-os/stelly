@@ -191,40 +191,36 @@ if (!window.stellyQueueGesturesInstalled) {
     { passive: true }
   );
 
-  document.addEventListener(
-    "touchmove",
-    (event) => {
-      if (!touch) return;
-      const point = event.touches[0];
-      const dx = point.clientX - touch.x;
-      const dy = point.clientY - touch.y;
+  const rowMove = (event) => {
+    if (!touch) return;
+    const point = event.touches[0];
+    const dx = point.clientX - touch.x;
+    const dy = point.clientY - touch.y;
 
-      if (touch.mode === "pending") {
-        if (Math.abs(dx) < SLOP_PX && Math.abs(dy) < SLOP_PX) return;
-        clearTimeout(touch.timer);
-        if (Math.abs(dx) > Math.abs(dy)) {
-          touch.mode = "swipe";
-          touch.row.style.transition = "none";
-        } else {
-          // Moving before the hold: this is a scroll, leave it alone.
-          touch = null;
-          return;
-        }
+    if (touch.mode === "pending") {
+      if (Math.abs(dx) < SLOP_PX && Math.abs(dy) < SLOP_PX) return;
+      clearTimeout(touch.timer);
+      if (Math.abs(dx) > Math.abs(dy)) {
+        touch.mode = "swipe";
+        touch.row.style.transition = "none";
+      } else {
+        // Moving before the hold: this is a scroll, leave it alone.
+        touch = null;
+        return;
       }
+    }
 
-      if (touch.mode === "drag") {
-        event.preventDefault();
-        moveDrag(point.clientY);
-      } else if (touch.mode === "swipe") {
-        event.preventDefault();
-        const width = touch.row.getBoundingClientRect().width || 1;
-        touch.row.style.transform = `translateX(${dx}px)`;
-        touch.row.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / width));
-        touch.dx = dx;
-      }
-    },
-    { passive: false }
-  );
+    if (touch.mode === "drag") {
+      event.preventDefault();
+      moveDrag(point.clientY);
+    } else if (touch.mode === "swipe") {
+      event.preventDefault();
+      const width = touch.row.getBoundingClientRect().width || 1;
+      touch.row.style.transform = `translateX(${dx}px)`;
+      touch.row.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / width));
+      touch.dx = dx;
+    }
+  };
 
   const touchEnd = () => {
     if (!touch) return;
@@ -280,16 +276,12 @@ if (!window.stellyQueueGesturesInstalled) {
     { passive: true }
   );
 
-  document.addEventListener(
-    "touchmove",
-    (event) => {
-      if (!handle) return;
-      event.preventDefault();
-      handle.dy = Math.max(0, event.touches[0].clientY - handle.y);
-      handle.drawer.style.transform = `translateY(${handle.dy}px)`;
-    },
-    { passive: false }
-  );
+  const handleMove = (event) => {
+    if (!handle) return;
+    event.preventDefault();
+    handle.dy = Math.max(0, event.touches[0].clientY - handle.y);
+    handle.drawer.style.transform = `translateY(${handle.dy}px)`;
+  };
 
   const handleEnd = () => {
     if (!handle) return;
@@ -306,4 +298,51 @@ if (!window.stellyQueueGesturesInstalled) {
   document.addEventListener("click", (event) => {
     if (event.target.closest && event.target.closest(".drawer-handle")) send({ type: "close" });
   });
+
+  // ------------------------------------------------------------ touchmove
+  //
+  // The one listener that can cancel a scroll, so the one that makes the
+  // browser hold every scroll it covers until this thread has answered. On
+  // the document that was every list in the app; on the drawer it is only
+  // the queue, the one list a finger can drag in. It cannot instead be added
+  // when a press starts: the WebView settles whether a gesture's moves wait
+  // for this thread when it begins, before any listener here has run.
+  //
+  // The drawer stays mounted while the queue view is, but a new view brings
+  // a new drawer, so binding is retried until one is found and redone once
+  // the bound one has left the page.
+
+  let bound = null;
+
+  const onTouchMove = (event) => {
+    handleMove(event);
+    rowMove(event);
+  };
+
+  window.stellyQueueBind = () => {
+    if (bound && bound.isConnected) return true;
+    const drawer = document.querySelector(".queue-drawer");
+    if (bound) bound.removeEventListener("touchmove", onTouchMove);
+    bound = drawer;
+    if (drawer) drawer.addEventListener("touchmove", onTouchMove, { passive: false });
+    return !!drawer;
+  };
+
+  // Late is better than never: a drawer that appeared unnoticed is bound by
+  // the first touch anywhere, and drags from the next one on.
+  document.addEventListener("touchstart", () => window.stellyQueueBind(), {
+    passive: true,
+    capture: true,
+  });
+}
+
+// Run on each evaluation, so a remounted queue view rebinds its new drawer.
+// Its first render may not have reached the page yet: try again each frame
+// for a little while.
+{
+  let tries = 60;
+  const bind = () => {
+    if (!window.stellyQueueBind() && --tries > 0) requestAnimationFrame(bind);
+  };
+  bind();
 }
