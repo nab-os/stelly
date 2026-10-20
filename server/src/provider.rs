@@ -17,12 +17,13 @@
 //! the next if it fails. Browsing queues as interactive, the crawl and
 //! analyse as bulk, so a search never waits behind them.
 
+use crate::cache::Revalidating;
 use crate::refs::{self, Item, Kind as RefKind};
 use anyhow::{bail, Context, Result};
 use diesel::SqliteConnection;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -127,6 +128,31 @@ pub struct Provider {
     /// Where Stelly's ids are kept.
     db: Arc<crate::db::Db>,
     probe: Arc<Probe>,
+    /// The server's catalogue cache, when this runs inside it.
+    catalogue: Option<Revalidating>,
+}
+
+/// The catalogue caches of the servers running on each database. The
+/// crawl, the stages and mixing build their own clients, on runtimes of
+/// their own, and read albums, artists, discographies and similar artists
+/// through the same cache as browsing: neither fetches what the other just
+/// did. A command line run has no server, and no cache.
+fn catalogues() -> &'static Mutex<HashMap<PathBuf, Revalidating>> {
+    static ALL: OnceLock<Mutex<HashMap<PathBuf, Revalidating>>> = OnceLock::new();
+    ALL.get_or_init(Mutex::default)
+}
+
+/// Every client built on `db_path` from now on reads the catalogue through
+/// `cache`.
+pub fn share_catalogue(db_path: &Path, cache: Revalidating) {
+    catalogues().lock().unwrap_or_else(|e| e.into_inner()).insert(db_path.to_path_buf(), cache);
+}
+
+/// A listing fetched for up to `held` items answers an ask for up to `cap`
+/// when it was for as many, or came back short of both: then neither left
+/// anything out.
+fn fits<T>(cap: usize) -> impl Fn(&(usize, Vec<T>)) -> bool {
+    move |(held, items)| *held == cap || (items.len() < *held && items.len() < cap)
 }
 
 /// How an item is given Stelly's ids: by reading alone, or writing what is
@@ -187,6 +213,7 @@ impl Provider {
             priority: Priority::Interactive,
             db: crate::db::Db::shared(db_path),
             probe: Arc::new(Probe { running: AtomicBool::new(false), answered: watch::channel(0).0 }),
+            catalogue: catalogues().lock().unwrap_or_else(|e| e.into_inner()).get(db_path).cloned(),
         }
     }
 
@@ -204,6 +231,22 @@ impl Provider {
         match self.priority {
             Priority::Interactive => INTERACTIVE_WAIT,
             Priority::Bulk => BULK_WAIT,
+        }
+    }
+
+    /// `fetch`, through the server's catalogue cache when there is one.
+    /// Browsing is served what is held, fetched again behind it once old;
+    /// bulk reads take what is held however old, and keep what they fetch,
+    /// in their own lane.
+    async fn cached<T, F>(&self, key: String, fits: impl Fn(&T) -> bool, fetch: F) -> Result<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Future<Output = Result<T>> + Send + 'static,
+    {
+        match (&self.catalogue, self.priority) {
+            (None, _) => fetch.await,
+            (Some(cache), Priority::Interactive) => cache.get_or_fitting(key, fits, fetch).await,
+            (Some(cache), Priority::Bulk) => cache.held_or(key, fits, fetch).await,
         }
     }
 
@@ -610,6 +653,11 @@ impl Provider {
 
     /// An album and its tracklist, in one request.
     pub async fn album(&self, album_id: &str) -> Result<AlbumTracks> {
+        let (this, id) = (self.clone(), album_id.to_string());
+        self.cached(format!("album:{album_id}"), |_| true, async move { this.fetch_album(&id).await }).await
+    }
+
+    async fn fetch_album(&self, album_id: &str) -> Result<AlbumTracks> {
         let ask = |client: Client, id: String| async move { client.send(api::album(&id)).await };
         let (source, AlbumTracks { album, tracks }) = self.first(RefKind::Album, album_id, BROWSE_WAIT, ask).await?;
         let name = self.name(source)?;
@@ -629,6 +677,11 @@ impl Provider {
 
     /// One artist on their own: name, portrait and biography, no discography.
     pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
+        let this = self.clone();
+        self.cached(format!("artist:{artist_id}"), |_| true, async move { this.fetch_artist(artist_id).await }).await
+    }
+
+    async fn fetch_artist(&self, artist_id: i64) -> Result<RemoteArtist> {
         let ask = |client: Client, id: String| async move { client.send(api::artist(Self::number(id)?)).await };
         let (source, artist) = self.first(RefKind::Artist, &artist_id.to_string(), BROWSE_WAIT, ask).await?;
         let name = self.name(source)?;
@@ -663,7 +716,9 @@ impl Provider {
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.releases(artist_id, false, cap).await
+        let this = self.clone();
+        let fetch = async move { Ok((cap, this.releases(artist_id, false, cap).await?)) };
+        Ok(self.cached(format!("artist_albums:{artist_id}"), fits(cap), fetch).await?.1)
     }
 
     /// An artist's own latest releases, newest first: albums, EPs, singles
@@ -675,6 +730,12 @@ impl Provider {
     /// Artists the providers consider close to this one, from every one that
     /// can say. The same call the crawler expands the frontier with.
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
+        let this = self.clone();
+        let fetch = async move { Ok((limit, this.fetch_similar(artist_id, limit).await?)) };
+        Ok(self.cached(format!("similar_artists:{artist_id}"), fits(limit), fetch).await?.1)
+    }
+
+    async fn fetch_similar(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
         let able = self.able(|c| c.similar_artists).await?;
         let mut out = Vec::new();
         let mut seen = HashSet::new();
