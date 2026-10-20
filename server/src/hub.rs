@@ -5,7 +5,7 @@
 //! The crawl and the stages publish a status that clients poll, because a
 //! server cannot write a client's signals.
 
-use crate::cache::Cache;
+use crate::cache::{Cache, Revalidating};
 use crate::pipeline::{progress_of, Job, Paths, ProgressSlot};
 use crate::provider::{Capabilities, Provider, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::schema::{frontier, tracks};
@@ -59,13 +59,15 @@ pub struct Hub {
     /// Built on first use. The provider holds the account; without it,
     /// browsing the space still works, and only reaching for it fails.
     client: OnceLock<Provider>,
-    /// Albums, artists, discographies: they change on the scale of weeks.
-    catalogue: Cache,
+    /// Albums, artists, discographies: they change on the scale of weeks, so
+    /// one past its six hours is served while it is fetched again.
+    catalogue: Revalidating,
     /// Short, since the same words find new releases.
     searches: Cache,
     /// Playlists, which the account can change from anywhere else.
-    /// Cleared on our own writes, and short for everyone else's.
-    account: Cache,
+    /// Cleared on our own writes, and fetched again after two minutes for
+    /// everyone else's, behind the one held.
+    account: Revalidating,
     /// Each liked artist's newest releases. Outlives the background check's
     /// interval, which overwrites it, so a client never waits on the provider for an
     /// artist that check has seen.
@@ -186,9 +188,9 @@ impl Hub {
             model_dir: paths.model_dir.clone(),
             paths,
             client: OnceLock::new(),
-            catalogue: Cache::new(Duration::from_secs(6 * 60 * 60), 5_000),
+            catalogue: Revalidating::new(Duration::from_secs(6 * 60 * 60), Duration::from_secs(7 * 24 * 60 * 60), 5_000),
             searches: Cache::new(Duration::from_secs(5 * 60), 500),
-            account: Cache::new(Duration::from_secs(2 * 60), 200),
+            account: Revalidating::new(Duration::from_secs(2 * 60), Duration::from_secs(60 * 60), 200),
             releases: Cache::new(Duration::from_secs(48 * 60 * 60), 10_000),
             text: tokio::sync::OnceCell::new(),
             steerable: AtomicBool::new(steerable),
@@ -307,40 +309,45 @@ impl Hub {
 
     pub async fn playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
         self.account
-            .get_or(format!("playlists:{cap}"), async {
-                self.session().await?.user_playlists(cap).await
+            .get_or(format!("playlists:{cap}"), {
+                let provider = self.provider();
+                async move { provider.user_playlists(cap).await }
             })
             .await
     }
 
     pub async fn playlist_tracks(&self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
         self.account
-            .get_or(format!("playlist_tracks:{playlist_id}:{cap}"), async {
-                self.session().await?.playlist_tracks(playlist_id, cap).await
+            .get_or(format!("playlist_tracks:{playlist_id}:{cap}"), {
+                let provider = self.provider();
+                async move { provider.playlist_tracks(playlist_id, cap).await }
             })
             .await
     }
 
     pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>> {
         self.catalogue
-            .get_or(format!("album_tracks:{album_id}"), async {
-                Ok(self.session().await?.album_tracks(album_id).await?.1)
+            .get_or(format!("album_tracks:{album_id}"), {
+                let (provider, album_id) = (self.provider(), album_id.to_string());
+                async move { Ok(provider.album_tracks(&album_id).await?.1) }
             })
             .await
     }
 
     pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
         self.catalogue
-            .get_or(format!("artist:{artist_id}"), async {
-                self.session().await?.artist(artist_id).await
+            .get_or(format!("artist:{artist_id}"), {
+                let provider = self.provider();
+                async move { provider.artist(artist_id).await }
             })
             .await
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
         self.catalogue
-            .get_or(format!("artist_albums:{artist_id}:{cap}"), async {
-                self.session().await?.artist_albums(artist_id, cap).await
+            .get_or(format!("artist_albums:{artist_id}:{cap}"), {
+                let provider = self.provider();
+                async move { provider.artist_albums(artist_id, cap).await }
             })
             .await
     }
@@ -466,8 +473,9 @@ impl Hub {
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
         self.catalogue
-            .get_or(format!("similar_artists:{artist_id}:{limit}"), async {
-                self.session().await?.similar_artists(artist_id, limit).await
+            .get_or(format!("similar_artists:{artist_id}:{limit}"), {
+                let provider = self.provider();
+                async move { provider.similar_artists(artist_id, limit).await }
             })
             .await
     }
@@ -484,7 +492,7 @@ impl Hub {
     pub async fn export_playlist(&self, user: &str, name: &str, track_ids: &[i64]) -> Result<i64> {
         let name = format!("{user} · {name}");
         let id = self.session().await?.export_playlist(&name, track_ids).await?;
-        self.account.clear();
+        self.account.clear().await;
         Ok(id)
     }
 
