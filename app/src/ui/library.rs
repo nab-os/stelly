@@ -16,11 +16,13 @@ use super::{
     Search, Selection, SpaceMatches, SpaceReach, SpaceRow, row_keys, space_mark, LIST_CAP,
     SEARCH_LIMIT,
 };
-use dioxus::core::Task;
+use dioxus::core::{spawn_forever, Task};
 use dioxus::prelude::*;
 use crate::api::Target;
 use crate::backend::backend;
 use crate::catalogue::{RemoteAlbum, RemoteArtist, RemoteTrack};
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// Which kinds of result a search shows. Every search starts with all of
 /// them; the tracks/albums/artists chips narrow it, and tapping the lit one
@@ -302,14 +304,10 @@ pub struct Library {
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button, each with how
     /// far down it was scrolled when it was left.
-    pub history: Signal<Vec<(View, f64)>>,
+    pub history: Signal<Vec<(View, Left)>>,
     /// Views stepped back out of, for the mouse's forward button. Emptied by
     /// going anywhere new, as a browser does.
-    forward: Signal<Vec<(View, f64)>>,
-    /// How far down the main area is scrolled, kept by its `onscroll`. Not a
-    /// signal: it changes every frame of a scroll and nothing renders from
-    /// it, it is only read on the way out of a page.
-    pub scroll: CopyValue<f64>,
+    forward: Signal<Vec<(View, Left)>>,
     /// Where the page just asked for should be scrolled to, applied by
     /// `MainScreen` once it has rendered. Sent from `go` or `back` directly,
     /// the scroll reached the webview before the new page did and was set on
@@ -488,7 +486,6 @@ impl Library {
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
             forward: Signal::new(Vec::new()),
-            scroll: CopyValue::new(0.0),
             restore: Signal::new(None),
             visit: CopyValue::new(Visit::default()),
             pending: Signal::new(None),
@@ -677,10 +674,10 @@ impl Library {
 
     /// Navigate, remembering where we came from.
     pub(crate) fn go(mut self, target: View) {
-        leaving("go", 0.0);
+        let left = leaving("go", 0.0);
         let previous = self.view.peek().clone();
         if previous != target {
-            self.history.write().push((previous, self.scroll.cloned()));
+            self.history.write().push((previous, left));
             self.forward.write().clear();
         }
         self.show(target);
@@ -691,8 +688,9 @@ impl Library {
     pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
         if let Some((view, scroll)) = previous {
-            leaving("back", scroll);
-            self.forward.write().push((self.view.peek().clone(), self.scroll.cloned()));
+            let scroll = scroll.get();
+            let left = leaving("back", scroll);
+            self.forward.write().push((self.view.peek().clone(), left));
             self.show(view);
             self.arrive(scroll);
         }
@@ -713,8 +711,9 @@ impl Library {
     pub(crate) fn forward(mut self) {
         let next = self.forward.write().pop();
         if let Some((view, scroll)) = next {
-            leaving("forward", scroll);
-            self.history.write().push((self.view.peek().clone(), self.scroll.cloned()));
+            let scroll = scroll.get();
+            let left = leaving("forward", scroll);
+            self.history.write().push((self.view.peek().clone(), left));
             self.show(view);
             self.arrive(scroll);
         }
@@ -1055,12 +1054,41 @@ fn timing_name(view: &View) -> &'static str {
     }
 }
 
+/// How far down a page was scrolled when it was left, for going back to it.
+/// Filled in when the webview answers `leaving`, a few milliseconds after:
+/// long before anyone could go back.
+#[derive(Clone, Default, Debug)]
+pub struct Left(Rc<Cell<f64>>);
+
+impl Left {
+    fn get(&self) -> f64 {
+        self.0.get()
+    }
+}
+
 /// Tells transitions.js a page is about to be replaced, how, and where the
 /// new one will be scrolled to. Sent before the view changes, so it reaches
 /// the webview ahead of the render and the old page is still there to copy
-/// and measure.
-fn leaving(kind: &str, scroll: f64) {
-    document::eval(&format!("window.stellyLeaving && window.stellyLeaving('{kind}', {scroll});"));
+/// and measure, and still scrolled where it was left: the answer is that.
+/// Read once here rather than sent over on every scroll event, dozens a
+/// second, for the one that counts.
+fn leaving(kind: &str, scroll: f64) -> Left {
+    let left = Left::default();
+    let eval = document::eval(&format!(
+        "const body = document.querySelector('.screen-body');
+        const left = body ? body.scrollTop : 0;
+        window.stellyLeaving && window.stellyLeaving('{kind}', {scroll});
+        return left;"
+    ));
+    let cell = left.0.clone();
+    // Not tied to the scope that asked: a tile opening a page is gone with
+    // the page it was on before the answer comes.
+    spawn_forever(async move {
+        if let Ok(top) = eval.join::<f64>().await {
+            cell.set(top);
+        }
+    });
+    left
 }
 
 /// A new page starts at its top, and one gone back to where it was left. The
@@ -1373,10 +1401,6 @@ pub fn MainScreen() -> Element {
 
             div {
                 class: "screen-body",
-                onscroll: move |event: Event<ScrollData>| {
-                    let mut scroll = library.scroll;
-                    scroll.set(event.scroll_top());
-                },
                 match view {
                     // Keyed on what they show: going from one album straight
                     // to another is otherwise a prop change on the same
