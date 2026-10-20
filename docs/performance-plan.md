@@ -142,7 +142,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 6.1 | Every long list rendered in growing windows, or `content-visibility: auto` | `app/src/ui/library.rs:1533, 1977`, `screens.rs:522, 743` | S–M | |
+| 6.1 | Every long list rendered in growing windows, or `content-visibility: auto` | `app/src/ui/library.rs:1533, 1977`, `screens.rs:522, 743` | S–M | #151 |
 | 6.2 | Queue rows mounted once the drawer has opened | `app/src/ui/queue.rs:122` | S–M | |
 | 6.3 | Transitions: visible clone only, cover flown with `transform`, no per-frame mask, page-in on `.hero-meta` | `app/assets/transitions.js` | M | |
 | 6.4 | Scroll position kept in JS, not sent to Rust per event | `app/src/ui/library.rs:1065` | M | |
