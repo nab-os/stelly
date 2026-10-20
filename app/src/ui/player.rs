@@ -176,7 +176,6 @@ fn receive(player: Player, update: Update) {
     {
         let mut mirror = mirror();
         mirror.me = update.you;
-        mirror.shared = true;
 
         let mut session = update.session;
         // With commands still in flight this copy is ahead, and an older
@@ -193,12 +192,44 @@ fn receive(player: Player, update: Update) {
             }
             session.queue = mirror.session().queue.clone();
         }
+        let first = !mirror.shared;
+        mirror.shared = true;
+        if first || moved(mirror.session(), &session) {
+            crate::cache::write_soon(SESSION_CACHE, CachedSession::of(&session));
+        }
         mirror.clocked = Clocked::new(session);
     }
     show(player);
     if resync {
         spawn_forever(catch_up(player));
     }
+}
+
+/// The queue and the track as the session last had them, for the next start
+/// to show while the stream is joined. Shown only, never played.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedSession {
+    queue: Vec<RemoteTrack>,
+    index: usize,
+    position: f64,
+}
+
+impl CachedSession {
+    fn of(session: &Session) -> Self {
+        CachedSession {
+            queue: session.queue.clone(),
+            index: session.index,
+            position: session.position,
+        }
+    }
+}
+
+const SESSION_CACHE: &str = "session.json";
+
+/// Whether the session moved to another queue or track, which is all the
+/// cache keeps: a position report every few seconds is not worth a write.
+fn moved(before: &Session, after: &Session) -> bool {
+    before.queue_version != after.queue_version || before.index != after.index
 }
 
 /// Fetch the whole session, after a refusal or a push that could not be
@@ -1211,6 +1242,28 @@ pub fn use_session(player: Player) {
         let (outbox, mut commands) = tokio::sync::mpsc::unbounded_channel::<Command>();
         *OUTBOX.lock().unwrap_or_else(|e| e.into_inner()) = Some(outbox);
 
+        // Last time's queue and track, so the bar is not empty until the
+        // stream's first frame. Paused, whatever it was doing then, and only
+        // in the signals: the mirror stays empty, so nothing plays from it
+        // and the first frame replaces it all.
+        spawn(async move {
+            let read = tokio::task::spawn_blocking(|| crate::cache::read::<CachedSession>(SESSION_CACHE)).await;
+            let Ok(Some(cached)) = read else {
+                return;
+            };
+            let untouched = {
+                let mirror = mirror();
+                !mirror.shared && mirror.session().queue.is_empty()
+            };
+            if untouched && !cached.queue.is_empty() {
+                let mut position = player.position;
+                set_if_changed(player.index, cached.index.min(cached.queue.len() - 1));
+                set_if_changed(player.queue, cached.queue);
+                set_if_changed(player.playing, false);
+                position.set((cached.position, 0.0));
+            }
+        });
+
         spawn(async move {
             let mut status = player.status;
             while let Some(command) = commands.recv().await {
@@ -1272,6 +1325,15 @@ mod tests {
     use super::*;
 
     const LOSSLESS: Quality = Quality::Lossless;
+
+    #[test]
+    fn only_a_new_queue_or_track_is_cached() {
+        let before = Session { queue_version: 3, index: 1, position: 10.0, ..Session::default() };
+        let reported = Session { position: 20.0, playing: true, version: 9, ..before.clone() };
+        assert!(!moved(&before, &reported));
+        assert!(moved(&before, &Session { index: 2, ..before.clone() }));
+        assert!(moved(&before, &Session { queue_version: 4, ..before.clone() }));
+    }
 
     #[test]
     fn the_next_track_is_signed_once() {

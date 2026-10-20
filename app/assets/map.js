@@ -51,7 +51,7 @@
 
   // The offscreen rasterisation of every visible point, in device pixels;
   // filled in by the cloud layer below. Declared up here because the initial
-  // `loadPoints` invalidates it before that section is reached.
+  // `bindPoints` invalidates it before that section is reached.
   const cloud = {
     canvas: null, ctx: null, img: null, bgRow: null,
     w: 0, h: 0, offX: 0, offY: 0,
@@ -80,10 +80,22 @@
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
   }
 
+  // Whether any points have been bound yet. Not at start: they are read and
+  // parsed only once the map is first opened, which most sessions never do,
+  // and Rust says when by calling `stellyReloadPoints`.
+  let loaded = false;
+
   async function loadPoints() {
     const began = performance.now();
-    meta = await (await fetch("/points/meta")).json();
+    const read = await (await fetch("/points/meta")).json();
     const buffer = await (await fetch("/points/data")).arrayBuffer();
+    bindPoints(read, buffer);
+    loaded = true;
+    timing("map-points", `${n} points, ${(performance.now() - began).toFixed(1)}ms to read`);
+  }
+
+  function bindPoints(read, buffer) {
+    meta = read;
     n = meta.n;
     // Views match the layout documented in map.rs.
     ids = new Float64Array(buffer, 0, n);
@@ -101,7 +113,6 @@
     for (let i = 0; i < n; i++) rank[i] = rankOf(ids[i]);
     buildGrid();
     cloud.valid = false;
-    timing("map-points", `${n} points, ${(performance.now() - began).toFixed(1)}ms to read`);
   }
 
   // ------------------------------------------------------------------- grid
@@ -159,11 +170,15 @@
     return c < 0 ? 0 : c >= grid.side ? grid.side - 1 : c;
   }
 
-  await loadPoints();
+  // Nothing to draw until the map is opened and the points are read.
+  bindPoints(
+    { n: 0, genres: [], labels: [], bounds: { min_x: 0, max_x: 0, min_y: 0, max_y: 0 }, has_layout: false },
+    new ArrayBuffer(0),
+  );
 
   let view = { scale: 1, offsetX: 0, offsetY: 0 };
   // Whether `view` has been fitted to real points yet. Not just to a real
-  // rect: until the server answers, the points are `EMPTY_META`, whose bounds
+  // rect: until the points are read there are none, an empty set's bounds
   // are all zero, and fitting those zooms in by a factor of ~1e8.
   let fitted = false;
   let hover = -1;
@@ -173,6 +188,10 @@
   let pointer = null;
   let selected = -1;
   let route = [];
+  // The route as Rust gave it, track ids, kept so it can be found again in
+  // points that arrive after it: on a first open the route is pushed before
+  // the points are read.
+  let routeIds = [];
 
   // The canvas rect, cached. Reading it inside draw forces a layout on every
   // frame of a drag, which is exactly when there is no budget for one.
@@ -698,6 +717,13 @@
 
   function draw() {
     const began = unreported ? performance.now() : 0;
+    if (!loaded) {
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#8b90a3";
+      ctx.font = "13px system-ui, sans-serif";
+      ctx.fillText("Reading the map…", 20, 30);
+      return;
+    }
     if (!meta.has_layout) {
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = "#8b90a3";
@@ -1231,17 +1257,19 @@
 
   // Rust calls this when a path is built. Ids only, tiny payload.
   window.stellySetRoute = (trackIds) => {
+    routeIds = trackIds;
     route = trackIds.map((id) => byId.get(id)).filter((i) => i !== undefined);
     schedule();
   };
 
-  // Rust calls this after the block list changes. Selection and route are
-  // dropped: their indices referred to the old point set.
+  // Rust calls this on the first open, and whenever the points change after
+  // that. The indices of the selection and the route referred to the old
+  // point set, so both are found again by track id.
   window.stellyReloadPoints = async () => {
     await loadPoints();
     selected = -1;
     hover = -1;
-    route = [];
+    route = routeIds.map((id) => byId.get(id)).filter((i) => i !== undefined);
     // The first real points, if the map was opened before they arrived.
     if (!fitted) fitted = fit();
     schedule();

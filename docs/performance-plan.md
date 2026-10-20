@@ -89,20 +89,20 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 3.5 | Play album from a row menu reuses tracks already held | `app/src/ui/menu.rs:320` | S | #116 |
 | 3.6 | Likes flip at once, roll back on error | `app/src/ui/screens.rs:26` | S | #117 |
 | 3.7 | Liked ids from the home answer and `favourites.json`, not fetched twice | `app/src/ui/library.rs:428` | S | #118 |
-| 3.8 | Map points loaded on the first map open, not at launch | `app/src/app.rs:353, 752`, `assets/map.js:150` | S | |
-| 3.9 | Space cache written only on a new stamp, off the UI thread; parsed off it too | `app/src/app.rs:354, 1065` | S | |
+| 3.8 | Map points loaded on the first map open, not at launch | `app/src/app.rs:353, 752`, `assets/map.js:150` | S | #119 |
+| 3.9 | Space cache written only on a new stamp, off the UI thread; parsed off it too | `app/src/app.rs:354, 1065` | S | #120 |
 | 3.10 | Rows keyed by id, not index | `app/src/ui/library.rs`, `queue.rs:160`, `screens.rs` | S | |
 | 3.11 | Search keeps its results while refining; a cancellable 150 ms debounce | `app/src/ui/library.rs:692`, `app.rs:698, 830` | S | |
 | 3.12 | Seek and volume commit on release | `app/src/ui/player.rs:787, 904` | S | |
 | 3.13 | Android: non-passive `touchmove` only during a queue drag | `app/assets/queue-drag.js:194, 283` | S | |
 | 3.14 | Map: `resize()` skipped when unchanged; cached rect on touch; card placed with `transform` | `app/assets/map.js:179, 759, 1027` | S | |
-| 3.15 | Android HTTP client built once, reused by the update check | `app/src/backend/remote.rs:729`, `update/mod.rs:81` | S | |
+| 3.15 | Android HTTP client built once, reused by the update check | `app/src/backend/remote.rs:729`, `update/mod.rs:81` | S | #121 |
 | 3.16 | Artist albums and similar fetched together; capabilities and providers too | `app/src/ui/library.rs:916`, `app.rs:525` | S | |
 | 3.17 | "Liked" read without cloning the sets per tick; seek line in its own component | `app/src/ui/player.rs:755`, `library.rs:462` | S | |
 | 3.18 | Covers decoded before shown, applied at once when cached, off-screen ones skipped, `data-cover` changes observed, larger heroes | `app/assets/covers.js` | S | |
 | 3.19 | `transform`/`opacity` animations instead of `box-shadow` and `left` | `app/assets/style.css:1430, 1654` | S | |
 | 3.20 | The playing highlight follows the track (`current()` peeks); a class toggled in JS | `app/src/ui/player.rs:51` | S | |
-| 3.21 | Hidden artists and the session cached on disk | `app/src/app.rs:476` | S | |
+| 3.21 | Hidden artists and the session cached on disk | `app/src/app.rs:476` | S | #122 |
 | 3.22 | The initial view opened synchronously, not in `use_future` | `app/src/app.rs:563` | S | |
 
 ## Phase 4: provider quick wins

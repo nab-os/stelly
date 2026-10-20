@@ -3,7 +3,7 @@
 //! In the library rather than `main.rs` because an Android build has no
 //! `main`: the APK loads the .so and calls `start_app`.
 
-use crate::api::{Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
+use crate::api::{BlockedArtist, Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
 use crate::backend::{self, backend};
 use crate::ui::{
     icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
@@ -348,17 +348,14 @@ fn Shell() -> Element {
     let pipeline = use_context_provider(Pipeline::new);
     use_context_provider(Family::new);
 
-    // What is known of the space: what the disk had at once, then whatever
-    // the server says behind the window. Nothing waits on the network to open.
-    let space = use_context_provider(|| {
-        let cached = crate::cache::read::<CachedSpace>(SPACE_CACHE).unwrap_or_default();
-        load_cached_points();
-        Space {
-            info: Signal::new(cached.info),
-            index: Signal::new(Rc::new(cached.index)),
-            offline: Signal::new(None),
-            seen: Signal::new(0),
-        }
+    // What is known of the space: nothing for the first frame, then what the
+    // disk had, then whatever the server says behind the window. Nothing
+    // waits on the network to open, nor on two megabytes of JSON to paint.
+    let space = use_context_provider(|| Space {
+        info: Signal::new(SpaceInfo::default()),
+        index: Signal::new(Rc::new(SpaceIndex::default())),
+        offline: Signal::new(None),
+        seen: Signal::new(0),
     });
 
     // The blocks decide the sliders, and the server whether steering is on.
@@ -414,6 +411,12 @@ fn Shell() -> Element {
     let mut phase = use_context::<Signal<Phase>>();
     use_future(move || async move {
         let mut space = space;
+        // The disk's copy, read and parsed off the UI thread, before the
+        // server is asked so its answer is never overwritten by an older one.
+        if let Ok(Some(cached)) = tokio::task::spawn_blocking(|| crate::cache::read::<CachedSpace>(SPACE_CACHE)).await {
+            space.index.set(Rc::new(cached.index));
+            space.info.set(cached.info);
+        }
         let mut done: Option<(u64, u64)> = None;
         let mut wait = std::time::Duration::from_secs(2);
         loop {
@@ -443,27 +446,60 @@ fn Shell() -> Element {
         }
     });
 
-    // The map's points, fetched the first time the map is opened on a stamp
-    // they do not match rather than with every refresh: on a phone that is
-    // a megabyte most sessions never look at.
+    // The map's points, read and parsed only once the map is first opened:
+    // the disk's copy at once, then the server's if the stamp moved. Ten
+    // megabytes on disk and a few hundred ms of the webview's own thread,
+    // which most sessions never look at and the favourites are painting on.
     let mut fetching_points = use_signal(|| false);
+    // Whether the disk was read, and whether map.js has drawn any points yet.
+    let mut points_read = use_signal(|| false);
+    let mut points_shown = use_signal(|| false);
     use_effect(move || {
         let stamp = space.info.read().stamp.clone();
-        if !map_open() || stamp.is_empty() || points_stamp().as_deref() == Some(stamp.as_str()) {
+        if !map_open() || *fetching_points.peek() {
             return;
         }
-        if *fetching_points.peek() {
+        let current = stamp.is_empty() || points_stamp().as_deref() == Some(stamp.as_str());
+        if *points_shown.peek() && current {
             return;
         }
         fetching_points.set(true);
         spawn(async move {
-            let fetched = tokio::try_join!(backend().space_points(false), backend().space_points(true));
-            if let Ok((data, meta)) = fetched {
-                crate::cache::write_bytes(POINTS_CACHE, &data);
-                crate::cache::write_bytes(POINTS_META_CACHE, &meta);
-                crate::cache::write_bytes(POINTS_STAMP_CACHE, stamp.as_bytes());
-                *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Points { stamp, data, meta });
-                document::eval("window.stellyReloadPoints && window.stellyReloadPoints();");
+            if !*points_read.peek() {
+                points_read.set(true);
+                if let Ok(Some(cached)) = tokio::task::spawn_blocking(read_cached_points).await {
+                    *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(cached);
+                    show_points().await;
+                    points_shown.set(true);
+                }
+            }
+            let stamp = space.info.peek().stamp.clone();
+            if !stamp.is_empty() && points_stamp().as_deref() != Some(stamp.as_str()) {
+                let fetched = tokio::try_join!(backend().space_points(false), backend().space_points(true));
+                if let Ok((data, meta)) = fetched {
+                    // Ten megabytes, written off the UI thread, and before
+                    // they are held: a second request for a body reads it
+                    // back from here.
+                    let points = Points::new(stamp, data, meta);
+                    let points = tokio::task::spawn_blocking(move || {
+                        write_points(&points);
+                        points
+                    })
+                    .await;
+                    let Ok(points) = points else {
+                        fetching_points.set(false);
+                        return;
+                    };
+                    *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(points);
+                    show_points().await;
+                    points_shown.set(true);
+                }
+            }
+            // Nothing on disk and nothing from the server: the map says so
+            // rather than reading forever.
+            if !*points_shown.peek() {
+                show_points().await;
+                points_shown.set(true);
             }
             fetching_points.set(false);
         });
@@ -471,24 +507,32 @@ fn Shell() -> Element {
 
     // Write, then ask the space again: hiding moves its stamp, which brings
     // down the index and the map without the hidden artist.
-    let blocked = use_signal(Vec::new);
+    //
+    // From the disk first, a few entries, so a hidden artist does not flash
+    // into the favourites while the server is asked again.
+    let blocked = use_signal(|| crate::cache::read::<Vec<BlockedArtist>>(BLOCKED_CACHE).unwrap_or_default());
+    let heard_blocked = move |found: Vec<BlockedArtist>| {
+        let mut blocked = blocked;
+        crate::cache::write(BLOCKED_CACHE, &found);
+        if *blocked.peek() != found {
+            blocked.set(found);
+        }
+    };
 
     use_future(move || async move {
-        let mut blocked = blocked;
         if let Ok(found) = backend().blocked_artists().await {
-            blocked.set(found);
+            heard_blocked(found);
         }
     });
 
     let apply_block = use_callback(move |(artist_id, name): (i64, String)| {
         spawn(async move {
-            let mut blocked = blocked;
             if let Err(err) = backend().block_artist(artist_id, &name).await {
                 eprintln!("could not hide artist {artist_id}: {err:#}");
                 return;
             }
             if let Ok(found) = backend().blocked_artists().await {
-                blocked.set(found);
+                heard_blocked(found);
             }
             *nudge.write() += 1;
         });
@@ -496,13 +540,12 @@ fn Shell() -> Element {
 
     let lift_block = use_callback(move |artist_id: i64| {
         spawn(async move {
-            let mut blocked = blocked;
             if let Err(err) = backend().unblock_artist(artist_id).await {
                 eprintln!("could not unhide artist {artist_id}: {err:#}");
                 return;
             }
             if let Ok(found) = backend().blocked_artists().await {
-                blocked.set(found);
+                heard_blocked(found);
             }
             *nudge.write() += 1;
         });
@@ -726,18 +769,12 @@ fn Shell() -> Element {
     // arrive the map is empty, and `stellyReloadPoints` draws them when they do.
     crate::platform::use_asset_handler("points", move |request, responder| {
         let path = request.uri().path().to_string();
-        let held = POINTS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = POINTS.lock().unwrap_or_else(|e| e.into_inner());
 
         let (content_type, body) = if path.ends_with("/meta") {
-            (
-                "application/json",
-                held.as_ref().map(|points| points.meta.clone()).unwrap_or_else(|| EMPTY_META.as_bytes().to_vec()),
-            )
+            ("application/json", serve(held.as_mut(), |points| &mut points.meta, POINTS_META_CACHE, EMPTY_META.as_bytes()))
         } else {
-            (
-                "application/octet-stream",
-                held.as_ref().map(|points| points.data.clone()).unwrap_or_default(),
-            )
+            ("application/octet-stream", serve(held.as_mut(), |points| &mut points.data, POINTS_CACHE, &[]))
         };
 
         responder.respond(
@@ -1006,15 +1043,25 @@ const POINTS_CACHE: &str = "points.bin";
 const POINTS_META_CACHE: &str = "points-meta.json";
 const POINTS_STAMP_CACHE: &str = "points.stamp";
 const ME_CACHE: &str = "me.json";
+const BLOCKED_CACHE: &str = "blocked.json";
 const PROVIDER_CACHE: &str = "provider.json";
 const PROVIDERS_CACHE: &str = "providers.json";
 
 /// The map's points as `map.js` reads them, and the stamp they were cut at.
 /// A global because the asset handler answers outside any scope.
+///
+/// The bodies are handed to the webview rather than copied for it, so each is
+/// held only until map.js asks for it, which it does once per set of points.
 struct Points {
     stamp: String,
-    data: Vec<u8>,
-    meta: Vec<u8>,
+    data: Option<Vec<u8>>,
+    meta: Option<Vec<u8>>,
+}
+
+impl Points {
+    fn new(stamp: String, data: Vec<u8>, meta: Vec<u8>) -> Self {
+        Points { stamp, data: Some(data), meta: Some(meta) }
+    }
 }
 
 static POINTS: Mutex<Option<Points>> = Mutex::new(None);
@@ -1022,18 +1069,48 @@ static POINTS: Mutex<Option<Points>> = Mutex::new(None);
 /// What `/points/meta` says before there are any points: nothing to draw.
 const EMPTY_META: &str = r#"{"n":0,"genres":[],"labels":[],"bounds":{"min_x":0,"max_x":0,"min_y":0,"max_y":0},"has_layout":false}"#;
 
-/// Last session's points, so the map draws at once even offline.
-fn load_cached_points() {
-    let cached = (|| {
-        Some(Points {
-            stamp: String::from_utf8(crate::cache::read_bytes(POINTS_STAMP_CACHE)?).ok()?,
-            data: crate::cache::read_bytes(POINTS_CACHE)?,
-            meta: crate::cache::read_bytes(POINTS_META_CACHE)?,
-        })
-    })();
-    if cached.is_some() {
-        *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = cached;
+/// Last session's points, so the map draws at once even offline. Ten
+/// megabytes, so read off the UI thread.
+fn read_cached_points() -> Option<Points> {
+    Some(Points::new(
+        String::from_utf8(crate::cache::read_bytes(POINTS_STAMP_CACHE)?).ok()?,
+        crate::cache::read_bytes(POINTS_CACHE)?,
+        crate::cache::read_bytes(POINTS_META_CACHE)?,
+    ))
+}
+
+fn write_points(points: &Points) {
+    let bodies = [(POINTS_CACHE, &points.data), (POINTS_META_CACHE, &points.meta)];
+    for (name, body) in bodies {
+        if let Some(body) = body {
+            crate::cache::write_bytes(name, body);
+        }
     }
+    crate::cache::write_bytes(POINTS_STAMP_CACHE, points.stamp.as_bytes());
+}
+
+/// One of the held bodies, moved out for the webview. Asked for a second
+/// time, which map.js does not do, it is read back from the disk the points
+/// were written to; with no points at all, `empty`.
+fn serve(
+    held: Option<&mut Points>,
+    body: impl FnOnce(&mut Points) -> &mut Option<Vec<u8>>,
+    cached: &str,
+    empty: &[u8],
+) -> Vec<u8> {
+    match held {
+        Some(points) => body(points)
+            .take()
+            .or_else(|| crate::cache::read_bytes(cached))
+            .unwrap_or_else(|| empty.to_vec()),
+        None => empty.to_vec(),
+    }
+}
+
+/// Have map.js read the points held now, and wait until it has: a second
+/// set must not be swapped in while it is between its two requests.
+async fn show_points() {
+    let _ = document::eval("if (window.stellyReloadPoints) await window.stellyReloadPoints(); return true;").await;
 }
 
 fn points_stamp() -> Option<String> {
@@ -1075,17 +1152,16 @@ async fn refresh_space(
             generator.invalidate();
         }
     }
-    if *space.info.peek() != info {
-        space.info.set(info);
+    if *space.info.peek() == info {
+        return Ok(());
     }
+    space.info.set(info.clone());
 
-    crate::cache::write(
-        SPACE_CACHE,
-        &CachedSpace {
-            info: space.info.peek().clone(),
-            index: (**space.index.peek()).clone(),
-        },
-    );
+    // Only when something moved, which is what the stamp is for; most
+    // refreshes are the same answer again. Two megabytes, so serialised and
+    // written off the UI thread, and waited on so two never cross.
+    let cached = CachedSpace { info, index: (**space.index.peek()).clone() };
+    let _ = tokio::task::spawn_blocking(move || crate::cache::write(SPACE_CACHE, &cached)).await;
     Ok(())
 }
 
@@ -1109,4 +1185,24 @@ enum Undone {
     Queue,
     Panel,
     Map { route: bool },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_body_is_handed_over_not_copied() {
+        let mut points = Points::new("s".into(), vec![1, 2, 3], b"{}".to_vec());
+        let data = serve(Some(&mut points), |points| &mut points.data, POINTS_CACHE, &[]);
+        assert_eq!(data, vec![1, 2, 3]);
+        assert!(points.data.is_none());
+        assert_eq!(points.meta.as_deref(), Some(&b"{}"[..]));
+    }
+
+    #[test]
+    fn no_points_serve_the_empty_body() {
+        let meta = serve(None, |points| &mut points.meta, POINTS_META_CACHE, EMPTY_META.as_bytes());
+        assert_eq!(meta, EMPTY_META.as_bytes());
+    }
 }

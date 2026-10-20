@@ -805,8 +805,18 @@ pub fn is_unreachable(err: &anyhow::Error) -> bool {
 /// against the certificates Android itself trusts, read off disk: the system
 /// store, the one Conscrypt updates through its APEX on 14+, and whatever
 /// the user installed, which is how a private CA in front of nginx gets in.
+///
+/// Built once: that is reading and parsing every file in those folders, well
+/// over a hundred, and the update check and the downloads would otherwise do
+/// it again each time. The clones handed out share one pool.
 #[cfg(target_os = "android")]
 pub(crate) fn http_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(trusting_the_system).clone()
+}
+
+#[cfg(target_os = "android")]
+fn trusting_the_system() -> reqwest::Client {
     const STORES: [&str; 3] = [
         "/apex/com.android.conscrypt/cacerts",
         "/system/etc/security/cacerts",
