@@ -170,15 +170,35 @@ impl Remote {
         path: &str,
         request: reqwest::RequestBuilder,
     ) -> Result<impl AsRef<[u8]>> {
+        self.exchange_unless(method, path, request, None)
+            .await?
+            .context("the server answered 304 to a request naming no copy")
+    }
+
+    /// `exchange`, sending `held` as `If-None-Match`: `None` when the server
+    /// answers that the copy it names is still current, and sends no body.
+    async fn exchange_unless(
+        &self,
+        method: &str,
+        path: &str,
+        mut request: reqwest::RequestBuilder,
+        held: Option<String>,
+    ) -> Result<Option<impl AsRef<[u8]> + use<>>> {
+        if let Some(tag) = held {
+            request = request.header(reqwest::header::IF_NONE_MATCH, tag);
+        }
         let started = crate::timings::clock();
         let sent = request.bearer_auth(&self.token).send().await;
         let status = sent.as_ref().ok().map(|response| response.status().as_u16());
         let body = async {
             let response = sent.with_context(|| format!("{method} {}", self.url(path)))?;
-            anyhow::Ok(Self::check(response).await?.bytes().await?)
+            if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+                return Ok(None);
+            }
+            anyhow::Ok(Some(Self::check(response).await?.bytes().await?))
         }
         .await;
-        let bytes = body.as_ref().map_or(0, |body| body.len());
+        let bytes = body.as_ref().ok().and_then(Option::as_ref).map_or(0, |body| body.len());
         crate::timings::http(method, path, status, started, bytes);
         body
     }
@@ -549,8 +569,14 @@ impl Remote {
         self.get("/api/space").await
     }
 
-    pub async fn space_index(&self) -> Result<SpaceIndex> {
-        self.get("/api/space/index").await
+    /// The space's index, or `None` when the one at `held`, a stamp, is
+    /// still current. A server from before tags ignores the stamp and sends
+    /// it again.
+    pub async fn space_index(&self, held: &str) -> Result<Option<SpaceIndex>> {
+        let path = "/api/space/index";
+        let request = self.http.get(self.url(path)).timeout(REQUEST_TIMEOUT);
+        let body = self.exchange_unless("GET", path, request, held_tag(held, "index")).await?;
+        body.map(|body| serde_json::from_slice(body.as_ref()).map_err(Into::into)).transpose()
     }
 
     /// The space's rows for these ids, leaving out any it does not hold.
@@ -578,10 +604,13 @@ impl Remote {
         .await
     }
 
-    /// The map's points, `map::payload`'s binary, or with `meta` its JSON.
-    pub async fn space_points(&self, meta: bool) -> Result<Vec<u8>> {
-        let path = if meta { "/api/space/points/meta" } else { "/api/space/points" };
-        Ok(self.exchange("GET", path, self.http.get(self.url(path)).timeout(POINTS_TIMEOUT)).await?.as_ref().to_vec())
+    /// The map's points, `map::payload`'s binary, or with `meta` its JSON;
+    /// `None` when the ones at `held`, a stamp, are still current.
+    pub async fn space_points(&self, meta: bool, held: &str) -> Result<Option<Vec<u8>>> {
+        let (path, name) = if meta { ("/api/space/points/meta", "meta") } else { ("/api/space/points", "points") };
+        let request = self.http.get(self.url(path)).timeout(POINTS_TIMEOUT);
+        let body = self.exchange_unless("GET", path, request, held_tag(held, name)).await?;
+        Ok(body.map(|body| body.as_ref().to_vec()))
     }
 
     /// A track of the space in words, the ones it sounds like most next to
@@ -717,6 +746,12 @@ async fn read_session(
         }
     }
     Followed::Dropped
+}
+
+/// The tag a copy of one of the space's bodies at `stamp` was sent with;
+/// none for no copy.
+fn held_tag(stamp: &str, body: &str) -> Option<String> {
+    (!stamp.is_empty()).then(|| crate::api::space_tag(stamp, body))
 }
 
 #[cfg(not(target_os = "android"))]

@@ -475,9 +475,15 @@ fn Shell() -> Element {
                 }
             }
             let stamp = space.info.peek().stamp.clone();
-            if !stamp.is_empty() && points_stamp().as_deref() != Some(stamp.as_str()) {
-                let fetched = tokio::try_join!(backend().space_points(false), backend().space_points(true));
-                if let Ok((data, meta)) = fetched {
+            let held = points_stamp().unwrap_or_default();
+            if !stamp.is_empty() && held != stamp {
+                let fetched = tokio::try_join!(
+                    backend().space_points(false, &held),
+                    backend().space_points(true, &held)
+                );
+                // Either body still current means the stamp moved back to
+                // the held points: they stay, as on a failure.
+                if let Ok((Some(data), Some(meta))) = fetched {
                     // Ten megabytes, written off the UI thread, and before
                     // they are held: a second request for a body reads it
                     // back from here.
@@ -1142,16 +1148,21 @@ async fn refresh_space(
     let info = backend().space_info().await?;
     let previous = space.info.peek().stamp.clone();
 
-    if info.stamp != space.index.peek().stamp {
+    let held = space.index.peek().stamp.clone();
+    if info.stamp != held {
+        // `None` is the held index still being current, the stamp having
+        // moved back to it since `info` was asked.
         let index = if info.stamp.is_empty() {
-            SpaceIndex::default()
+            Some(SpaceIndex::default())
         } else {
-            backend().space_index().await?
+            backend().space_index(&held).await?
         };
-        if selected.peek().is_some_and(|id| !index.ids.contains(&id)) {
-            selected.set(None);
+        if let Some(index) = index {
+            if selected.peek().is_some_and(|id| !index.ids.contains(&id)) {
+                selected.set(None);
+            }
+            space.index.set(Rc::new(index));
         }
-        space.index.set(Rc::new(index));
     }
 
     if info.stamp != previous {

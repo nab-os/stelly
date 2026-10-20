@@ -8,6 +8,7 @@
 //! search.
 
 use anyhow::Result;
+use axum::body::Bytes;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -74,12 +75,42 @@ struct Haystack {
 /// Everything a client caches, worked out once per load or block change.
 pub struct Derived {
     pub index: SpaceIndex,
+    /// `index` as JSON.
+    pub index_body: Prepared,
     /// `map::payload`, the binary the map's canvas reads.
-    pub points: Vec<u8>,
+    pub points: Prepared,
     /// `map::meta`, as JSON.
-    pub meta: Vec<u8>,
+    pub meta: Prepared,
     pub in_space: i64,
     pub on_map: i64,
+}
+
+/// One of the bodies a client caches, serialised and compressed once here
+/// rather than per request: megabytes each, asked for by every device after
+/// every rebuild.
+pub struct Prepared {
+    /// Names this body at this stamp, for `If-None-Match`.
+    pub tag: String,
+    pub content_type: &'static str,
+    pub raw: Bytes,
+    pub zstd: Bytes,
+}
+
+/// The level the compression layer used. Level 19 takes a fifth off the
+/// labels but adds a second to every derive, which hiding an artist waits on.
+const ZSTD_LEVEL: i32 = 3;
+
+impl Prepared {
+    fn new(stamp: &str, name: &str, content_type: &'static str, raw: Vec<u8>) -> Self {
+        // Only fails on a bad level or out of memory.
+        let zstd = zstd::bulk::compress(&raw, ZSTD_LEVEL).unwrap_or_default();
+        Prepared {
+            tag: stelly_core::api::space_tag(stamp, name),
+            content_type,
+            raw: Bytes::from(raw),
+            zstd: Bytes::from(zstd),
+        }
+    }
 }
 
 impl SpaceService {
@@ -364,15 +395,31 @@ fn derive(catalog: &Catalog, built_at: &str) -> Derived {
     let in_space = ids.len() as i64;
     let on_map = catalog.visible().filter(|&i| catalog.get(i).x.is_some()).count() as i64;
 
+    let index = SpaceIndex {
+        stamp,
+        ids,
+        albums: albums.into_iter().collect(),
+        artists: artists.into_iter().collect(),
+    };
+    // Side by side: the meta's labels take the longest to compress.
+    let (index_body, points, meta) = std::thread::scope(|scope| {
+        let points = scope.spawn(|| {
+            Prepared::new(&index.stamp, "points", "application/octet-stream", map::payload(catalog))
+        });
+        let meta = scope.spawn(|| {
+            let meta = serde_json::to_vec(&map::meta(catalog)).unwrap_or_default();
+            Prepared::new(&index.stamp, "meta", "application/json", meta)
+        });
+        let index_body = serde_json::to_vec(&index).unwrap_or_default();
+        let index_body = Prepared::new(&index.stamp, "index", "application/json", index_body);
+        (index_body, points.join(), meta.join())
+    });
+
     Derived {
-        index: SpaceIndex {
-            stamp,
-            ids,
-            albums: albums.into_iter().collect(),
-            artists: artists.into_iter().collect(),
-        },
-        points: map::payload(catalog),
-        meta: serde_json::to_vec(&map::meta(catalog)).unwrap_or_default(),
+        index_body,
+        points: points.unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        meta: meta.unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        index,
         in_space,
         on_map,
     }

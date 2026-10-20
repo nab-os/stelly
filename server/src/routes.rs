@@ -6,15 +6,17 @@
 //! Bounded gestures are `play`, unbounded jobs are `pipeline`.
 
 use crate::auth::{AdminAuth, PlayAuth};
+use crate::space::Prepared;
 use crate::{AppState, Failure};
 use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest, PairingGrant,
-    PipelineStatus, Recipe, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
+    PipelineStatus, Recipe, Scope, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
     Target, TrackMeta, TracksRequest, User, Word,
 };
 use stelly_core::session::{Command, Session, Update};
@@ -77,9 +79,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pipeline/log", get(pipeline_log))
         // ------------------------------------------------------------ space
         .route("/api/space", get(space_info))
-        .route("/api/space/index", get(space_index))
-        .route("/api/space/points", get(space_points))
-        .route("/api/space/points/meta", get(space_points_meta))
         .route("/api/space/tracks", post(space_tracks))
         .route("/api/space/search", get(space_search))
         .route("/api/space/generate", post(space_generate))
@@ -101,12 +100,21 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users", get(users).post(add_user))
         // ----------------------------------------------------------- health
         .route("/api/health", get(health))
-        .with_state(state)
+        .with_state(state.clone())
         // zstd, for whoever asks, on every route: favourites, search,
         // generate and the session are tens to hundreds of KB of JSON. The
         // default predicate leaves the event streams alone, so they are not
         // buffered, and skips bodies too small to gain anything.
         .layer(CompressionLayer::new())
+        // Added after the layer, so outside it: their bodies come compressed
+        // already, once per change of the space.
+        .merge(
+            Router::new()
+                .route("/api/space/index", get(space_index))
+                .route("/api/space/points", get(space_points))
+                .route("/api/space/points/meta", get(space_points_meta))
+                .with_state(state),
+        )
 }
 
 // ------------------------------------------------------------------ queries
@@ -624,25 +632,69 @@ async fn space_info(State(state): State<AppState>, _: PlayAuth) -> Reply<SpaceIn
     Ok(Json(on_space(&state, move |space| Some(space.info(tower))).await?))
 }
 
-async fn space_index(State(state): State<AppState>, _: PlayAuth) -> Reply<SpaceIndex> {
+async fn space_index(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
     let derived = state.hub.space().derived().ok_or_else(not_built)?;
-    Ok(Json(derived.index.clone()))
+    Ok(prepared(&headers, &derived.index_body))
 }
 
-async fn space_points(State(state): State<AppState>, _: PlayAuth) -> Result<impl IntoResponse, Failure> {
+async fn space_points(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
     let derived = state.hub.space().derived().ok_or_else(not_built)?;
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        derived.points.clone(),
-    ))
+    Ok(prepared(&headers, &derived.points))
 }
 
-async fn space_points_meta(State(state): State<AppState>, _: PlayAuth) -> Result<impl IntoResponse, Failure> {
+async fn space_points_meta(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
     let derived = state.hub.space().derived().ok_or_else(not_built)?;
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        derived.meta.clone(),
-    ))
+    Ok(prepared(&headers, &derived.meta))
+}
+
+/// One of the space's cached bodies as this client can take it: 304 when it
+/// holds this one already, the compressed copy when it accepts zstd, the raw
+/// one otherwise. Shared, never copied.
+fn prepared(headers: &HeaderMap, body: &Prepared) -> Response {
+    let tag = (header::ETAG, body.tag.clone());
+    if holds(headers, &body.tag) {
+        return (StatusCode::NOT_MODIFIED, [tag]).into_response();
+    }
+    let vary = (header::VARY, "accept-encoding".to_string());
+    let content_type = (header::CONTENT_TYPE, body.content_type.to_string());
+    if accepts_zstd(headers) {
+        let encoding = (header::CONTENT_ENCODING, "zstd".to_string());
+        ([tag, vary, content_type, encoding], body.zstd.clone()).into_response()
+    } else {
+        ([tag, vary, content_type], body.raw.clone()).into_response()
+    }
+}
+
+/// Whether `If-None-Match` names this tag. Weak tags count: the bodies are
+/// the same bytes either way.
+fn holds(headers: &HeaderMap, tag: &str) -> bool {
+    header_items(headers, header::IF_NONE_MATCH)
+        .any(|item| item == "*" || item.trim_start_matches("W/") == tag)
+}
+
+/// Whether `Accept-Encoding` takes zstd, and not at q=0.
+fn accepts_zstd(headers: &HeaderMap) -> bool {
+    header_items(headers, header::ACCEPT_ENCODING).any(|item| {
+        let mut parts = item.split(';').map(str::trim);
+        let named = parts.next().is_some_and(|coding| coding.eq_ignore_ascii_case("zstd"));
+        let refused = parts.any(|param| {
+            param
+                .strip_prefix("q=")
+                .and_then(|q| q.trim().parse::<f32>().ok())
+                .is_some_and(|q| q == 0.0)
+        });
+        named && !refused
+    })
+}
+
+/// The comma-separated items of every instance of a header.
+fn header_items(headers: &HeaderMap, name: header::HeaderName) -> impl Iterator<Item = &str> {
+    headers
+        .get_all(name)
+        .into_iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
 }
 
 async fn space_tracks(
@@ -956,4 +1008,35 @@ async fn mix_analyse(
 async fn mix_stop(State(state): State<AppState>, _: AdminAuth) -> Reply<stelly_mix::api::JobStatus> {
     state.hub.mix().stop();
     Ok(Json(state.hub.mix().status()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with(name: header::HeaderName, value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(name, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn zstd_only_when_accepted() {
+        assert!(accepts_zstd(&with(header::ACCEPT_ENCODING, "gzip, zstd")));
+        assert!(accepts_zstd(&with(header::ACCEPT_ENCODING, "ZSTD;q=0.5")));
+        assert!(!accepts_zstd(&with(header::ACCEPT_ENCODING, "zstd;q=0, gzip")));
+        assert!(!accepts_zstd(&with(header::ACCEPT_ENCODING, "gzip, br")));
+        assert!(!accepts_zstd(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn held_by_tag() {
+        let tag = stelly_core::api::space_tag("2026-10-20/00ff", "points");
+        assert!(holds(&with(header::IF_NONE_MATCH, &tag), &tag));
+        assert!(holds(&with(header::IF_NONE_MATCH, &format!("\"other\", W/{tag}")), &tag));
+        assert!(holds(&with(header::IF_NONE_MATCH, "*"), &tag));
+        let meta = stelly_core::api::space_tag("2026-10-20/00ff", "meta");
+        assert!(!holds(&with(header::IF_NONE_MATCH, &meta), &tag));
+        assert!(!holds(&HeaderMap::new(), &tag));
+    }
 }

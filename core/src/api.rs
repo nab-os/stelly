@@ -303,6 +303,13 @@ pub struct SpaceIndex {
     pub artists: Vec<i64>,
 }
 
+/// The `ETag` of one of the space's cached bodies (`index`, `points`, `meta`)
+/// at a stamp. A client holding that body sends it back as `If-None-Match`
+/// and is told 304 rather than sent it again.
+pub fn space_tag(stamp: &str, body: &str) -> String {
+    format!("\"{stamp}/{body}\"")
+}
+
 /// The space's own tracks matching a phrase, and the albums and artists
 /// behind them, for a search narrowed to the space.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
