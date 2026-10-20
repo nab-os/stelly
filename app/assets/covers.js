@@ -2,7 +2,8 @@
 //
 // Every cover box renders with `data-cover="<url>"` and no background. This
 // promotes it to a real background once the box comes within a screen of the
-// viewport, then drops the attribute so it is never considered again.
+// viewport, then drops the attribute so it is not considered again until it
+// is given another.
 //
 // Delegated rather than per-row because the alternative is a hook per cover,
 // and a favourites shelf holds hundreds. One observer and one mutation
@@ -27,7 +28,14 @@
   // 200px margin.
   const MAX_CONCURRENT = 6;
   let active = 0;
-  const queue = [];
+  // In arrival order, and only while near the viewport: a box that scrolls
+  // back out before its turn leaves the line, stays observed, and rejoins if
+  // it comes back. Otherwise a fast scroll leaves the covers it flew past
+  // ahead of the ones it stopped on.
+  const queue = new Set();
+  // The URL each box last asked for, so a fetch that a newer cover on the same
+  // box overtook does not land over it.
+  const wanted = new WeakMap();
 
   const settle = () => {
     active--;
@@ -35,38 +43,63 @@
   };
 
   const pump = () => {
-    while (active < MAX_CONCURRENT && queue.length) {
-      const el = queue.shift();
+    while (active < MAX_CONCURRENT && queue.size) {
+      const el = queue.values().next().value;
+      queue.delete(el);
+      observer.unobserve(el);
       const url = el.dataset.cover;
       el.removeAttribute("data-cover");
-      if (!url) continue;
+      if (!url || !el.isConnected) continue;
+      wanted.set(el, url);
       active++;
       // A plain `Image()` first: setting `backgroundImage` directly gives no
       // load/error event to queue behind, and preloading this way costs
       // nothing extra, the real fetch happens once, and the CSS assignment
       // below hits the browser's own cache.
       const probe = new Image();
-      probe.onload = () => {
-        el.style.backgroundImage = `url('${url}')`;
-        settle();
+      const apply = () => {
+        if (wanted.get(el) === url) el.style.backgroundImage = `url('${url}')`;
       };
-      probe.onerror = settle;
       probe.src = url;
+      // Already in the cache: shown now, not a tick later, so a row that
+      // re-renders does not flash its placeholder.
+      if (probe.complete && probe.naturalWidth > 0) {
+        apply();
+        settle();
+        continue;
+      }
+      // Decoded off the main thread before it is shown, where the engine can,
+      // so the decode does not land in the middle of a scroll frame.
+      if (probe.decode) {
+        probe.decode().then(
+          () => {
+            apply();
+            settle();
+          },
+          () => {
+            // Some engines refuse to decode an image that did load; it can
+            // still be shown, decoded on paint as before.
+            if (probe.complete && probe.naturalWidth > 0) apply();
+            settle();
+          }
+        );
+      } else {
+        probe.onload = () => {
+          apply();
+          settle();
+        };
+        probe.onerror = settle;
+      }
     }
-  };
-
-  const load = (el) => {
-    queue.push(el);
-    pump();
   };
 
   const observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        observer.unobserve(entry.target);
-        load(entry.target);
+        if (entry.isIntersecting) queue.add(entry.target);
+        else queue.delete(entry.target);
       }
+      pump();
     },
     { rootMargin: "200px" }
   );
@@ -82,12 +115,19 @@
 
   // Rows arrive as you scroll, search and navigate, so the set of covers is
   // never fixed. Subtree, because Dioxus patches deep rather than replacing
-  // whole lists.
+  // whole lists. The attribute too: a box Dioxus keeps but points at another
+  // cover gets its `data-cover` back, and would otherwise never load it.
   new MutationObserver((records) => {
     for (const record of records) {
-      for (const node of record.addedNodes) scan(node);
+      if (record.type === "attributes") scan(record.target);
+      else for (const node of record.addedNodes) scan(node);
     }
-  }).observe(document.body, { childList: true, subtree: true });
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["data-cover"],
+  });
 
   // The eval channel closes when this returns, and the observers die with it.
   (async () => {

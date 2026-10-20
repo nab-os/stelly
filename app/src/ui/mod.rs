@@ -575,6 +575,17 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
     // `eager` opts out, for the few covers that are always on screen.
     let eager = class.split_whitespace().any(|c| c == "eager");
 
+    // A page's hero is four times a row's cover in area, and the URL a
+    // provider gives is sized for the row. Layered over that one rather than
+    // replacing it: the small one is usually cached from the tile just
+    // tapped, so it shows at once, and it stays showing if the large one
+    // turns out not to exist.
+    let hero = class.split_whitespace().any(|c| c == "hero-art");
+    let background = art.as_ref().map(|url| match larger(url).filter(|_| hero) {
+        Some(large) => format!("background-image:url('{large}'),url('{url}')"),
+        None => format!("background-image:url('{url}')"),
+    });
+
     rsx! {
         div {
             class: "cover {class}",
@@ -582,17 +593,38 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
                 (Some(url), false) => url.clone(),
                 _ => String::new(),
             },
-            style: match (&art, eager) {
-                (Some(url), true) => format!("background-image:url('{url}')"),
+            style: match (background, eager) {
+                (Some(background), true) => background,
                 _ => String::new(),
             },
         }
     }
 }
 
+/// The same cover at 600px, where the URL says how to ask for it. Qobuz
+/// album covers come at 230px, `…_230.jpg`, beside a `…_600.jpg`. Others,
+/// YouTube's already 544px and Qobuz's artist portraits, have no such sibling
+/// worth guessing at.
+fn larger(url: &str) -> Option<String> {
+    let stem = url
+        .strip_prefix("https://static.qobuz.com/images/covers/")?
+        .strip_suffix("_230.jpg")?;
+    Some(format!("https://static.qobuz.com/images/covers/{stem}_600.jpg"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn larger_covers_only_for_qobuz_albums() {
+        assert_eq!(
+            larger("https://static.qobuz.com/images/covers/48/38/3610159663848_230.jpg").as_deref(),
+            Some("https://static.qobuz.com/images/covers/48/38/3610159663848_600.jpg")
+        );
+        assert_eq!(larger("https://static.qobuz.com/images/artists/covers/medium/abc.jpg"), None);
+        assert_eq!(larger("https://lh3.googleusercontent.com/x=w544-h544-l90-rj"), None);
+    }
 
     #[test]
     fn row_keys_follow_the_id_not_the_place() {
