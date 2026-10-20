@@ -345,17 +345,18 @@ impl Hub {
 
     // Albums, artists, discographies and similar artists are cached by the
     // provider, in the catalogue cache it shares with the crawl and stages.
+    // Where each one's time went goes in `timings`.
 
-    pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>> {
-        Ok(self.session().await?.album_tracks(album_id).await?.1)
+    pub async fn album_tracks(&self, album_id: &str, timings: &Timings) -> Result<Vec<RemoteTrack>> {
+        Ok(self.session().await?.album_tracks(album_id, timings).await?.1)
     }
 
-    pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
-        self.session().await?.artist(artist_id).await
+    pub async fn artist(&self, artist_id: i64, timings: &Timings) -> Result<RemoteArtist> {
+        self.session().await?.artist(artist_id, timings).await
     }
 
-    pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.session().await?.artist_albums(artist_id, cap).await
+    pub async fn artist_albums(&self, artist_id: i64, cap: usize, timings: &Timings) -> Result<Vec<RemoteAlbum>> {
+        self.session().await?.artist_albums(artist_id, cap, timings).await
     }
 
     /// What the artists this user likes have put out in the last `days`,
@@ -477,8 +478,8 @@ impl Hub {
             .await
     }
 
-    pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
-        self.session().await?.similar_artists(artist_id, limit).await
+    pub async fn similar_artists(&self, artist_id: i64, limit: usize, timings: &Timings) -> Result<Vec<RemoteArtist>> {
+        self.session().await?.similar_artists(artist_id, limit, timings).await
     }
 
     // -------------------------------------------------------------- playback
@@ -508,10 +509,10 @@ impl Hub {
                 let track_id = id.parse().with_context(|| format!("“{id}” is not a track id"))?;
                 likes::Liked::Track(self.session().await?.track(track_id).await?)
             }
-            "album" => likes::Liked::Album(self.session().await?.album(id).await?.album),
+            "album" => likes::Liked::Album(self.session().await?.album(id, &Timings::default()).await?.album),
             "artist" => {
                 let artist_id = id.parse().with_context(|| format!("“{id}” is not an artist id"))?;
-                likes::Liked::Artist(self.session().await?.artist(artist_id).await?)
+                likes::Liked::Artist(self.session().await?.artist(artist_id, &Timings::default()).await?)
             }
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };

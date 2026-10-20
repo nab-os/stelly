@@ -150,10 +150,10 @@ pub fn share_catalogue(db_path: &Path, cache: Revalidating) {
 }
 
 /// A listing fetched for up to `held` items answers an ask for up to `cap`
-/// when it was for as many, or came back short of both: then neither left
-/// anything out.
+/// when it was for as many or more, cut to `cap`, or came back short: then
+/// it left nothing out.
 fn fits<T>(cap: usize) -> impl Fn(&(usize, Vec<T>)) -> bool {
-    move |(held, items)| *held == cap || (items.len() < *held && items.len() < cap)
+    move |(held, items)| *held >= cap || items.len() < *held
 }
 
 /// The search box `device`'s searches come from, for a provider that drops
@@ -171,11 +171,12 @@ fn superseded(err: &anyhow::Error) -> bool {
     err.downcast_ref::<ProviderError>().is_some_and(|e| e.status == 409)
 }
 
-/// Where one search's time went, step by step, for its `Server-Timing`.
+/// Where one request's time went, step by step, for its `Server-Timing`.
 /// Only what ran for this request: one served from the cache, or joined to
-/// another's, has no steps of its own.
-#[derive(Default)]
-pub struct Timings(Mutex<Vec<(String, Duration)>>);
+/// another's, has no steps of its own. Clones add to the same steps, so a
+/// fetch the cache may finish in the background can carry one.
+#[derive(Clone, Default)]
+pub struct Timings(Arc<Mutex<Vec<(String, Duration)>>>);
 
 impl Timings {
     /// `name` took `took`. Names are kept to a token's characters, as the
@@ -280,17 +281,44 @@ impl Provider {
     /// `fetch`, through the server's catalogue cache when there is one.
     /// Browsing is served what is held, fetched again behind it once old;
     /// bulk reads take what is held however old, and keep what they fetch,
-    /// in their own lane.
-    async fn cached<T, F>(&self, key: String, fits: impl Fn(&T) -> bool, fetch: F) -> Result<T>
+    /// in their own lane. An answer `fetch` had no part in, held or another
+    /// request's, has only its wait in `timings`, as `cache`.
+    async fn cached<T, F>(&self, key: String, fits: impl Fn(&T) -> bool, fetch: F, timings: &Timings) -> Result<T>
     where
         T: Clone + Send + Sync + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        match (&self.catalogue, self.priority) {
+        let started = Instant::now();
+        let answer = match (&self.catalogue, self.priority) {
             (None, _) => fetch.await,
             (Some(cache), Priority::Interactive) => cache.get_or_fitting(key, fits, fetch).await,
             (Some(cache), Priority::Bulk) => cache.held_or(key, fits, fetch).await,
+        };
+        if timings.is_empty() {
+            timings.add("cache", started.elapsed());
         }
+        answer
+    }
+
+    /// Up to `cap` of a listing kept under `key`, `fetch` asking for up to
+    /// so many. Fetched again for as many as are held when that is more: a
+    /// short first page asked for after the whole listing would otherwise
+    /// replace it once old, and the whole be fetched again behind it.
+    async fn listing<T, F, Fut>(&self, key: String, cap: usize, timings: &Timings, fetch: F) -> Result<Vec<T>>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: FnOnce(usize) -> Fut,
+        Fut: Future<Output = Result<Vec<T>>> + Send + 'static,
+    {
+        let held = match &self.catalogue {
+            Some(cache) => cache.peek::<(usize, Vec<T>)>(&key).await.map_or(0, |(held, _)| held),
+            None => 0,
+        };
+        let want = cap.max(held);
+        let fetch = fetch(want);
+        let (_, mut items) = self.cached(key, fits(cap), async move { Ok((want, fetch.await?)) }, timings).await?;
+        items.truncate(cap);
+        Ok(items)
     }
 
     /// `ask` of one provider, given up on after `wait` when someone is
@@ -485,15 +513,18 @@ impl Provider {
     }
 
     /// The first provider that has `id` and answers `call` within `wait`,
-    /// and its answer.
-    async fn first<T, F, Fut>(&self, kind: RefKind, id: &str, wait: Duration, call: F) -> Result<(usize, T)>
+    /// and its answer. Each one's wait goes in `timings`.
+    async fn first<T, F, Fut>(&self, kind: RefKind, id: &str, wait: Duration, call: F, timings: &Timings) -> Result<(usize, T)>
     where
         F: Fn(Client, String) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         let mut last = None;
         for (source, external) in self.routes(kind, id).await? {
-            match self.within(source, wait, call(self.client(source), external)).await {
+            let asking = Instant::now();
+            let answer = self.within(source, wait, call(self.client(source), external)).await;
+            timings.add(&format!("{}-ask", self.name(source)?), asking.elapsed());
+            match answer {
                 Ok(answer) => return Ok((source, answer)),
                 Err(err) => last = Some(err),
             }
@@ -709,64 +740,81 @@ impl Provider {
 
     pub async fn track(&self, track_id: i64) -> Result<RemoteTrack> {
         let ask = |client: Client, id: String| async move { client.send(api::track(Self::number(id)?)).await };
-        let (source, track) = self.first(RefKind::Track, &track_id.to_string(), BROWSE_WAIT, ask).await?;
+        let (source, track) = self.first(RefKind::Track, &track_id.to_string(), BROWSE_WAIT, ask, &Timings::default()).await?;
         let name = self.name(source)?;
         Ok(self.own_tracks(&name, vec![track]).await?.remove(0))
     }
 
     /// An album and its tracklist, in one request.
-    pub async fn album(&self, album_id: &str) -> Result<AlbumTracks> {
-        let (this, id) = (self.clone(), album_id.to_string());
-        self.cached(format!("album:{album_id}"), |_| true, async move { this.fetch_album(&id).await }).await
+    pub async fn album(&self, album_id: &str, timings: &Timings) -> Result<AlbumTracks> {
+        let (this, id, steps) = (self.clone(), album_id.to_string(), timings.clone());
+        self.cached(format!("album:{album_id}"), |_| true, async move { this.fetch_album(&id, &steps).await }, timings).await
     }
 
-    async fn fetch_album(&self, album_id: &str) -> Result<AlbumTracks> {
+    async fn fetch_album(&self, album_id: &str, timings: &Timings) -> Result<AlbumTracks> {
         let ask = |client: Client, id: String| async move { client.send(api::album(&id)).await };
-        let (source, AlbumTracks { album, tracks }) = self.first(RefKind::Album, album_id, BROWSE_WAIT, ask).await?;
+        let (source, AlbumTracks { album, tracks }) = self.first(RefKind::Album, album_id, BROWSE_WAIT, ask, timings).await?;
         let name = self.name(source)?;
+        let owning = Instant::now();
         let album = self.own_albums(&name, vec![album]).await?.remove(0);
         // A tracklist names the album it is on: this one.
         let mut tracks = self.own_tracks(&name, tracks).await?;
+        timings.add(&format!("{name}-ids"), owning.elapsed());
         for track in &mut tracks {
             track.album_id = Some(album.id.clone());
         }
         Ok(AlbumTracks { album, tracks })
     }
 
-    pub async fn album_tracks(&self, album_id: &str) -> Result<(RemoteAlbum, Vec<RemoteTrack>)> {
-        let AlbumTracks { album, tracks } = self.album(album_id).await?;
+    pub async fn album_tracks(&self, album_id: &str, timings: &Timings) -> Result<(RemoteAlbum, Vec<RemoteTrack>)> {
+        let AlbumTracks { album, tracks } = self.album(album_id, timings).await?;
         Ok((album, tracks))
     }
 
     /// One artist on their own: name, portrait and biography, no discography.
-    pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
-        let this = self.clone();
-        self.cached(format!("artist:{artist_id}"), |_| true, async move { this.fetch_artist(artist_id).await }).await
+    pub async fn artist(&self, artist_id: i64, timings: &Timings) -> Result<RemoteArtist> {
+        let (this, steps) = (self.clone(), timings.clone());
+        self.cached(format!("artist:{artist_id}"), |_| true, async move { this.fetch_artist(artist_id, &steps).await }, timings).await
     }
 
-    async fn fetch_artist(&self, artist_id: i64) -> Result<RemoteArtist> {
+    async fn fetch_artist(&self, artist_id: i64, timings: &Timings) -> Result<RemoteArtist> {
         let ask = |client: Client, id: String| async move { client.send(api::artist(Self::number(id)?)).await };
-        let (source, artist) = self.first(RefKind::Artist, &artist_id.to_string(), BROWSE_WAIT, ask).await?;
+        let (source, artist) = self.first(RefKind::Artist, &artist_id.to_string(), BROWSE_WAIT, ask, timings).await?;
         let name = self.name(source)?;
-        Ok(self.own_artists(&name, vec![artist]).await?.remove(0))
+        let owning = Instant::now();
+        let artist = self.own_artists(&name, vec![artist]).await?.remove(0);
+        timings.add(&format!("{name}-ids"), owning.elapsed());
+        Ok(artist)
     }
 
     /// An artist's discography from every provider that has them, newest
-    /// first, each album once.
-    async fn releases(&self, artist_id: i64, own: bool, cap: usize) -> Result<Vec<RemoteAlbum>> {
+    /// first, each album once. Each provider's wait, and the time its
+    /// albums took to get Stelly's ids, go in `timings`.
+    ///
+    /// The first `n` of a shorter ask are not always the first `n` of a
+    /// longer one: each provider's albums past the shorter cap may be newer
+    /// than another's within it, or the same album, which the first
+    /// provider to have it then gives.
+    async fn releases(&self, artist_id: i64, own: bool, cap: usize, timings: &Timings) -> Result<Vec<RemoteAlbum>> {
         let mut out: Vec<RemoteAlbum> = Vec::new();
         let mut seen = HashSet::new();
         let mut last = None;
         // All at once: one slow provider costs its own wait, not the sum.
         let asks = self.routes(RefKind::Artist, &artist_id.to_string()).await?.into_iter().map(|(source, external)| async move {
+            let asking = Instant::now();
             let ask = async { self.client(source).send(api::artist_releases(Self::number(external)?, own, cap)).await };
-            (source, self.within(source, BROWSE_WAIT, ask).await)
+            let answer = self.within(source, BROWSE_WAIT, ask).await;
+            timings.add(&format!("{}-ask", self.name(source).unwrap_or_else(|_| source.to_string())), asking.elapsed());
+            (source, answer)
         });
         for (source, answer) in futures_util::future::join_all(asks).await {
             match answer {
                 Ok(page) => {
                     let name = self.name(source)?;
-                    out.extend(self.own_albums(&name, page.items).await?.into_iter().filter(|a| seen.insert(a.id.clone())));
+                    let owning = Instant::now();
+                    let albums = self.own_albums(&name, page.items).await?;
+                    timings.add(&format!("{name}-ids"), owning.elapsed());
+                    out.extend(albums.into_iter().filter(|a| seen.insert(a.id.clone())));
                 }
                 Err(err) => last = Some(err),
             }
@@ -778,40 +826,46 @@ impl Provider {
         Ok(out)
     }
 
-    pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        let this = self.clone();
-        let fetch = async move { Ok((cap, this.releases(artist_id, false, cap).await?)) };
-        Ok(self.cached(format!("artist_albums:{artist_id}"), fits(cap), fetch).await?.1)
+    pub async fn artist_albums(&self, artist_id: i64, cap: usize, timings: &Timings) -> Result<Vec<RemoteAlbum>> {
+        let (this, steps) = (self.clone(), timings.clone());
+        let fetch = move |cap| async move { this.releases(artist_id, false, cap, &steps).await };
+        self.listing(format!("artist_albums:{artist_id}"), cap, timings, fetch).await
     }
 
     /// An artist's own latest releases, newest first: albums, EPs, singles
     /// and live records, none of everyone else's covers of their songs.
     pub async fn artist_recent_releases(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.releases(artist_id, true, cap).await
+        self.releases(artist_id, true, cap, &Timings::default()).await
     }
 
     /// Artists the providers consider close to this one, from every one that
     /// can say. The same call the crawler expands the frontier with.
-    pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
-        let this = self.clone();
-        let fetch = async move { Ok((limit, this.fetch_similar(artist_id, limit).await?)) };
-        Ok(self.cached(format!("similar_artists:{artist_id}"), fits(limit), fetch).await?.1)
+    pub async fn similar_artists(&self, artist_id: i64, limit: usize, timings: &Timings) -> Result<Vec<RemoteArtist>> {
+        let (this, steps) = (self.clone(), timings.clone());
+        let fetch = move |limit| async move { this.fetch_similar(artist_id, limit, &steps).await };
+        self.listing(format!("similar_artists:{artist_id}"), limit, timings, fetch).await
     }
 
-    async fn fetch_similar(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
+    async fn fetch_similar(&self, artist_id: i64, limit: usize, timings: &Timings) -> Result<Vec<RemoteArtist>> {
         let able = self.able(|c| c.similar_artists).await?;
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         let routes = self.routes(RefKind::Artist, &artist_id.to_string()).await?;
         let asks = routes.into_iter().filter(|(source, _)| able.contains(source)).map(|(source, external)| async move {
+            let asking = Instant::now();
             let ask = async { self.client(source).send(api::similar_artists(Self::number(external)?, limit)).await };
-            (source, self.within(source, BROWSE_WAIT, ask).await)
+            let answer = self.within(source, BROWSE_WAIT, ask).await;
+            timings.add(&format!("{}-ask", self.name(source).unwrap_or_else(|_| source.to_string())), asking.elapsed());
+            (source, answer)
         });
         for (source, answer) in futures_util::future::join_all(asks).await {
             match answer {
                 Ok(similar) => {
                     let name = self.name(source)?;
-                    out.extend(self.own_artists(&name, similar).await?.into_iter().filter(|a| seen.insert(a.id)));
+                    let owning = Instant::now();
+                    let similar = self.own_artists(&name, similar).await?;
+                    timings.add(&format!("{name}-ids"), owning.elapsed());
+                    out.extend(similar.into_iter().filter(|a| seen.insert(a.id)));
                 }
                 Err(err) if err.downcast_ref::<ProviderError>().is_some_and(|e| e.status == 404) => {}
                 Err(err) => return Err(err),
@@ -862,7 +916,7 @@ impl Provider {
 
     pub async fn playlist_tracks(&self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
         let ask = |client: Client, id: String| async move { client.send(api::playlist_tracks(Self::number(id)?, cap)).await };
-        let (source, page) = self.first(RefKind::Playlist, &playlist_id.to_string(), BROWSE_WAIT, ask).await?;
+        let (source, page) = self.first(RefKind::Playlist, &playlist_id.to_string(), BROWSE_WAIT, ask, &Timings::default()).await?;
         let name = self.name(source)?;
         self.own_tracks(&name, page.items).await
     }
@@ -873,7 +927,7 @@ impl Provider {
     /// that has it and answers.
     pub async fn file(&self, track_id: i64, quality: Quality) -> Result<FileUrl> {
         let ask = |client: Client, id: String| async move { client.send(api::file_url(Self::number(id)?, quality)).await };
-        Ok(self.first(RefKind::Track, &track_id.to_string(), FILE_WAIT, ask).await?.1)
+        Ok(self.first(RefKind::Track, &track_id.to_string(), FILE_WAIT, ask, &Timings::default()).await?.1)
     }
 
     pub async fn file_url(&self, track_id: i64, quality: Quality) -> Result<String> {
@@ -1059,6 +1113,76 @@ mod tests {
         assert_eq!(*sessions.lock().unwrap(), [session.clone(), session.clone()]);
         assert_eq!(search_session(7), session, "the same box across a burst");
         assert_ne!(search_session(8), session, "never another device's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A discography's `Server-Timing` names the provider's wait and its
+    /// ids, or the cache alone. A shorter ask after a longer one is the
+    /// start of the held one, asking nothing; and fetched again once old,
+    /// it is the longer one that is fetched, not replaced by the shorter.
+    #[tokio::test]
+    async fn a_first_page_neither_refetches_nor_shrinks_the_whole_discography() {
+        let slow = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = slow.local_addr().unwrap();
+        let capabilities = Capabilities { name: "slow".into(), title: "Slow".into(), ..Default::default() };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let caps = asked.clone();
+        let app = axum::Router::new()
+            .route("/v1/capabilities", axum::routing::get(move || async move { axum::Json(capabilities) }))
+            .route(
+                "/v1/artists/{id}/releases",
+                axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>| async move {
+                    let cap: usize = query["cap"].parse().unwrap();
+                    caps.lock().unwrap().push(cap);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let items: Vec<RemoteAlbum> = (0..cap.min(300))
+                        .map(|n| RemoteAlbum {
+                            id: format!("a{n}"),
+                            title: format!("A{n}"),
+                            artist: "A".into(),
+                            artist_id: Some(50),
+                            released: Some(format!("{}", 3000 - n)),
+                            ..Default::default()
+                        })
+                        .collect();
+                    axum::Json(serde_json::json!({ "total": items.len(), "items": items }))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(slow, app).await });
+
+        let dir = std::env::temp_dir().join(format!("stelly-provider-pages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), format!("STELLY_PROVIDERS=http://{at}\n")).unwrap();
+        let db_path = dir.join("stelly.db");
+        crate::db::open_for_write(&db_path).unwrap();
+        share_catalogue(&db_path, Revalidating::new(Duration::from_millis(300), Duration::from_secs(60), 100));
+        let provider = Provider::from_env(&dir, &db_path);
+        provider.ready().await.unwrap();
+        let artist = RemoteArtist { id: 50, name: "A".into(), ..Default::default() };
+        let id = provider.own_artists("slow", vec![artist]).await.unwrap()[0].id;
+        let steps = |timings: &Timings| -> Vec<String> {
+            let header = timings.header(Duration::ZERO);
+            header.split(", ").map(|step| step.split(';').next().unwrap().to_string()).collect()
+        };
+
+        let timings = Timings::default();
+        let whole = provider.artist_albums(id, 500, &timings).await.unwrap();
+        assert_eq!(whole.len(), 300);
+        assert_eq!(steps(&timings), ["slow-ask", "slow-ids", "total"]);
+
+        let timings = Timings::default();
+        let first = provider.artist_albums(id, 100, &timings).await.unwrap();
+        assert_eq!(first[..], whole[..100]);
+        assert_eq!(steps(&timings), ["cache", "total"]);
+        assert_eq!(*asked.lock().unwrap(), [500]);
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(provider.artist_albums(id, 100, &Timings::default()).await.unwrap().len(), 100, "the old one, at once");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(*asked.lock().unwrap(), [500, 500], "fetched again whole");
+        assert_eq!(provider.artist_albums(id, 500, &Timings::default()).await.unwrap().len(), 300);
+        assert_eq!(*asked.lock().unwrap(), [500, 500]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
