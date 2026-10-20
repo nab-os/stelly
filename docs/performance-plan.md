@@ -39,6 +39,19 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | radio, 50 tracks | **1.79 s**, holding the space for everyone |
 | provider search, cold / cached | 3.5 s / 27 ms |
 
+After phases 0 to 7 (2026-10-20, Stelly 2.1.0, stelly-qobuz and
+stelly-ytmusic 0.3.0, same production server), one request at a time:
+
+| What | Before (2.0.1) | After (2.1.0) |
+|---|---|---|
+| search, both providers, cold | 16–21 s | 0.56–1.08 s |
+| search, Qobuz alone / YouTube Music alone, cold | 6.5–11 s / 6.2–15.6 s | 0.71–1.17 s / 0.54–2.26 s |
+| `/api/corpus` | 3.6 s | 9 ms |
+| index / meta on the wire | 2.1 / 4.7 MB | 0.73 / 1.18 MB (binary labels) |
+| neighbours / radio 50 | 80 / 1,787 ms | 16 / 287 ms |
+| path / even path | 496 / 753 ms | 189 / 157 ms |
+| drift / mood | 978 / 148 ms | 199 / 31 ms |
+
 ## Phase 0: measure first
 
 | # | Step | Where | Cost | Status |
