@@ -86,7 +86,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 3.2 | Status set only when it changed; the "add" badge its own component | `app/src/ui/pipeline.rs:141`, `crawler.rs:73`, `screens.rs:105` | S | #113 |
 | 3.3 | Pipeline log stream open only while the log is shown | `app/src/ui/pipeline.rs:157` | S | #114 |
 | 3.4 | The output presigns the next track | `app/src/ui/player.rs:288, 357` | S | #115 |
-| 3.5 | Play album from a row menu reuses tracks already held | `app/src/ui/menu.rs:320` | S | |
+| 3.5 | Play album from a row menu reuses tracks already held | `app/src/ui/menu.rs:320` | S | #116 |
 | 3.6 | Likes flip at once, roll back on error | `app/src/ui/screens.rs:26` | S | |
 | 3.7 | Liked ids from the home answer and `favourites.json`, not fetched twice | `app/src/ui/library.rs:428` | S | |
 | 3.8 | Map points loaded on the first map open, not at launch | `app/src/app.rs:353, 752`, `assets/map.js:150` | S | |
