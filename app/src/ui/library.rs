@@ -12,7 +12,8 @@ use super::search_history::SearchHistory;
 use super::settings::SettingsScreen;
 use super::{
     artist_link, open_remote_track, open_track, Blocklist, Cover, LocalIds, MapView,
-    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, space_mark, LIST_CAP, SEARCH_LIMIT,
+    Search, Selection, SpaceMatches, SpaceReach, SpaceRow, row_keys, space_mark, LIST_CAP,
+    SEARCH_LIMIT,
 };
 use dioxus::prelude::*;
 use crate::api::Target;
@@ -1752,6 +1753,16 @@ impl Item {
             _ => None,
         }
     }
+
+    /// Its id, told apart by kind: a track and an album may share a number.
+    fn id(&self) -> String {
+        match self {
+            Item::Track(_, track) => format!("track-{}", track.id),
+            Item::Album(_, album) => format!("album-{}", album.id),
+            Item::Artist(_, artist) => format!("artist-{}", artist.id),
+            Item::Space(row) => format!("space-{}", row.track_id),
+        }
+    }
 }
 
 /// A mixed view's list: tracks, albums and artists together, in one order.
@@ -1817,6 +1828,10 @@ fn MixedRows() -> Element {
     }
     let sort = *library.sort.read();
     let items = sort.apply(items, |item, key| item.sort_value(key));
+    // Keyed here rather than on the `li`: `row` is called from a loop, and
+    // the loop's own nodes are what get matched up between renders.
+    let keys = row_keys(items.iter().map(Item::id));
+    let items: Vec<(String, Item)> = keys.into_iter().zip(items).collect();
 
     if items.is_empty() {
         return rsx! {};
@@ -1830,7 +1845,6 @@ fn MixedRows() -> Element {
         match item {
             Item::Track(index, track) => rsx! {
                 li {
-                    key: "track-{index}-{track.id}",
                     class: if now_playing == Some(track.id) { "{tile} playing" } else { "{tile}" },
                     onclick: {
                         let track = track.clone();
@@ -1862,7 +1876,6 @@ fn MixedRows() -> Element {
             },
             Item::Album(index, album) => rsx! {
                 li {
-                    key: "album-{index}-{album.id}",
                     class: "{tile}",
                     onclick: {
                         let album = album.clone();
@@ -1892,7 +1905,6 @@ fn MixedRows() -> Element {
             },
             Item::Artist(index, artist) => rsx! {
                 li {
-                    key: "artist-{index}-{artist.id}",
                     class: "{tile}",
                     onclick: {
                         let artist = artist.clone();
@@ -1921,7 +1933,6 @@ fn MixedRows() -> Element {
             },
             Item::Space(row) => rsx! {
                 li {
-                    key: "space-{row.track_id}",
                     class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
                     onclick: {
                         let id = row.track_id;
@@ -1954,12 +1965,12 @@ fn MixedRows() -> Element {
 
     // Split, the sort still orders each section; it just no longer
     // interleaves them. Artists, albums, then tracks, as in a narrowed view.
-    let sections: Vec<(&str, Vec<Item>)> = if split {
+    let sections: Vec<(&str, Vec<(String, Item)>)> = if split {
         let mut artists = Vec::new();
         let mut albums = Vec::new();
         let mut tracks = Vec::new();
         for item in items {
-            match item {
+            match item.1 {
                 Item::Artist(..) => artists.push(item),
                 Item::Album(..) => albums.push(item),
                 Item::Track(..) | Item::Space(_) => tracks.push(item),
@@ -1985,8 +1996,8 @@ fn MixedRows() -> Element {
                 h3 { class: "shelf-head", "{heading}" }
             }
             ul { class: if grid { "tiles" } else { "list" },
-                for item in items {
-                    {row(item)}
+                for (key, item) in items {
+                    Fragment { key: "{key}", {row(item)} }
                 }
             }
         }
@@ -2227,6 +2238,7 @@ fn TrackRows() -> Element {
     let now_playing = player.current().map(|t| t.id);
     let grid = library.layout() == TracksView::Grid;
     let count = tracks.len();
+    let keys = row_keys(tracks.iter().map(|(_, track)| track.id));
 
     if tracks.is_empty() {
         return rsx! {};
@@ -2244,9 +2256,9 @@ fn TrackRows() -> Element {
             }
         }
         ul { class: if grid { "tiles" } else { "list" },
-            for (index, track) in tracks {
+            for ((index, track), key) in tracks.into_iter().zip(keys) {
                 li {
-                    key: "{index}-{track.id}",
+                    key: "{key}",
                     class: {
                         let base = if grid { "tile" } else { "row" };
                         if now_playing == Some(track.id) {
@@ -2318,6 +2330,7 @@ fn AlbumRows() -> Element {
         .enumerate()
         .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
         .collect();
+    let keys = row_keys(albums.iter().map(|(_, album)| &album.id));
     // How recent is the point of new releases, so they say when, and what
     // sort of release when it is not a whole album.
     let releases = *library.view.read() == View::Releases;
@@ -2325,9 +2338,9 @@ fn AlbumRows() -> Element {
     rsx! {
         h3 { class: "shelf-head", "Albums" }
         ul { class: "tiles",
-            for (index, album) in albums {
+            for ((index, album), key) in albums.into_iter().zip(keys) {
                 li {
-                    key: "{index}-{album.id}",
+                    key: "{key}",
                     class: "tile",
                     // Straight to the tracklist: the album page carries the
                     // same cover, badges and actions the sheet would have,
@@ -2390,13 +2403,14 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
         .enumerate()
         .filter(|(_, a)| similar || !liked_only || liked.artists.contains(&a.id))
         .collect();
+    let keys = row_keys(artists.iter().map(|(_, artist)| artist.id));
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
         ul { class: "tiles",
-            for (index, artist) in artists {
+            for ((index, artist), key) in artists.into_iter().zip(keys) {
                 li {
-                    key: "{index}-{artist.id}",
+                    key: "{key}",
                     class: "tile",
                     onclick: {
                         let artist = artist.clone();
@@ -2424,13 +2438,14 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
 fn PlaylistRows() -> Element {
     let library = use_context::<Library>();
     let playlists = library.shelf.read().playlists.clone();
+    let keys = row_keys(playlists.iter().map(|playlist| &playlist.id));
 
     rsx! {
         h3 { class: "shelf-head", "Playlists" }
         ul { class: "list",
-            for (index, playlist) in playlists.into_iter().enumerate() {
+            for ((index, playlist), key) in playlists.into_iter().enumerate().zip(keys) {
                 li {
-                    key: "{index}-{playlist.id}",
+                    key: "{key}",
                     class: "row",
                     onclick: move |_| {
                         let target = {

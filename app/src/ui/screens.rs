@@ -12,7 +12,7 @@ use super::library::{ArtistRows, Library, TracksView, View, ViewToggle};
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, Player};
 use super::{
-    album_link, artist_link, open_remote_track, space_mark, Blocklist, Cover, LocalIds, MapView,
+    album_link, artist_link, open_remote_track, row_keys, space_mark, Blocklist, Cover, LocalIds, MapView,
     Pipeline, Selection, SpaceReach,
 };
 use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
@@ -444,6 +444,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
     // `ShelfTrack` indices address the same list.
     let tracks = library.shelf.read().visible_tracks(&blocklist);
     let no_tracks = tracks.is_empty();
+    let keys = row_keys(tracks.iter().map(|track| track.id));
     let loading = *library.loading.read();
     let now_playing = player.current().map(|t| t.id);
     let local_ids = local.0.read().clone();
@@ -539,9 +540,9 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                 p { class: "muted error", "{message}" }
             } else {
                 ol { class: "list album-tracks",
-                    for (index, track) in tracks.into_iter().enumerate() {
+                    for ((index, track), key) in tracks.into_iter().enumerate().zip(keys) {
                         li {
-                            key: "{index}-{track.id}",
+                            key: "{key}",
                             class: if now_playing == Some(track.id) { "row playing" } else { "row" },
                             onclick: {
                                 let track = track.clone();
@@ -612,9 +613,13 @@ fn section(album: &RemoteAlbum, artist_id: i64) -> usize {
     }
 }
 
+/// A heading, its albums with their index into `visible_albums`, and their
+/// row keys.
+type Section = (&'static str, Vec<(usize, RemoteAlbum)>, Vec<String>);
+
 /// The discography sorted under `SECTIONS`, empty ones dropped. Each album
 /// keeps its index into `visible_albums`, which is how its menu finds it.
-fn sections(albums: Vec<RemoteAlbum>, artist_id: i64) -> Vec<(&'static str, Vec<(usize, RemoteAlbum)>)> {
+fn sections(albums: Vec<RemoteAlbum>, artist_id: i64) -> Vec<Section> {
     let mut grouped: [Vec<(usize, RemoteAlbum)>; 7] = Default::default();
     for (index, album) in albums.into_iter().enumerate() {
         grouped[section(&album, artist_id)].push((index, album));
@@ -623,6 +628,10 @@ fn sections(albums: Vec<RemoteAlbum>, artist_id: i64) -> Vec<(&'static str, Vec<
         .into_iter()
         .zip(grouped)
         .filter(|(_, albums)| !albums.is_empty())
+        .map(|(heading, albums)| {
+            let keys = row_keys(albums.iter().map(|(_, album)| &album.id));
+            (heading, albums, keys)
+        })
         .collect()
 }
 
@@ -760,7 +769,7 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
             } else if sections.is_empty() {
                 p { class: "muted", "nothing here" }
             } else {
-                for (position, (heading, albums)) in sections.into_iter().enumerate() {
+                for (position, (heading, albums, keys)) in sections.into_iter().enumerate() {
                     div { class: "shelf-head", key: "{heading}",
                         "{heading}"
                         if position == 0 {
@@ -769,9 +778,9 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                         }
                     }
                     ul { class: if grid { "tiles" } else { "list" },
-                        for (index, album) in albums {
+                        for ((index, album), key) in albums.into_iter().zip(keys) {
                             li {
-                                key: "{index}-{album.id}",
+                                key: "{key}",
                                 class: if grid { "tile" } else { "row" },
                                 onclick: {
                                     let album = album.clone();

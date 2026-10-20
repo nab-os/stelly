@@ -88,6 +88,22 @@ pub(crate) fn space_mark(in_space: bool) -> Element {
     rsx! { span { class: "space-mark", title: "in your space" } }
 }
 
+/// One key per row, from the row's own id rather than its place: a sort or
+/// a removal then moves the rows it touches instead of rebuilding every one
+/// after it, and their covers do not blink back to the placeholder. Keys
+/// must be unique, so an id listed again gets its occurrence after it.
+pub(crate) fn row_keys<T: std::fmt::Display>(ids: impl IntoIterator<Item = T>) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    ids.into_iter()
+        .map(|id| {
+            let id = id.to_string();
+            let count = seen.entry(id.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 { id } else { format!("{id}~{count}") }
+        })
+        .collect()
+}
+
 /// The map/generator's notion of "the track in hand", what a neighbours
 /// walk starts from, what the map highlights and pins its card to. Track-only,
 /// and only ever a space track: nothing else has coordinates to select.
@@ -567,5 +583,22 @@ pub fn Cover(url: Option<String>, class: Option<String>) -> Element {
                 _ => String::new(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_keys_follow_the_id_not_the_place() {
+        assert_eq!(row_keys([3, 1, 2]), ["3", "1", "2"]);
+        // Reordered, every row keeps the key it had.
+        assert_eq!(row_keys([2, 3, 1]), ["2", "3", "1"]);
+    }
+
+    #[test]
+    fn row_keys_number_only_repeats() {
+        assert_eq!(row_keys([5, 7, 5, 5]), ["5", "7", "5~2", "5~3"]);
     }
 }

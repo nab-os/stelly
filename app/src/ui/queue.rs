@@ -122,6 +122,7 @@ pub fn QueueView() -> Element {
     let queue = player.queue.read().clone();
     let current = *player.index.read();
     let total = queue.len();
+    let keys = super::row_keys(queue.iter().map(|track| track.id));
 
     rsx! {
         // Always mounted, so opening and closing can slide rather than pop.
@@ -155,9 +156,9 @@ pub fn QueueView() -> Element {
                 p { class: "muted", "Nothing queued." }
             } else {
                 ol { class: "queue-list",
-                    for (index, track) in queue.into_iter().enumerate() {
+                    for ((index, track), key) in queue.into_iter().enumerate().zip(keys) {
                         li {
-                            key: "{index}-{track.id}",
+                            key: "{key}",
                             class: if index == current { "queue-row playing" } else { "queue-row" },
                             onclick: move |_| play_at(player, index),
                             // Right-click only: a long press here starts a
