@@ -98,7 +98,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 3.14 | Map: `resize()` skipped when unchanged; cached rect on touch; card placed with `transform` | `app/assets/map.js:179, 759, 1027` | S | |
 | 3.15 | Android HTTP client built once, reused by the update check | `app/src/backend/remote.rs:729`, `update/mod.rs:81` | S | #121 |
 | 3.16 | Artist albums and similar fetched together; capabilities and providers too | `app/src/ui/library.rs:916`, `app.rs:525` | S | #127 |
-| 3.17 | "Liked" read without cloning the sets per tick; seek line in its own component | `app/src/ui/player.rs:755`, `library.rs:462` | S | |
+| 3.17 | "Liked" read without cloning the sets per tick; seek line in its own component | `app/src/ui/player.rs:755`, `library.rs:462` | S | #128 |
 | 3.18 | Covers decoded before shown, applied at once when cached, off-screen ones skipped, `data-cover` changes observed, larger heroes | `app/assets/covers.js` | S | |
 | 3.19 | `transform`/`opacity` animations instead of `box-shadow` and `left` | `app/assets/style.css:1430, 1654` | S | |
 | 3.20 | The playing highlight follows the track (`current()` peeks); a class toggled in JS | `app/src/ui/player.rs:51` | S | |
