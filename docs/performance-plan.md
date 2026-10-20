@@ -101,7 +101,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 3.17 | "Liked" read without cloning the sets per tick; seek line in its own component | `app/src/ui/player.rs:755`, `library.rs:462` | S | #128 |
 | 3.18 | Covers decoded before shown, applied at once when cached, off-screen ones skipped, `data-cover` changes observed, larger heroes | `app/assets/covers.js` | S | |
 | 3.19 | `transform`/`opacity` animations instead of `box-shadow` and `left` | `app/assets/style.css:1430, 1654` | S | |
-| 3.20 | The playing highlight follows the track (`current()` peeks); a class toggled in JS | `app/src/ui/player.rs:51` | S | |
+| 3.20 | The playing highlight follows the track (`current()` peeks); a class toggled in JS | `app/src/ui/player.rs:51` | S | #129 |
 | 3.21 | Hidden artists and the session cached on disk | `app/src/app.rs:476` | S | #122 |
 | 3.22 | The initial view opened synchronously, not in `use_future` | `app/src/app.rs:563` | S | #123 |
 
