@@ -427,7 +427,6 @@ button.danger:hover:not(:disabled),
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   cursor: pointer;
 }
-.map-card:empty { display: none; }
 .map-card:hover { border-color: var(--accent); }
 .map-card::after {
   content: "";
@@ -445,6 +444,9 @@ button.danger:hover:not(:disabled),
 .map-card .thumb { width: 48px; height: 48px; }
 .map-card-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 .map-card-text .title { font-weight: 600; }
+/* A line each even before map.js has the album, so the card does not grow
+   under the pointer when it arrives. */
+.map-card-text span { min-height: 1.35em; }
 
 /* ------------------------------------------------------------------ covers
    Artwork is a background rather than an <img>, so a URL that 404s, and
@@ -502,7 +504,17 @@ button.danger:hover:not(:disabled),
 }
 .source-head:first-child { margin-top: 0; }
 
-.more-rows { align-self: flex-start; margin: 6px 0 2px 7px; }
+/* After a list drawn in part, see `MoreRows`. The empty box reaches a screen
+   and a half back up over the rows, and takes no room and no clicks there. */
+.more-rows { position: relative; margin: 6px 0 2px 7px; }
+.rows-ahead {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 150vh;
+  pointer-events: none;
+}
 
 .list { list-style: none; margin: 0; padding: 0; }
 
@@ -753,26 +765,30 @@ ol.list .row::before {
 .hero-art.round { border-radius: 50%; }
 .hero-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 
-/* A page coming in rises into place, all but its cover, which transitions.js
-   flies in from the tile that opened it and so has to sit still to be
-   measured. Only pages with a cover: one without, settings, would start its
-   first frame with nothing on it at all. */
-.hero ~ *,
+/* A page coming in has its names rise into place. Not its cover, which
+   transitions.js flies in from the tile that opened it and so has to sit
+   still to be measured, and not the rest of it: a tracklist moved as one
+   layer is a lot to repaint, and the old page fading off it is enough.
+   Only pages with a cover: one without, settings, would start its first
+   frame with nothing on it at all. */
 .hero-meta { animation: page-in 0.28s cubic-bezier(0.2, 0, 0, 1) both; }
 @keyframes page-in {
   from { opacity: 0; transform: translateY(10px); }
 }
 
-/* The clone that flies, above everything and never in the way of a click. */
+/* The clone that flies, above everything and never in the way of a click.
+   It moves by `transform` alone, from its top left corner. */
 .cover-flight {
   position: fixed;
   z-index: 60;
   margin: 0;
   pointer-events: none;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
-/* The page being left, copied over the one replacing it while the circle
-   opens or closes on it. Just under the flying cover. */
+/* The page being left, copied over the one replacing it while it fades.
+   Just under the flying cover. */
 .page-ghost {
   position: fixed;
   z-index: 59;
@@ -781,7 +797,6 @@ ol.list .row::before {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero ~ *,
   .hero-meta { animation: none; }
 }
 .hero-title {

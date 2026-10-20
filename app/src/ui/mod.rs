@@ -25,6 +25,7 @@ pub mod side;
 #[cfg(all(feature = "desktop", not(feature = "mobile")))]
 mod titlebar;
 pub mod tour;
+pub(crate) mod window;
 
 #[cfg(all(feature = "desktop", not(feature = "mobile")))]
 pub use titlebar::TitleBar;

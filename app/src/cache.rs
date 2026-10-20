@@ -1,5 +1,6 @@
 //! What is kept on disk so the window has something to show before the
-//! network answers: the space's index, the map's points, the favourites.
+//! network answers: the space's index, the map's points, the favourites,
+//! the album and artist pages seen lately.
 //!
 //! Only ever a head start. Whatever is read from here is asked for again,
 //! and every failure is treated as a miss.
@@ -65,10 +66,16 @@ static WRITING: Mutex<()> = Mutex::new(());
 /// that changes while the window is in use. Only the latest of several is
 /// written: one handed over while an older one waits takes its place.
 pub fn write_soon<T: Serialize + Send + 'static>(name: &str, value: T) {
-    write_soon_to(path(name), value);
+    write_soon_to(path(name), value, None);
 }
 
-fn write_soon_to<T: Serialize + Send + 'static>(target: PathBuf, value: T) {
+/// `write_soon`, as `name` in the folder `dir`, which keeps only the `keep`
+/// files written last: the pages seen lately, not every page ever opened.
+pub fn write_soon_among<T: Serialize + Send + 'static>(dir: &str, name: &str, keep: usize, value: T) {
+    write_soon_to(path(dir).join(name), value, Some(keep));
+}
+
+fn write_soon_to<T: Serialize + Send + 'static>(target: PathBuf, value: T, keep: Option<usize>) {
     let encode = Box::new(move || serde_json::to_vec(&value).ok());
     let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
     // Already waiting means a writer is on its way, and it takes this one.
@@ -82,7 +89,32 @@ fn write_soon_to<T: Serialize + Send + 'static>(target: PathBuf, value: T) {
         if let Some(bytes) = encode.and_then(|encode| encode()) {
             write_to(&target, &bytes);
         }
+        if let (Some(keep), Some(dir)) = (keep, target.parent()) {
+            keep_latest(dir, keep);
+        }
     });
+}
+
+/// Delete all but the `keep` files in `dir` written last. A page is written
+/// again each time it is opened, so the oldest is the one least lately seen.
+fn keep_latest(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            meta.is_file().then_some((meta.modified().ok()?, entry.path()))
+        })
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, file) in files.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(file);
+    }
 }
 
 /// Delete the copy of the space older versions synced, a few hundred MB on a
@@ -116,7 +148,7 @@ mod tests {
         // Held, so every one of these waits and each replaces the last.
         let writing = WRITING.lock().unwrap();
         for value in 0..5 {
-            write_soon_to(target.clone(), value);
+            write_soon_to(target.clone(), value, None);
         }
         drop(writing);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -126,6 +158,26 @@ mod tests {
         }
         let _written = WRITING.lock().unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "4");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_the_latest_pages_are_kept() {
+        let dir = std::env::temp_dir().join(format!("stelly-cache-pages-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        for (name, age) in [("a", 3), ("b", 1), ("c", 4), ("d", 2)] {
+            let file = std::fs::File::create(dir.join(name)).unwrap();
+            file.set_modified(epoch + std::time::Duration::from_secs(1000 - age)).unwrap();
+        }
+        keep_latest(&dir, 2);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["b", "d"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

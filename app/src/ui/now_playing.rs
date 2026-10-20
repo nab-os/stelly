@@ -128,6 +128,12 @@ pub fn watch_volume() {
     call(|env, class| env.call_static_method(class, "watchVolume", "()V", &[]).map(drop));
 }
 
+/// Start reporting a change of network, which reopens the session stream at
+/// once, see `backend::remote::network_changed`.
+pub fn watch_network() {
+    call(|env, class| env.call_static_method(class, "watchNetwork", "()V", &[]).map(drop));
+}
+
 /// Set this device's media volume, 0.0 to 1.0. It lands on the nearest of the
 /// system's steps, and comes back through `watch_volume` as that.
 pub fn set_volume(level: f64) {
@@ -155,6 +161,8 @@ extern "system" fn transport(mut env: JNIEnv, _this: JObject, action: JString, v
         Ok("seek") => Button::Seek(value),
         Ok("volume") => Button::Volume(value),
         Ok("system-volume") => Button::SystemVolume(value),
+        // Not a button: the session stream's, not the player's.
+        Ok("network") => return crate::backend::remote::network_changed(),
         _ => return,
     };
     let _ = BUTTONS.0.send(button);

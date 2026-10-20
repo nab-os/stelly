@@ -11,6 +11,7 @@ use super::icons;
 use super::library::{ArtistRows, Library, TracksView, View, ViewToggle};
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
 use super::player::{enqueue, play_list, Player};
+use super::window::{split_window, use_rows, MoreRows};
 use super::{
     album_link, artist_link, open_remote_track, row_keys, space_mark, Blocklist, Cover, LocalIds, MapView,
     Pipeline, Selection, SpaceReach,
@@ -436,15 +437,21 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
     let selection = use_context::<Selection>().0;
     let mut menu = use_context::<ContextMenu>().0;
     let status = use_signal(|| None::<String>);
+    // A box set runs to hundreds of tracks.
+    let window = use_rows();
 
     library.ensure_liked_loaded();
     let liked = library.is_liked("album", &album.id);
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
-    // `ShelfTrack` indices address the same list.
-    let tracks = library.shelf.read().visible_tracks(&blocklist);
+    // `ShelfTrack` indices address the same list. Read where they are, as
+    // every render would otherwise copy the whole tracklist.
+    let shelf = library.shelf.read().clone();
+    let tracks: Vec<&RemoteTrack> = shelf.visible_tracks_iter(&blocklist).collect();
     let no_tracks = tracks.is_empty();
-    let keys = row_keys(tracks.iter().map(|track| track.id));
+    let visible = window.shown().min(tracks.len());
+    let more = visible < tracks.len();
+    let keys = row_keys(tracks.iter().take(visible).map(|track| track.id));
     let loading = *library.loading.read();
     let now_playing = player.current().map(|t| t.id);
     let local_ids = local.0.read().clone();
@@ -540,7 +547,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                 p { class: "muted error", "{message}" }
             } else {
                 ol { class: "list album-tracks",
-                    for ((index, track), key) in tracks.into_iter().enumerate().zip(keys) {
+                    for ((index, track), key) in tracks.iter().copied().enumerate().take(visible).zip(keys) {
                         li {
                             key: "{key}",
                             class: if now_playing == Some(track.id) { "row playing" } else { "row" },
@@ -585,6 +592,9 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                             {menu_button(menu, MenuTarget::ShelfTrack(index))}
                         }
                     }
+                }
+                if more {
+                    MoreRows { key: "{visible}", rows: window }
                 }
             }
         }
@@ -647,28 +657,35 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let mut menu = use_context::<ContextMenu>().0;
     let status = use_signal(|| None::<String>);
     let mut expanded = use_signal(|| false);
+    let window = use_rows();
 
     library.ensure_liked_loaded();
     let followed = library.is_liked("artist", &artist.id.to_string());
 
-    // The portrait and biography, which nothing that links here carries. A
-    // server from before that route answers 404; the page just goes without.
-    let mut info: Signal<Option<RemoteArtist>> = use_signal(|| None);
-    {
-        let id = artist.id;
-        use_future(move || async move {
-            if let Ok(found) = backend().artist(id).await {
-                info.set(Some(found));
-            }
-        });
-    }
-    let fetched = info.read().clone();
-    let image = fetched.as_ref().and_then(|a| a.image.clone()).or_else(|| artist.image.clone());
-    let biography = fetched.as_ref().and_then(|a| a.biography.clone());
-    let albums_count = fetched.as_ref().and_then(|a| a.albums_count).or(artist.albums_count);
-
+    // Sorted and keyed once per shelf, not on every render: the follow
+    // button, the bio folding out and each step of the window render again.
+    let id = artist.id;
+    let grouped = use_memo(move || sections(library.shelf.read().visible_albums(&blocklist), id));
+    let grouped = grouped.read();
     let shelf = library.shelf.read().clone();
-    let sections = sections(shelf.visible_albums(&blocklist), artist.id);
+    // The portrait and biography, fetched with the discography and kept
+    // with it. Until then, whatever the link here carried.
+    let about = shelf.about.as_ref().filter(|about| about.id == artist.id);
+    let image = about.and_then(|a| a.image.clone()).or_else(|| artist.image.clone());
+    let biography = about.and_then(|a| a.biography.clone());
+    let albums_count = about.and_then(|a| a.albums_count).or(artist.albums_count);
+    // One window over the whole discography, in page order: a section
+    // further down starts only once those above it are drawn in full.
+    let lengths: Vec<usize> = grouped.iter().map(|(_, albums, _)| albums.len()).collect();
+    let count: usize = lengths.iter().sum();
+    let drawn = split_window(&lengths, window.shown());
+    let visible: usize = drawn.iter().sum();
+    let sections: Vec<(&str, &[(usize, RemoteAlbum)], &[String])> = grouped
+        .iter()
+        .zip(drawn)
+        .filter(|(_, drawn)| *drawn > 0)
+        .map(|((heading, albums, keys), drawn)| (*heading, &albums[..drawn], &keys[..drawn]))
+        .collect();
     let has_similar = !shelf.visible_artists(&blocklist, true).is_empty();
     let loading = *library.loading.read();
     let grid = library.layout() == TracksView::Grid;
@@ -779,7 +796,7 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                         }
                     }
                     ul { class: if grid { "tiles" } else { "list" },
-                        for ((index, album), key) in albums.into_iter().zip(keys) {
+                        for ((index, album), key) in albums.iter().map(|(index, album)| (*index, album)).zip(keys) {
                             li {
                                 key: "{key}",
                                 class: if grid { "tile" } else { "row" },
@@ -814,6 +831,9 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                             }
                         }
                     }
+                }
+                if visible < count {
+                    MoreRows { key: "{visible}", rows: window }
                 }
             }
 

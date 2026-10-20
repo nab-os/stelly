@@ -44,7 +44,8 @@ futures-util.workspace = true
 reqwest.workspace = true
 # For its `prefer-post-quantum` feature; see the root Cargo.toml.
 rustls.workspace = true
-serde.workspace = true
+# `rc` for the shelves, shared by `Arc` and written to the disk as they are.
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 # Checks a downloaded release against the digest GitHub publishes for it.
 sha2.workspace = true

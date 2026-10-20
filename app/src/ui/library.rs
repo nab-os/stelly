@@ -9,21 +9,21 @@ use super::player::{enqueue, play_list, play_next, Player};
 use super::prefs::{self, Prefs};
 use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
 use super::search_history::SearchHistory;
+use super::window::{split_window, use_rows, MoreRows, Visit};
 use super::settings::SettingsScreen;
 use super::{
     artist_link, open_remote_track, open_track, Blocklist, Cover, LocalIds, MapView,
     Search, Selection, SpaceMatches, SpaceReach, SpaceRow, row_keys, space_mark, LIST_CAP,
     SEARCH_LIMIT,
 };
-use dioxus::core::Task;
+use dioxus::core::{spawn_forever, Task};
 use dioxus::prelude::*;
 use crate::api::Target;
 use crate::backend::backend;
 use crate::catalogue::{RemoteAlbum, RemoteArtist, RemoteTrack};
-
-/// How many space rows the list opens with. Enough to fill the column on any
-/// screen; "show more" triples it.
-const FIRST_SHOWN: usize = 80;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 /// Which kinds of result a search shows. Every search starts with all of
 /// them; the tracks/albums/artists chips narrow it, and tapping the lit one
@@ -161,7 +161,7 @@ pub enum View {
     /// wherever this was reached, so the page can show the cover and
     /// details while the tracklist is still loading.
     Album(RemoteAlbum),
-    /// As `Album`: the page fetches the portrait and biography on top.
+    /// As `Album`, with the portrait and biography fetched alongside.
     Artist(RemoteArtist),
     /// One track, everything known about it, laid out to be screenshotted.
     Track(RemoteTrack),
@@ -282,6 +282,11 @@ pub struct Shelf {
     /// Shown under an artist: the same hop the crawl takes when it expands
     /// the frontier, so you can see where analysis would go next.
     pub similar: Vec<crate::catalogue::RemoteArtist>,
+    /// An artist's portrait and biography, which nothing that links to
+    /// their page carries. Kept with the rest, so going back to the page, or
+    /// opening it again after a restart, does not drop them in late.
+    #[serde(default)]
+    pub about: Option<crate::catalogue::RemoteArtist>,
 }
 
 #[derive(Clone, Copy)]
@@ -290,10 +295,14 @@ pub struct Library {
     /// `loaded`, in `sort` order. Everything that indexes into the shelf
     /// (the menus, "play all", a click on row N) reads this one, so the
     /// order on screen and the order acted on cannot drift apart.
-    pub shelf: Signal<Shelf>,
+    ///
+    /// Shared rather than owned, here, in `loaded` and in `kept`: a shelf
+    /// runs to thousands of rows, and copying it whole on every page turned
+    /// was most of what a page turn cost before anything was drawn.
+    pub shelf: Signal<Arc<Shelf>>,
     /// The shelf as it came, kept so a different sort, or "default" again,
     /// does not need another fetch.
-    loaded: Signal<Shelf>,
+    loaded: Signal<Arc<Shelf>>,
     pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
     /// Loading, but a refined search's previous results stay on screen
@@ -305,20 +314,20 @@ pub struct Library {
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button, each with how
     /// far down it was scrolled when it was left.
-    pub history: Signal<Vec<(View, f64)>>,
+    pub history: Signal<Vec<(View, Left)>>,
     /// Views stepped back out of, for the mouse's forward button. Emptied by
     /// going anywhere new, as a browser does.
-    forward: Signal<Vec<(View, f64)>>,
-    /// How far down the main area is scrolled, kept by its `onscroll`. Not a
-    /// signal: it changes every frame of a scroll and nothing renders from
-    /// it, it is only read on the way out of a page.
-    pub scroll: CopyValue<f64>,
+    forward: Signal<Vec<(View, Left)>>,
     /// Where the page just asked for should be scrolled to, applied by
     /// `MainScreen` once it has rendered. Sent from `go` or `back` directly,
     /// the scroll reached the webview before the new page did and was set on
     /// the old one: a target the old page was long enough for counted as
     /// reached, and the new page coming in then cut it short.
     restore: Signal<Option<f64>>,
+    /// The last arrival on a page, and how far down it landed. What a long
+    /// list opens its window for, see `window`; kept past `restore`, as a
+    /// page not in `kept` only draws its lists once its fetch lands.
+    pub(crate) visit: CopyValue<Visit>,
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
@@ -356,9 +365,20 @@ pub struct Library {
     /// instead of an empty page until the fetch lands, which is a flash on
     /// every back. Keyed on the source as well: the same search asked of the
     /// space and of Qobuz finds different things.
-    kept: Signal<Vec<(View, Source, Shelf)>>,
+    kept: Signal<Vec<Kept>>,
     /// Recent searches, newest first, saved. See `search_history`.
     pub(crate) searches: Signal<Vec<String>>,
+}
+
+/// One view `Library::kept` remembers: what it loaded, and that in the order
+/// it was last shown, so going back to it under the same sort sorts nothing.
+#[derive(Clone)]
+struct Kept {
+    view: View,
+    source: Source,
+    loaded: Arc<Shelf>,
+    sort: Sort,
+    shown: Arc<Shelf>,
 }
 
 /// How many views `Library::kept` remembers. Enough to step back through a
@@ -478,8 +498,8 @@ impl Library {
         let prefs = Prefs::load();
         Self {
             view: Signal::new(View::Favourites { scope: Scope::Everything }),
-            shelf: Signal::new(Shelf::default()),
-            loaded: Signal::new(Shelf::default()),
+            shelf: Signal::new(Arc::default()),
+            loaded: Signal::new(Arc::default()),
             sort: Signal::new(Sort::default()),
             loading: Signal::new(true),
             refining: Signal::new(false),
@@ -487,8 +507,8 @@ impl Library {
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
             forward: Signal::new(Vec::new()),
-            scroll: CopyValue::new(0.0),
             restore: Signal::new(None),
+            visit: CopyValue::new(Visit::default()),
             pending: Signal::new(None),
             notice: Signal::new(None),
             layouts: Signal::new(prefs.layouts),
@@ -660,40 +680,52 @@ impl Library {
     fn drop_from_favourites(&mut self, kind: &str, id: &str) {
         if matches!(*self.view.peek(), View::Favourites { .. }) {
             for mut shelf in [self.shelf, self.loaded] {
-                let mut kept = shelf.peek().clone();
-                if kept.drop_liked(kind, id) {
-                    shelf.set(kept);
+                let dropped = without(&shelf.peek(), kind, id);
+                if let Some(dropped) = dropped {
+                    shelf.set(dropped);
                 }
             }
         }
-        for (view, _, shelf) in self.kept.write().iter_mut() {
-            if matches!(view, View::Favourites { .. }) {
-                shelf.drop_liked(kind, id);
+        for kept in self.kept.write().iter_mut() {
+            if matches!(kept.view, View::Favourites { .. }) {
+                for shelf in [&mut kept.loaded, &mut kept.shown] {
+                    if let Some(dropped) = without(shelf, kind, id) {
+                        *shelf = dropped;
+                    }
+                }
             }
         }
     }
 
     /// Navigate, remembering where we came from.
     pub(crate) fn go(mut self, target: View) {
-        leaving("go", 0.0);
+        let left = leaving("go", 0.0);
         let previous = self.view.peek().clone();
         if previous != target {
-            self.history.write().push((previous, self.scroll.cloned()));
+            self.history.write().push((previous, left));
             self.forward.write().clear();
         }
         self.show(target);
-        self.restore.set(Some(0.0));
+        self.arrive(0.0);
     }
 
     /// Back where it was left, scroll and all.
     pub(crate) fn back(mut self) {
         let previous = self.history.write().pop();
         if let Some((view, scroll)) = previous {
-            leaving("back", scroll);
-            self.forward.write().push((self.view.peek().clone(), self.scroll.cloned()));
+            let scroll = scroll.get();
+            let left = leaving("back", scroll);
+            self.forward.write().push((self.view.peek().clone(), left));
             self.show(view);
-            self.restore.set(Some(scroll));
+            self.arrive(scroll);
         }
+    }
+
+    /// Land on the page just shown, `scroll` pixels down.
+    fn arrive(mut self, scroll: f64) {
+        let visit = self.visit.cloned().next(scroll);
+        self.visit.set(visit);
+        self.restore.set(Some(scroll));
     }
 
     /// False once going somewhere new has emptied the way forward.
@@ -704,10 +736,11 @@ impl Library {
     pub(crate) fn forward(mut self) {
         let next = self.forward.write().pop();
         if let Some((view, scroll)) = next {
-            leaving("forward", scroll);
-            self.history.write().push((self.view.peek().clone(), self.scroll.cloned()));
+            let scroll = scroll.get();
+            let left = leaving("forward", scroll);
+            self.history.write().push((self.view.peek().clone(), left));
             self.show(view);
-            self.restore.set(Some(scroll));
+            self.arrive(scroll);
         }
     }
 
@@ -793,8 +826,8 @@ impl Library {
 
     fn set_sort(mut self, sort: Sort) {
         self.sort.set(sort);
-        let loaded = self.loaded.peek().clone();
-        self.shelf.set(loaded.sorted(sort));
+        let sorted = in_order(&self.loaded.peek(), sort);
+        self.shelf.set(sorted);
     }
 
     /// Whether the space's own tracks are part of this view. Only for a
@@ -815,8 +848,8 @@ impl Library {
         let kept = self.kept.peek();
         let views = open
             .iter()
-            .map(|(view, shelf)| (view, shelf))
-            .chain(kept.iter().map(|(view, _, shelf)| (view, shelf)));
+            .map(|(view, shelf)| (view, &**shelf))
+            .chain(kept.iter().map(|kept| (&kept.view, &*kept.loaded)));
         album_tracks_in(views, id)
     }
 
@@ -842,10 +875,17 @@ impl Library {
             }
         }
         let source = *self.source.peek();
+        let sort = *self.sort.peek();
         if !*self.loading.peek() && self.error.peek().is_none() {
-            let leaving = (self.view.peek().clone(), source, self.loaded.peek().clone());
+            let leaving = Kept {
+                view: self.view.peek().clone(),
+                source,
+                loaded: self.loaded.peek().clone(),
+                sort,
+                shown: self.shelf.peek().clone(),
+            };
             let mut kept = self.kept.write();
-            kept.retain(|(view, from, _)| (view, from) != (&leaving.0, &leaving.1));
+            kept.retain(|kept| (&kept.view, kept.source) != (&leaving.view, leaving.source));
             kept.push(leaving);
             if kept.len() > KEPT {
                 kept.remove(0);
@@ -855,11 +895,11 @@ impl Library {
             .kept
             .peek()
             .iter()
-            .find(|(view, from, _)| *view == target && *from == source)
-            .map(|(_, _, shelf)| shelf.clone())
-            // Releases can take minutes to fetch cold, so last time's list is
-            // shown in the meantime, not only at startup the way home's is.
-            .or_else(|| (target == View::Releases).then(|| crate::cache::read(RELEASES_CACHE)).flatten());
+            .find(|kept| kept.view == target && kept.source == source)
+            .map(|kept| {
+                let shown = if kept.sort == sort { kept.shown.clone() } else { in_order(&kept.loaded, sort) };
+                (kept.loaded.clone(), shown)
+            });
 
         if crate::timings::enabled() {
             crate::timings::nav_asked(timing_name(&target), *self.epoch.peek() + 1, known.is_some());
@@ -869,16 +909,15 @@ impl Library {
         self.error.set(None);
         self.notice.set(None);
         match known {
-            Some(shelf) => {
-                let sort = *self.sort.peek();
-                self.loaded.set(shelf.clone());
-                self.shelf.set(shelf.sorted(sort));
+            Some((loaded, shown)) => {
+                self.loaded.set(loaded);
+                self.shelf.set(shown);
                 self.loading.set(false);
             }
             None if refining => self.loading.set(true),
             None => {
-                self.shelf.set(Shelf::default());
-                self.loaded.set(Shelf::default());
+                self.shelf.set(Arc::default());
+                self.loaded.set(Arc::default());
                 self.loading.set(true);
             }
         }
@@ -898,39 +937,52 @@ impl Library {
         let epoch = *self.epoch.peek();
         let space_only = *self.source.peek() == Source::Space;
         let only = self.only.peek().clone();
-        // Already showing what `kept` had for this view: a failed refresh
-        // leaves that up rather than swapping it for an error.
-        let refreshing = !*self.loading.peek();
         if let Some(task) = self.searching.take() {
             task.cancel();
         }
         let search = matches!(target, View::Search { .. });
+        let cache = if target == home() {
+            Some(HOME_CACHE)
+        } else if target == View::Releases {
+            Some(RELEASES_CACHE)
+        } else {
+            None
+        };
+        let page = page_name(&target);
+        // Releases can take minutes to fetch cold, so last time's list is
+        // shown in the meantime, not only at startup the way home's is. So
+        // is an album or artist page seen before, which is often the next
+        // one opened after a restart.
+        if *self.loading.peek() {
+            if target == View::Releases {
+                self.from_disk(epoch, RELEASES_CACHE.to_string());
+            } else if let Some(name) = &page {
+                self.from_disk(epoch, format!("{PAGES}/{name}"));
+            }
+        }
 
         let task = spawn(async move {
             let mut library = self;
-            let cache = if target == home() {
-                Some(HOME_CACHE)
-            } else if target == View::Releases {
-                Some(RELEASES_CACHE)
-            } else {
-                None
-            };
             let favourites = match &target {
                 View::Favourites { scope } => Some((*scope, ask_liked())),
                 _ => None,
             };
-            let mut loaded = load(target, space_only, only).await;
-            if let (Some((scope, asked)), Ok(shelf)) = (favourites, &mut loaded) {
-                // Every like, before the tiles stand in for some: what a page
-                // opening would otherwise fetch again for its heart.
-                if scope == Scope::Everything {
-                    library.take_liked(Liked::of(shelf), Some(asked));
+            let loaded = load(target, space_only, only).await.map(|mut shelf| {
+                if let Some((scope, asked)) = favourites {
+                    // Every like, before the tiles stand in for some: what a
+                    // page opening would otherwise fetch again for its heart.
+                    if scope == Scope::Everything {
+                        library.take_liked(Liked::of(&shelf), Some(asked));
+                    }
+                    // As it came, and so a copy: the tiles are about to stand
+                    // in for some of its tracks.
+                    if let Some(name) = cache.filter(|_| *library.epoch.peek() == epoch) {
+                        crate::cache::write_soon(name, shelf.clone());
+                    }
+                    shelf.stand_in(scope);
                 }
-                if let Some(name) = cache.filter(|_| *library.epoch.peek() == epoch) {
-                    crate::cache::write(name, &*shelf);
-                }
-                shelf.stand_in(scope);
-            }
+                Arc::new(shelf)
+            });
 
             // Someone asked for a different view while this was in flight.
             // Writing now would put these rows under that view's heading, and
@@ -944,19 +996,24 @@ impl Library {
                     crate::timings::nav_landed(epoch);
                     // Home's went to the disk as it came, above.
                     if let Some(name) = cache.filter(|_| favourites.is_none()) {
-                        crate::cache::write(name, &shelf);
+                        crate::cache::write_soon(name, shelf.clone());
                     }
-                    let sort = *library.sort.peek();
-                    library.loaded.set(shelf.clone());
-                    library.shelf.set(shelf.sorted(sort));
+                    if let Some(name) = &page {
+                        crate::cache::write_soon_among(PAGES, name, KEPT_PAGES, shelf.clone());
+                    }
+                    let sorted = in_order(&shelf, *library.sort.peek());
+                    library.loaded.set(shelf);
+                    library.shelf.set(sorted);
                 }
-                Err(_) if refreshing => {}
+                // Already showing what `kept` or the disk had for this view:
+                // a failed refresh leaves that up rather than an error.
+                Err(_) if !*library.loading.peek() => {}
                 Err(err) => {
                     // A refined search kept the last answer up meanwhile;
                     // it is not this query's, so "play all" must not reach it.
                     if *library.refining.peek() {
-                        library.loaded.set(Shelf::default());
-                        library.shelf.set(Shelf::default());
+                        library.loaded.set(Arc::default());
+                        library.shelf.set(Arc::default());
                     }
                     library.error.set(Some(format!("{err:#}")));
                 }
@@ -969,6 +1026,28 @@ impl Library {
         if search {
             self.searching.set(Some(task));
         }
+    }
+
+    /// Show what the disk kept of the view asked for at `epoch`, read off
+    /// the UI thread, unless its fetch has landed first or it was left.
+    fn from_disk(self, epoch: u64, name: String) {
+        spawn(async move {
+            let mut library = self;
+            let read = tokio::task::spawn_blocking(move || crate::cache::read::<Shelf>(&name)).await;
+            let Ok(Some(shelf)) = read else { return };
+            if *library.epoch.peek() != epoch || !*library.loading.peek() {
+                return;
+            }
+            crate::timings::nav_from_disk(epoch);
+            let shelf = Arc::new(shelf);
+            let sorted = in_order(&shelf, *library.sort.peek());
+            library.loaded.set(shelf);
+            library.shelf.set(sorted);
+            library.loading.set(false);
+            if *library.refining.peek() {
+                library.refining.set(false);
+            }
+        });
     }
 }
 
@@ -1046,12 +1125,41 @@ fn timing_name(view: &View) -> &'static str {
     }
 }
 
+/// How far down a page was scrolled when it was left, for going back to it.
+/// Filled in when the webview answers `leaving`, a few milliseconds after:
+/// long before anyone could go back.
+#[derive(Clone, Default, Debug)]
+pub struct Left(Rc<Cell<f64>>);
+
+impl Left {
+    fn get(&self) -> f64 {
+        self.0.get()
+    }
+}
+
 /// Tells transitions.js a page is about to be replaced, how, and where the
 /// new one will be scrolled to. Sent before the view changes, so it reaches
 /// the webview ahead of the render and the old page is still there to copy
-/// and measure.
-fn leaving(kind: &str, scroll: f64) {
-    document::eval(&format!("window.stellyLeaving && window.stellyLeaving('{kind}', {scroll});"));
+/// and measure, and still scrolled where it was left: the answer is that.
+/// Read once here rather than sent over on every scroll event, dozens a
+/// second, for the one that counts.
+fn leaving(kind: &str, scroll: f64) -> Left {
+    let left = Left::default();
+    let eval = document::eval(&format!(
+        "const body = document.querySelector('.screen-body');
+        const left = body ? body.scrollTop : 0;
+        window.stellyLeaving && window.stellyLeaving('{kind}', {scroll});
+        return left;"
+    ));
+    let cell = left.0.clone();
+    // Not tied to the scope that asked: a tile opening a page is gone with
+    // the page it was on before the answer comes.
+    spawn_forever(async move {
+        if let Ok(top) = eval.join::<f64>().await {
+            cell.set(top);
+        }
+    });
+    left
 }
 
 /// A new page starts at its top, and one gone back to where it was left. The
@@ -1103,8 +1211,15 @@ pub fn open_initial(library: Library) {
         // Held as it came, so the hearts are right before anything lands.
         library.take_liked(Liked::of(&shelf), None);
         shelf.stand_in(Scope::Everything);
-        let source = *library.source.peek();
-        library.kept.write().push((home(), source, shelf));
+        let loaded = Arc::new(shelf);
+        let sort = *library.sort.peek();
+        library.kept.write().push(Kept {
+            view: home(),
+            source: *library.source.peek(),
+            shown: in_order(&loaded, sort),
+            loaded,
+            sort,
+        });
     }
     library.show(home());
 }
@@ -1115,6 +1230,31 @@ fn home() -> View {
 
 const HOME_CACHE: &str = "favourites.json";
 const RELEASES_CACHE: &str = "releases.json";
+
+/// Where the album and artist pages seen lately are kept, one file each.
+const PAGES: &str = "pages";
+
+/// How many of them. A page is a few to a few dozen KB.
+const KEPT_PAGES: usize = 100;
+
+/// The file in `PAGES` a view is kept in, if it is an album or artist page.
+/// The id is escaped, as an album's is the provider's text.
+fn page_name(view: &View) -> Option<String> {
+    let (kind, id) = match view {
+        View::Album(album) => ("album", album.id.clone()),
+        View::Artist(artist) => ("artist", artist.id.to_string()),
+        _ => return None,
+    };
+    let mut name = format!("{kind}-");
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            name.push(byte as char);
+        } else {
+            name.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    Some(name + ".json")
+}
 
 /// How far back new releases reach.
 const RELEASES_DAYS: u32 = 90;
@@ -1201,14 +1341,17 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
         View::Artist(artist) => {
             // Asked together: neither needs the other, and one after the
             // other the page waited out both round trips.
-            let (albums, similar) = tokio::join!(
+            let (albums, similar, about) = tokio::join!(
                 backend().artist_albums(artist.id, LIST_CAP),
                 backend().similar_artists(artist.id, 20),
+                backend().artist(artist.id),
             );
             shelf.albums = albums?;
             // Not fatal: an artist with no similar list should still show a
-            // discography rather than an error.
+            // discography rather than an error. Nor is a server from before
+            // the portrait and biography, which answers 404 for them.
             shelf.similar = similar.unwrap_or_default();
+            shelf.about = about.ok();
         }
         // Pages that carry what they show, or fetch it themselves.
         View::Track(_) | View::Settings => {}
@@ -1364,10 +1507,6 @@ pub fn MainScreen() -> Element {
 
             div {
                 class: "screen-body",
-                onscroll: move |event: Event<ScrollData>| {
-                    let mut scroll = library.scroll;
-                    scroll.set(event.scroll_top());
-                },
                 match view {
                     // Keyed on what they show: going from one album straight
                     // to another is otherwise a prop change on the same
@@ -1517,35 +1656,31 @@ fn BrowseScreen() -> Element {
     // Only while searching the space, see `Library::shows_space`.
     let show_space = library.shows_space();
     let space_only = library.searching_space_only();
-    let shelf = library.shelf.read().clone();
 
     // Every emptiness test below asks about what is *visible*: no heading over
-    // nothing, and the bulk actions must not reach past the filter.
+    // nothing, and the bulk actions must not reach past the filter. Asked of
+    // the shelf in place: each list draws its own rows, and copying them all
+    // here only to see whether there were any was a second shelf a render.
     let space = use_context::<SpaceMatches>();
-    // The whole shelf, for the bulk actions: "play all" means the view's
-    // tracks, including ones the space section happens to be showing.
-    let shelf_tracks = shelf.visible_tracks(&blocklist);
+    let in_space = space_ids(&library, &space);
     let (liked_only, liked) = library.liked_state();
-    let tracks = catalogue_only(shelf_tracks.clone(), &space_ids(&library, &space));
-    let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
-        tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
-    } else {
-        tracks
+    let (any_tracks, has_tracks, has_albums, has_artists, has_playlists) = {
+        let shelf = library.shelf.read();
+        // The whole shelf, for the bulk actions: "play all" means the view's
+        // tracks, including ones the space section happens to be showing.
+        let any_tracks = shelf.visible_tracks_iter(&blocklist).next().is_some();
+        let has_tracks = shelf
+            .visible_tracks_iter(&blocklist)
+            .any(|t| !in_space.contains(&t.id) && (!liked_only || liked.tracks.contains(&t.id)));
+        let has_albums = shelf
+            .visible_albums_iter(&blocklist)
+            .any(|a| !liked_only || liked.albums.contains(&a.id));
+        let has_artists = shelf
+            .visible_artists_iter(&blocklist, false)
+            .any(|a| !liked_only || liked.artists.contains(&a.id));
+        (any_tracks, has_tracks, has_albums, has_artists, !shelf.playlists.is_empty())
     };
-    let albums = shelf.visible_albums(&blocklist);
-    let albums: Vec<crate::catalogue::RemoteAlbum> = if liked_only {
-        albums.into_iter().filter(|a| liked.albums.contains(&a.id)).collect()
-    } else {
-        albums
-    };
-    let artists = shelf.visible_artists(&blocklist, false);
-    let artists: Vec<crate::catalogue::RemoteArtist> = if liked_only {
-        artists.into_iter().filter(|a| liked.artists.contains(&a.id)).collect()
-    } else {
-        artists
-    };
-    let nothing_from_catalogue =
-        tracks.is_empty() && albums.is_empty() && artists.is_empty() && shelf.playlists.is_empty();
+    let nothing_from_catalogue = !has_tracks && !has_albums && !has_artists && !has_playlists;
     let nothing_visible = nothing_from_catalogue && (!show_space || space.0.read().1 == 0);
     let empty_search = matches!(&view, View::Search { query, .. } if query.trim().is_empty());
 
@@ -1607,7 +1742,7 @@ fn BrowseScreen() -> Element {
             ViewToggle {}
         }
 
-        if !shelf_tracks.is_empty() {
+        if any_tracks {
             div { class: "actions",
                 button {
                     class: "chip",
@@ -1657,16 +1792,16 @@ fn BrowseScreen() -> Element {
                         MixedRows {}
                     }
                 } else {
-                    if !artists.is_empty() {
+                    if has_artists {
                         ArtistRows { heading: "Artists".to_string(), similar: false }
                     }
-                    if !albums.is_empty() {
+                    if has_albums {
                         AlbumRows {}
                     }
-                    if !shelf.playlists.is_empty() {
+                    if has_playlists {
                         PlaylistRows {}
                     }
-                    if !tracks.is_empty() {
+                    if has_tracks {
                         TrackRows {}
                     }
                 }
@@ -1863,6 +1998,7 @@ fn MixedRows() -> Element {
     let menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let matches = use_context::<SpaceMatches>();
+    let window = use_rows();
 
     let (liked_only, liked) = library.liked_state();
     let space_only = library.searching_space_only();
@@ -1914,6 +2050,7 @@ fn MixedRows() -> Element {
     // the loop's own nodes are what get matched up between renders.
     let keys = row_keys(items.iter().map(Item::id));
     let items: Vec<(String, Item)> = keys.into_iter().zip(items).collect();
+    let count = items.len();
 
     if items.is_empty() {
         return rsx! {};
@@ -2018,7 +2155,9 @@ fn MixedRows() -> Element {
             },
             Item::Space(row) => rsx! {
                 li {
-                    class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
+                    // Peeked: the selection moves the class itself, see `Shell`.
+                    class: if selection.peek().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
+                    "data-space": "{row.track_id}",
                     onclick: {
                         let id = row.track_id;
                         move |_| open_track(library, selection, id)
@@ -2068,6 +2207,20 @@ fn MixedRows() -> Element {
     } else {
         vec![("", items)]
     };
+    // One window over the sections, in page order, so a section further
+    // down starts only once those above it are drawn in full.
+    let lengths: Vec<usize> = sections.iter().map(|(_, items)| items.len()).collect();
+    let drawn = split_window(&lengths, window.shown());
+    let visible: usize = drawn.iter().sum();
+    let sections: Vec<(&str, Vec<(String, Item)>)> = sections
+        .into_iter()
+        .zip(drawn)
+        .filter(|(_, drawn)| *drawn > 0)
+        .map(|((heading, mut items), drawn)| {
+            items.truncate(drawn);
+            (heading, items)
+        })
+        .collect();
 
     rsx! {
         // Under the space's own section in a search, so the two lists say
@@ -2085,6 +2238,9 @@ fn MixedRows() -> Element {
                     Fragment { key: "{key}", {row(item)} }
                 }
             }
+        }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
         }
     }
 }
@@ -2132,8 +2288,9 @@ fn SpaceRows() -> Element {
     let mut menu = use_context::<ContextMenu>().0;
     let search = use_context::<Search>();
 
-    // Grows on request rather than rendering 720 rows nobody scrolled to.
-    let mut shown = use_signal(|| FIRST_SHOWN);
+    // Grows as it is scrolled through rather than rendering 720 rows nobody
+    // scrolled to.
+    let window = use_rows();
 
     let (rows, total) = matches();
     // With Qobuz out of the search, "liked" has only the space left to
@@ -2151,7 +2308,7 @@ fn SpaceRows() -> Element {
     // Whether the box is empty, not what is in it: read directly, every
     // keystroke would draw all these rows again.
     let searching = use_memo(move || !search.text.read().trim().is_empty());
-    let visible = shown().min(rows.len());
+    let visible = window.shown().min(rows.len());
     let grid = library.layout() == TracksView::Grid;
 
     if total == 0 {
@@ -2180,14 +2337,17 @@ fn SpaceRows() -> Element {
             for row in rows.iter().take(visible) {
                 li {
                     key: "{row.track_id}",
+                    // Peeked: the selection moves the class itself, see
+                    // `Shell`.
                     class: {
                         let base = if grid { "tile" } else { "row" };
-                        if selection.read().as_ref() == Some(&row.track_id) {
+                        if selection.peek().as_ref() == Some(&row.track_id) {
                             format!("{base} selected")
                         } else {
                             base.to_string()
                         }
                     },
+                    "data-space": "{row.track_id}",
                     onclick: {
                         let id = row.track_id;
                         move |_| open_track(library, selection, id)
@@ -2220,17 +2380,36 @@ fn SpaceRows() -> Element {
             }
         }
 
-        if visible < total {
-            button {
-                class: "chip more-rows",
-                onclick: move |_| {
-                    let next = shown() * 3;
-                    shown.set(next);
-                },
-                "show more"
-            }
+        if visible < rows.len() {
+            MoreRows { key: "{visible}", rows: window }
         }
     }
+}
+
+/// `shelf` in `sort` order: a sorted copy, or the same one if `sort` keeps
+/// the order it came in.
+fn in_order(shelf: &Arc<Shelf>, sort: Sort) -> Arc<Shelf> {
+    if sort == (Sort { key: SortKey::Default, descending: false }) {
+        shelf.clone()
+    } else {
+        Arc::new(Shelf::clone(shelf).sorted(sort))
+    }
+}
+
+/// `shelf` without the track, album or artist `id`, if it was on it: copied
+/// only then, as it is shared with whatever else holds it.
+fn without(shelf: &Shelf, kind: &str, id: &str) -> Option<Arc<Shelf>> {
+    let on = match kind {
+        "track" => shelf.tracks.iter().any(|track| track.id.to_string() == id),
+        "album" => shelf.albums.iter().any(|album| album.id == id),
+        "artist" => shelf.artists.iter().any(|artist| artist.id.to_string() == id),
+        _ => false,
+    };
+    on.then(|| {
+        let mut copy = shelf.clone();
+        copy.drop_liked(kind, id);
+        Arc::new(copy)
+    })
 }
 
 impl Shelf {
@@ -2263,6 +2442,7 @@ impl Shelf {
                 _ => None,
             }),
             similar: sort.apply(self.similar, artist),
+            about: self.about,
         }
     }
 
@@ -2270,19 +2450,11 @@ impl Shelf {
     /// the click handlers must both go through these, filtering in one and
     /// indexing the unfiltered list in the other made row N open row N+1.
     pub fn visible_tracks(&self, blocked: &Blocklist) -> Vec<RemoteTrack> {
-        self.tracks
-            .iter()
-            .filter(|track| !blocked.hides(track))
-            .cloned()
-            .collect()
+        self.visible_tracks_iter(blocked).cloned().collect()
     }
 
     pub fn visible_albums(&self, blocked: &Blocklist) -> Vec<crate::catalogue::RemoteAlbum> {
-        self.albums
-            .iter()
-            .filter(|album| !album.artist_id.is_some_and(|id| blocked.contains(id)))
-            .cloned()
-            .collect()
+        self.visible_albums_iter(blocked).cloned().collect()
     }
 
     pub fn visible_artists(
@@ -2290,12 +2462,33 @@ impl Shelf {
         blocked: &Blocklist,
         similar: bool,
     ) -> Vec<crate::catalogue::RemoteArtist> {
-        let source = if similar { &self.similar } else { &self.artists };
-        source
+        self.visible_artists_iter(blocked, similar).cloned().collect()
+    }
+
+    /// The same rows, in place, for asking whether there are any.
+    pub(crate) fn visible_tracks_iter<'a>(
+        &'a self,
+        blocked: &'a Blocklist,
+    ) -> impl Iterator<Item = &'a RemoteTrack> {
+        self.tracks.iter().filter(|track| !blocked.hides(track))
+    }
+
+    fn visible_albums_iter<'a>(
+        &'a self,
+        blocked: &'a Blocklist,
+    ) -> impl Iterator<Item = &'a RemoteAlbum> {
+        self.albums
             .iter()
-            .filter(|artist| !blocked.contains(artist.id))
-            .cloned()
-            .collect()
+            .filter(|album| !album.artist_id.is_some_and(|id| blocked.contains(id)))
+    }
+
+    fn visible_artists_iter<'a>(
+        &'a self,
+        blocked: &'a Blocklist,
+        similar: bool,
+    ) -> impl Iterator<Item = &'a RemoteArtist> {
+        let source = if similar { &self.similar } else { &self.artists };
+        source.iter().filter(|artist| !blocked.contains(artist.id))
     }
 }
 
@@ -2309,6 +2502,7 @@ fn TrackRows() -> Element {
     let mut menu = use_context::<ContextMenu>().0;
 
     let matches = use_context::<SpaceMatches>();
+    let window = use_rows();
 
     // Matched on the Qobuz track id: that is the same recording *and* the
     // same release, so suppressing it hides nothing you could not already
@@ -2325,7 +2519,8 @@ fn TrackRows() -> Element {
     let now_playing = player.current().map(|t| t.id);
     let grid = library.layout() == TracksView::Grid;
     let count = tracks.len();
-    let keys = row_keys(tracks.iter().map(|(_, track)| track.id));
+    let visible = window.shown().min(count);
+    let keys = row_keys(tracks.iter().take(visible).map(|(_, track)| track.id));
 
     if tracks.is_empty() {
         return rsx! {};
@@ -2343,7 +2538,7 @@ fn TrackRows() -> Element {
             }
         }
         ul { class: if grid { "tiles" } else { "list" },
-            for ((index, track), key) in tracks.into_iter().zip(keys) {
+            for ((index, track), key) in tracks.into_iter().take(visible).zip(keys) {
                 li {
                     key: "{key}",
                     class: {
@@ -2397,6 +2592,9 @@ fn TrackRows() -> Element {
                 }
             }
         }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
+        }
     }
 }
 
@@ -2406,6 +2604,7 @@ fn AlbumRows() -> Element {
     let blocklist = use_context::<Blocklist>();
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
+    let window = use_rows();
     let (liked_only, liked) = library.liked_state();
     // Enumerated before filtering, same as `catalogue_only`: `index` is this
     // row's address into `visible_albums`, and filtering after numbering
@@ -2418,7 +2617,9 @@ fn AlbumRows() -> Element {
         .enumerate()
         .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
         .collect();
-    let keys = row_keys(albums.iter().map(|(_, album)| &album.id));
+    let count = albums.len();
+    let visible = window.shown().min(count);
+    let keys = row_keys(albums.iter().take(visible).map(|(_, album)| &album.id));
     // How recent is the point of new releases, so they say when, and what
     // sort of release when it is not a whole album.
     let releases = *library.view.read() == View::Releases;
@@ -2426,7 +2627,7 @@ fn AlbumRows() -> Element {
     rsx! {
         h3 { class: "shelf-head", "Albums" }
         ul { class: "tiles",
-            for ((index, album), key) in albums.into_iter().zip(keys) {
+            for ((index, album), key) in albums.into_iter().take(visible).zip(keys) {
                 li {
                     key: "{key}",
                     class: "tile",
@@ -2458,6 +2659,9 @@ fn AlbumRows() -> Element {
                 }
             }
         }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
+        }
     }
 }
 
@@ -2479,6 +2683,7 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
     let blocklist = use_context::<Blocklist>();
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
+    let window = use_rows();
     let (liked_only, liked) = library.liked_state();
     // Never for "similar artists": that section's entire point is showing
     // who you have *not* already reached, so filtering it by what is already
@@ -2491,12 +2696,14 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
         .enumerate()
         .filter(|(_, a)| similar || !liked_only || liked.artists.contains(&a.id))
         .collect();
-    let keys = row_keys(artists.iter().map(|(_, artist)| artist.id));
+    let count = artists.len();
+    let visible = window.shown().min(count);
+    let keys = row_keys(artists.iter().take(visible).map(|(_, artist)| artist.id));
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
         ul { class: "tiles",
-            for ((index, artist), key) in artists.into_iter().zip(keys) {
+            for ((index, artist), key) in artists.into_iter().take(visible).zip(keys) {
                 li {
                     key: "{key}",
                     class: "tile",
@@ -2519,13 +2726,19 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
                 }
             }
         }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
+        }
     }
 }
 
 #[component]
 fn PlaylistRows() -> Element {
     let library = use_context::<Library>();
-    let playlists = library.shelf.read().playlists.clone();
+    let window = use_rows();
+    let count = library.shelf.read().playlists.len();
+    let visible = window.shown().min(count);
+    let playlists: Vec<_> = library.shelf.read().playlists[..visible].to_vec();
     let keys = row_keys(playlists.iter().map(|playlist| &playlist.id));
 
     rsx! {
@@ -2553,6 +2766,9 @@ fn PlaylistRows() -> Element {
                     }
                 }
             }
+        }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
         }
     }
 }
@@ -2662,6 +2878,26 @@ mod tests {
 
     fn ids(tracks: Option<Vec<RemoteTrack>>) -> Option<Vec<i64>> {
         tracks.map(|tracks| tracks.iter().map(|track| track.id).collect())
+    }
+
+    #[test]
+    fn a_page_is_kept_under_a_name_its_id_cannot_escape() {
+        let album = |id: &str| View::Album(RemoteAlbum { id: id.into(), ..Default::default() });
+        assert_eq!(page_name(&album("0060254728690")).as_deref(), Some("album-0060254728690.json"));
+        assert_eq!(page_name(&album("../user")).as_deref(), Some("album-%2e%2e%2fuser.json"));
+        let artist = View::Artist(RemoteArtist { id: 42, ..Default::default() });
+        assert_eq!(page_name(&artist).as_deref(), Some("artist-42.json"));
+        assert_eq!(page_name(&View::Settings), None);
+    }
+
+    #[test]
+    fn a_shared_shelf_is_copied_only_when_it_changes() {
+        let shelf = Arc::new(tracks(&[1, 2]));
+        let as_it_came = Sort { key: SortKey::Default, descending: false };
+        assert!(Arc::ptr_eq(&in_order(&shelf, as_it_came), &shelf));
+        assert!(without(&shelf, "track", "5").is_none());
+        assert_eq!(without(&shelf, "track", "2").map(|left| left.tracks.len()), Some(1));
+        assert_eq!(shelf.tracks.len(), 2);
     }
 
     #[test]

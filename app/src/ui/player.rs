@@ -1371,6 +1371,8 @@ pub fn use_transport(player: Player) {
 
     #[cfg(target_os = "android")]
     use_hook(super::now_playing::watch_volume);
+    #[cfg(target_os = "android")]
+    use_hook(super::now_playing::watch_network);
 }
 
 /// Join the shared session: follow what the server pushes, send what this

@@ -2,6 +2,7 @@
 -keep class dev.dioxus.main.Playback {
     public static void show(...);
     public static void hide();
+    public static void watchNetwork();
     native <methods>;
 }
 
