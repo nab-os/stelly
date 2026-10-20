@@ -94,6 +94,9 @@ struct Mirror {
     /// The server could not read a volume op, being older than it, so there
     /// is no sending another.
     volume_refused: bool,
+    /// The volume slider is held. This device's level follows it, but is
+    /// only told to the others, or overruled by them, once it is let go.
+    turning: bool,
 }
 
 impl Default for Mirror {
@@ -111,6 +114,7 @@ impl Default for Mirror {
             reported: None,
             local: None,
             volume_refused: false,
+            turning: false,
         }
     }
 }
@@ -548,6 +552,9 @@ fn heard_volume(player: Player, level: f64) {
     let report = {
         let mut mirror = mirror();
         mirror.local = Some(level);
+        if mirror.turning {
+            return;
+        }
         mirror.is_output()
             && !mirror.volume_refused
             && !mirror.session().volume.is_some_and(|wanted| same_level(wanted, level))
@@ -564,7 +571,7 @@ fn heard_volume(player: Player, level: f64) {
 fn follow_volume(player: Player) {
     let op = {
         let mut mirror = mirror();
-        if !mirror.is_output() || mirror.volume_refused {
+        if !mirror.is_output() || mirror.volume_refused || mirror.turning {
             return;
         }
         let Some(local) = mirror.local else {
@@ -608,6 +615,30 @@ pub fn set_volume(player: Player, level: f64) {
         #[cfg(not(target_os = "android"))]
         heard_volume(player, level);
     }
+}
+
+/// The volume slider moved under a finger or the mouse. Heard at once when
+/// the sound is this device's, so the level can be found by ear; another
+/// device's is only asked for on release, see `let_go_volume`.
+fn turn_volume(level: f64) {
+    let local = {
+        let mut mirror = mirror();
+        if mirror.is_remote() {
+            false
+        } else {
+            mirror.turning = true;
+            true
+        }
+    };
+    if local {
+        set_local(level.clamp(0.0, 1.0));
+    }
+}
+
+/// The volume slider let go at `level`: the one change the others hear of.
+fn let_go_volume(player: Player, level: f64) {
+    mirror().turning = false;
+    set_volume(player, level);
 }
 
 pub fn quality_label(quality: Quality) -> &'static str {
@@ -856,6 +887,12 @@ pub fn PlayerBar() -> Element {
     let level = volume.unwrap_or(0.0);
     // What unmuting goes back to.
     let mut unmuted = use_signal(|| 1.0);
+    // Where the seek line and the volume are held, while they are: drawn
+    // from here rather than from the player, so the position updates do not
+    // pull the thumb back under the finger, and nothing is sent until it is
+    // let go. See `release`.
+    let mut seeking = use_signal(|| None::<f64>);
+    let mut turning = use_signal(|| None::<f64>);
     let mut queue_open = player.queue_open;
 
     library.ensure_liked_loaded();
@@ -869,12 +906,27 @@ pub fn PlayerBar() -> Element {
     } else {
         current.as_ref().and_then(|t| t.duration).unwrap_or(0) as f64
     };
-    let progress = if total > 0.0 {
-        (position / total * 1000.0).clamp(0.0, 1000.0)
-    } else {
-        0.0
+    let progress = match seeking() {
+        Some(held) => held,
+        None if total > 0.0 => (position / total * 1000.0).clamp(0.0, 1000.0),
+        None => 0.0,
     };
+    let position = if seeking().is_some() { progress / 1000.0 * total } else { position };
     let filled = progress / 10.0;
+    let level = turning().unwrap_or(level);
+    // The end of a drag. A range input says so with `change`, but not when
+    // it is let go where it was taken, nor when a touch is cancelled, so the
+    // pointer and touch ends say it too; whichever comes first sends.
+    let mut seek_released = move || {
+        if let Some(held) = seeking.take() {
+            seek(player, held / 1000.0 * total);
+        }
+    };
+    let mut volume_released = move || {
+        if let Some(held) = turning.take() {
+            let_go_volume(player, held);
+        }
+    };
 
     rsx! {
         footer { class: "player",
@@ -893,9 +945,14 @@ pub fn PlayerBar() -> Element {
                 title: "{clock(position)} / {clock(total)}",
                 oninput: move |event| {
                     if let Ok(value) = event.value().parse::<f64>() {
-                        seek(player, value / 1000.0 * total);
+                        seeking.set(Some(value));
                     }
                 },
+                onchange: move |_| seek_released(),
+                onpointerup: move |_| seek_released(),
+                onpointercancel: move |_| seek_released(),
+                ontouchend: move |_| seek_released(),
+                ontouchcancel: move |_| seek_released(),
             }
 
             div { class: "now",
@@ -1010,9 +1067,15 @@ pub fn PlayerBar() -> Element {
                         style: "--filled: {level * 100.0}%",
                         oninput: move |event| {
                             if let Ok(percent) = event.value().parse::<f64>() {
-                                set_volume(player, percent / 100.0);
+                                turning.set(Some(percent / 100.0));
+                                turn_volume(percent / 100.0);
                             }
                         },
+                        onchange: move |_| volume_released(),
+                        onpointerup: move |_| volume_released(),
+                        onpointercancel: move |_| volume_released(),
+                        ontouchend: move |_| volume_released(),
+                        ontouchcancel: move |_| volume_released(),
                     }
                 }
                 button {
