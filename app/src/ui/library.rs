@@ -9,6 +9,7 @@ use super::player::{enqueue, play_list, play_next, Player};
 use super::prefs::{self, Prefs};
 use super::screens::{AlbumScreen, ArtistScreen, TrackScreen};
 use super::search_history::SearchHistory;
+use super::window::{split_window, use_rows, MoreRows, Visit};
 use super::settings::SettingsScreen;
 use super::{
     artist_link, open_remote_track, open_track, Blocklist, Cover, LocalIds, MapView,
@@ -20,10 +21,6 @@ use dioxus::prelude::*;
 use crate::api::Target;
 use crate::backend::backend;
 use crate::catalogue::{RemoteAlbum, RemoteArtist, RemoteTrack};
-
-/// How many space rows the list opens with. Enough to fill the column on any
-/// screen; "show more" triples it.
-const FIRST_SHOWN: usize = 80;
 
 /// Which kinds of result a search shows. Every search starts with all of
 /// them; the tracks/albums/artists chips narrow it, and tapping the lit one
@@ -319,6 +316,10 @@ pub struct Library {
     /// the old one: a target the old page was long enough for counted as
     /// reached, and the new page coming in then cut it short.
     restore: Signal<Option<f64>>,
+    /// The last arrival on a page, and how far down it landed. What a long
+    /// list opens its window for, see `window`; kept past `restore`, as a
+    /// page not in `kept` only draws its lists once its fetch lands.
+    pub(crate) visit: CopyValue<Visit>,
     /// A view asked for but not yet fetched. See `show`.
     pending: Signal<Option<View>>,
     pub notice: Signal<Option<String>>,
@@ -489,6 +490,7 @@ impl Library {
             forward: Signal::new(Vec::new()),
             scroll: CopyValue::new(0.0),
             restore: Signal::new(None),
+            visit: CopyValue::new(Visit::default()),
             pending: Signal::new(None),
             notice: Signal::new(None),
             layouts: Signal::new(prefs.layouts),
@@ -682,7 +684,7 @@ impl Library {
             self.forward.write().clear();
         }
         self.show(target);
-        self.restore.set(Some(0.0));
+        self.arrive(0.0);
     }
 
     /// Back where it was left, scroll and all.
@@ -692,8 +694,15 @@ impl Library {
             leaving("back", scroll);
             self.forward.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
-            self.restore.set(Some(scroll));
+            self.arrive(scroll);
         }
+    }
+
+    /// Land on the page just shown, `scroll` pixels down.
+    fn arrive(mut self, scroll: f64) {
+        let visit = self.visit.cloned().next(scroll);
+        self.visit.set(visit);
+        self.restore.set(Some(scroll));
     }
 
     /// False once going somewhere new has emptied the way forward.
@@ -707,7 +716,7 @@ impl Library {
             leaving("forward", scroll);
             self.history.write().push((self.view.peek().clone(), self.scroll.cloned()));
             self.show(view);
-            self.restore.set(Some(scroll));
+            self.arrive(scroll);
         }
     }
 
@@ -1517,35 +1526,31 @@ fn BrowseScreen() -> Element {
     // Only while searching the space, see `Library::shows_space`.
     let show_space = library.shows_space();
     let space_only = library.searching_space_only();
-    let shelf = library.shelf.read().clone();
 
     // Every emptiness test below asks about what is *visible*: no heading over
-    // nothing, and the bulk actions must not reach past the filter.
+    // nothing, and the bulk actions must not reach past the filter. Asked of
+    // the shelf in place: each list draws its own rows, and copying them all
+    // here only to see whether there were any was a second shelf a render.
     let space = use_context::<SpaceMatches>();
-    // The whole shelf, for the bulk actions: "play all" means the view's
-    // tracks, including ones the space section happens to be showing.
-    let shelf_tracks = shelf.visible_tracks(&blocklist);
+    let in_space = space_ids(&library, &space);
     let (liked_only, liked) = library.liked_state();
-    let tracks = catalogue_only(shelf_tracks.clone(), &space_ids(&library, &space));
-    let tracks: Vec<(usize, RemoteTrack)> = if liked_only {
-        tracks.into_iter().filter(|(_, t)| liked.tracks.contains(&t.id)).collect()
-    } else {
-        tracks
+    let (any_tracks, has_tracks, has_albums, has_artists, has_playlists) = {
+        let shelf = library.shelf.read();
+        // The whole shelf, for the bulk actions: "play all" means the view's
+        // tracks, including ones the space section happens to be showing.
+        let any_tracks = shelf.visible_tracks_iter(&blocklist).next().is_some();
+        let has_tracks = shelf
+            .visible_tracks_iter(&blocklist)
+            .any(|t| !in_space.contains(&t.id) && (!liked_only || liked.tracks.contains(&t.id)));
+        let has_albums = shelf
+            .visible_albums_iter(&blocklist)
+            .any(|a| !liked_only || liked.albums.contains(&a.id));
+        let has_artists = shelf
+            .visible_artists_iter(&blocklist, false)
+            .any(|a| !liked_only || liked.artists.contains(&a.id));
+        (any_tracks, has_tracks, has_albums, has_artists, !shelf.playlists.is_empty())
     };
-    let albums = shelf.visible_albums(&blocklist);
-    let albums: Vec<crate::catalogue::RemoteAlbum> = if liked_only {
-        albums.into_iter().filter(|a| liked.albums.contains(&a.id)).collect()
-    } else {
-        albums
-    };
-    let artists = shelf.visible_artists(&blocklist, false);
-    let artists: Vec<crate::catalogue::RemoteArtist> = if liked_only {
-        artists.into_iter().filter(|a| liked.artists.contains(&a.id)).collect()
-    } else {
-        artists
-    };
-    let nothing_from_catalogue =
-        tracks.is_empty() && albums.is_empty() && artists.is_empty() && shelf.playlists.is_empty();
+    let nothing_from_catalogue = !has_tracks && !has_albums && !has_artists && !has_playlists;
     let nothing_visible = nothing_from_catalogue && (!show_space || space.0.read().1 == 0);
     let empty_search = matches!(&view, View::Search { query, .. } if query.trim().is_empty());
 
@@ -1607,7 +1612,7 @@ fn BrowseScreen() -> Element {
             ViewToggle {}
         }
 
-        if !shelf_tracks.is_empty() {
+        if any_tracks {
             div { class: "actions",
                 button {
                     class: "chip",
@@ -1657,16 +1662,16 @@ fn BrowseScreen() -> Element {
                         MixedRows {}
                     }
                 } else {
-                    if !artists.is_empty() {
+                    if has_artists {
                         ArtistRows { heading: "Artists".to_string(), similar: false }
                     }
-                    if !albums.is_empty() {
+                    if has_albums {
                         AlbumRows {}
                     }
-                    if !shelf.playlists.is_empty() {
+                    if has_playlists {
                         PlaylistRows {}
                     }
-                    if !tracks.is_empty() {
+                    if has_tracks {
                         TrackRows {}
                     }
                 }
@@ -1863,6 +1868,7 @@ fn MixedRows() -> Element {
     let menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
     let matches = use_context::<SpaceMatches>();
+    let window = use_rows();
 
     let (liked_only, liked) = library.liked_state();
     let space_only = library.searching_space_only();
@@ -1914,6 +1920,7 @@ fn MixedRows() -> Element {
     // the loop's own nodes are what get matched up between renders.
     let keys = row_keys(items.iter().map(Item::id));
     let items: Vec<(String, Item)> = keys.into_iter().zip(items).collect();
+    let count = items.len();
 
     if items.is_empty() {
         return rsx! {};
@@ -2068,6 +2075,20 @@ fn MixedRows() -> Element {
     } else {
         vec![("", items)]
     };
+    // One window over the sections, in page order, so a section further
+    // down starts only once those above it are drawn in full.
+    let lengths: Vec<usize> = sections.iter().map(|(_, items)| items.len()).collect();
+    let drawn = split_window(&lengths, window.shown());
+    let visible: usize = drawn.iter().sum();
+    let sections: Vec<(&str, Vec<(String, Item)>)> = sections
+        .into_iter()
+        .zip(drawn)
+        .filter(|(_, drawn)| *drawn > 0)
+        .map(|((heading, mut items), drawn)| {
+            items.truncate(drawn);
+            (heading, items)
+        })
+        .collect();
 
     rsx! {
         // Under the space's own section in a search, so the two lists say
@@ -2085,6 +2106,9 @@ fn MixedRows() -> Element {
                     Fragment { key: "{key}", {row(item)} }
                 }
             }
+        }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
         }
     }
 }
@@ -2132,8 +2156,9 @@ fn SpaceRows() -> Element {
     let mut menu = use_context::<ContextMenu>().0;
     let search = use_context::<Search>();
 
-    // Grows on request rather than rendering 720 rows nobody scrolled to.
-    let mut shown = use_signal(|| FIRST_SHOWN);
+    // Grows as it is scrolled through rather than rendering 720 rows nobody
+    // scrolled to.
+    let window = use_rows();
 
     let (rows, total) = matches();
     // With Qobuz out of the search, "liked" has only the space left to
@@ -2151,7 +2176,7 @@ fn SpaceRows() -> Element {
     // Whether the box is empty, not what is in it: read directly, every
     // keystroke would draw all these rows again.
     let searching = use_memo(move || !search.text.read().trim().is_empty());
-    let visible = shown().min(rows.len());
+    let visible = window.shown().min(rows.len());
     let grid = library.layout() == TracksView::Grid;
 
     if total == 0 {
@@ -2220,15 +2245,8 @@ fn SpaceRows() -> Element {
             }
         }
 
-        if visible < total {
-            button {
-                class: "chip more-rows",
-                onclick: move |_| {
-                    let next = shown() * 3;
-                    shown.set(next);
-                },
-                "show more"
-            }
+        if visible < rows.len() {
+            MoreRows { key: "{visible}", rows: window }
         }
     }
 }
@@ -2270,19 +2288,11 @@ impl Shelf {
     /// the click handlers must both go through these, filtering in one and
     /// indexing the unfiltered list in the other made row N open row N+1.
     pub fn visible_tracks(&self, blocked: &Blocklist) -> Vec<RemoteTrack> {
-        self.tracks
-            .iter()
-            .filter(|track| !blocked.hides(track))
-            .cloned()
-            .collect()
+        self.visible_tracks_iter(blocked).cloned().collect()
     }
 
     pub fn visible_albums(&self, blocked: &Blocklist) -> Vec<crate::catalogue::RemoteAlbum> {
-        self.albums
-            .iter()
-            .filter(|album| !album.artist_id.is_some_and(|id| blocked.contains(id)))
-            .cloned()
-            .collect()
+        self.visible_albums_iter(blocked).cloned().collect()
     }
 
     pub fn visible_artists(
@@ -2290,12 +2300,33 @@ impl Shelf {
         blocked: &Blocklist,
         similar: bool,
     ) -> Vec<crate::catalogue::RemoteArtist> {
-        let source = if similar { &self.similar } else { &self.artists };
-        source
+        self.visible_artists_iter(blocked, similar).cloned().collect()
+    }
+
+    /// The same rows, in place, for asking whether there are any.
+    fn visible_tracks_iter<'a>(
+        &'a self,
+        blocked: &'a Blocklist,
+    ) -> impl Iterator<Item = &'a RemoteTrack> {
+        self.tracks.iter().filter(|track| !blocked.hides(track))
+    }
+
+    fn visible_albums_iter<'a>(
+        &'a self,
+        blocked: &'a Blocklist,
+    ) -> impl Iterator<Item = &'a RemoteAlbum> {
+        self.albums
             .iter()
-            .filter(|artist| !blocked.contains(artist.id))
-            .cloned()
-            .collect()
+            .filter(|album| !album.artist_id.is_some_and(|id| blocked.contains(id)))
+    }
+
+    fn visible_artists_iter<'a>(
+        &'a self,
+        blocked: &'a Blocklist,
+        similar: bool,
+    ) -> impl Iterator<Item = &'a RemoteArtist> {
+        let source = if similar { &self.similar } else { &self.artists };
+        source.iter().filter(|artist| !blocked.contains(artist.id))
     }
 }
 
@@ -2309,6 +2340,7 @@ fn TrackRows() -> Element {
     let mut menu = use_context::<ContextMenu>().0;
 
     let matches = use_context::<SpaceMatches>();
+    let window = use_rows();
 
     // Matched on the Qobuz track id: that is the same recording *and* the
     // same release, so suppressing it hides nothing you could not already
@@ -2325,7 +2357,8 @@ fn TrackRows() -> Element {
     let now_playing = player.current().map(|t| t.id);
     let grid = library.layout() == TracksView::Grid;
     let count = tracks.len();
-    let keys = row_keys(tracks.iter().map(|(_, track)| track.id));
+    let visible = window.shown().min(count);
+    let keys = row_keys(tracks.iter().take(visible).map(|(_, track)| track.id));
 
     if tracks.is_empty() {
         return rsx! {};
@@ -2343,7 +2376,7 @@ fn TrackRows() -> Element {
             }
         }
         ul { class: if grid { "tiles" } else { "list" },
-            for ((index, track), key) in tracks.into_iter().zip(keys) {
+            for ((index, track), key) in tracks.into_iter().take(visible).zip(keys) {
                 li {
                     key: "{key}",
                     class: {
@@ -2397,6 +2430,9 @@ fn TrackRows() -> Element {
                 }
             }
         }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
+        }
     }
 }
 
@@ -2406,6 +2442,7 @@ fn AlbumRows() -> Element {
     let blocklist = use_context::<Blocklist>();
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
+    let window = use_rows();
     let (liked_only, liked) = library.liked_state();
     // Enumerated before filtering, same as `catalogue_only`: `index` is this
     // row's address into `visible_albums`, and filtering after numbering
@@ -2418,7 +2455,9 @@ fn AlbumRows() -> Element {
         .enumerate()
         .filter(|(_, a)| !liked_only || liked.albums.contains(&a.id))
         .collect();
-    let keys = row_keys(albums.iter().map(|(_, album)| &album.id));
+    let count = albums.len();
+    let visible = window.shown().min(count);
+    let keys = row_keys(albums.iter().take(visible).map(|(_, album)| &album.id));
     // How recent is the point of new releases, so they say when, and what
     // sort of release when it is not a whole album.
     let releases = *library.view.read() == View::Releases;
@@ -2426,7 +2465,7 @@ fn AlbumRows() -> Element {
     rsx! {
         h3 { class: "shelf-head", "Albums" }
         ul { class: "tiles",
-            for ((index, album), key) in albums.into_iter().zip(keys) {
+            for ((index, album), key) in albums.into_iter().take(visible).zip(keys) {
                 li {
                     key: "{key}",
                     class: "tile",
@@ -2458,6 +2497,9 @@ fn AlbumRows() -> Element {
                 }
             }
         }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
+        }
     }
 }
 
@@ -2479,6 +2521,7 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
     let blocklist = use_context::<Blocklist>();
     let mut menu = use_context::<ContextMenu>().0;
     let reach = use_context::<SpaceReach>().0;
+    let window = use_rows();
     let (liked_only, liked) = library.liked_state();
     // Never for "similar artists": that section's entire point is showing
     // who you have *not* already reached, so filtering it by what is already
@@ -2491,12 +2534,14 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
         .enumerate()
         .filter(|(_, a)| similar || !liked_only || liked.artists.contains(&a.id))
         .collect();
-    let keys = row_keys(artists.iter().map(|(_, artist)| artist.id));
+    let count = artists.len();
+    let visible = window.shown().min(count);
+    let keys = row_keys(artists.iter().take(visible).map(|(_, artist)| artist.id));
 
     rsx! {
         h3 { class: "shelf-head", "{heading}" }
         ul { class: "tiles",
-            for ((index, artist), key) in artists.into_iter().zip(keys) {
+            for ((index, artist), key) in artists.into_iter().take(visible).zip(keys) {
                 li {
                     key: "{key}",
                     class: "tile",
@@ -2519,13 +2564,19 @@ pub(crate) fn ArtistRows(heading: String, similar: bool) -> Element {
                 }
             }
         }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
+        }
     }
 }
 
 #[component]
 fn PlaylistRows() -> Element {
     let library = use_context::<Library>();
-    let playlists = library.shelf.read().playlists.clone();
+    let window = use_rows();
+    let count = library.shelf.read().playlists.len();
+    let visible = window.shown().min(count);
+    let playlists: Vec<_> = library.shelf.read().playlists[..visible].to_vec();
     let keys = row_keys(playlists.iter().map(|playlist| &playlist.id));
 
     rsx! {
@@ -2553,6 +2604,9 @@ fn PlaylistRows() -> Element {
                     }
                 }
             }
+        }
+        if visible < count {
+            MoreRows { key: "{visible}", rows: window }
         }
     }
 }

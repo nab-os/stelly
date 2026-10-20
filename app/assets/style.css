@@ -502,7 +502,17 @@ button.danger:hover:not(:disabled),
 }
 .source-head:first-child { margin-top: 0; }
 
-.more-rows { align-self: flex-start; margin: 6px 0 2px 7px; }
+/* After a list drawn in part, see `MoreRows`. The empty box reaches a screen
+   and a half back up over the rows, and takes no room and no clicks there. */
+.more-rows { position: relative; margin: 6px 0 2px 7px; }
+.rows-ahead {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 150vh;
+  pointer-events: none;
+}
 
 .list { list-style: none; margin: 0; padding: 0; }
 
