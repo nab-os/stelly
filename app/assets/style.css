@@ -427,7 +427,6 @@ button.danger:hover:not(:disabled),
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   cursor: pointer;
 }
-.map-card:empty { display: none; }
 .map-card:hover { border-color: var(--accent); }
 .map-card::after {
   content: "";
@@ -445,6 +444,9 @@ button.danger:hover:not(:disabled),
 .map-card .thumb { width: 48px; height: 48px; }
 .map-card-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 .map-card-text .title { font-weight: 600; }
+/* A line each even before map.js has the album, so the card does not grow
+   under the pointer when it arrives. */
+.map-card-text span { min-height: 1.35em; }
 
 /* ------------------------------------------------------------------ covers
    Artwork is a background rather than an <img>, so a URL that 404s, and

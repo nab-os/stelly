@@ -42,13 +42,11 @@ pub fn GeneratePanel() -> Element {
     let player = use_context::<Player>();
     let library = use_context::<Library>();
     let selected = use_context::<Selection>().0;
-    let mut menu = use_context::<ContextMenu>().0;
     let map = use_context::<MapView>();
     let mut panel_open = generator.panel_open;
 
     let mode = *generator.mode.read();
-    let result = generator.result.read().clone();
-    let empty = result.is_empty();
+    let empty = generator.result.read().is_empty();
     let seed = selected().and_then(space_row_or_glimpse).map(|meta| as_remote(&meta));
     let has_selection = seed.is_some();
     let from = *generator.from.read();
@@ -332,42 +330,60 @@ pub fn GeneratePanel() -> Element {
                     }
                 }
             }
-            ol { class: "list result",
-                for step in result {
-                    li {
-                        key: "{step.track.track_id}",
-                        class: if selected() == Some(step.track.track_id) { "row selected" } else { "row" },
-                        onclick: {
-                            let id = step.track.track_id;
-                            move |_| {
-                                close();
-                                open_track(library, selected, id);
-                            }
-                        },
-                        "data-menu": MenuTarget::SpaceTrack(step.track.track_id).tag(),
-                        oncontextmenu: {
-                            let id = step.track.track_id;
-                            move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
-                            }
-                        },
-                        {artist_link(
-                            library,
-                            Some(step.track.artist_id).filter(|id| *id >= 0),
-                            step.track.artist.clone(),
-                            "artist",
-                        )}
-                        span { class: "title", "{step.track.title}" }
-                        span { class: "muted",
-                            {step.similarity.map(|s| format!("{s:.3}")).unwrap_or_default()}
-                        }
-                        {menu_button(menu, MenuTarget::SpaceTrack(step.track.track_id))}
-                    }
-                }
-            }
+            ResultRows {}
 
             WeightsDisclosure {}
+        }
+    }
+}
+
+/// The result's rows, apart from the panel so that a new selection, which
+/// the panel reads for its seed, does not draw them all again.
+#[component]
+fn ResultRows() -> Element {
+    let generator = use_context::<Generator>();
+    let library = use_context::<Library>();
+    let selected = use_context::<Selection>().0;
+    let mut menu = use_context::<ContextMenu>().0;
+    let mut panel_open = generator.panel_open;
+    let mut close = move || panel_open.set(false);
+
+    rsx! {
+        ol { class: "list result",
+            for step in generator.result.read().iter() {
+                li {
+                    key: "{step.track.track_id}",
+                    // Peeked: the selection moves the class itself, see `Shell`.
+                    class: if *selected.peek() == Some(step.track.track_id) { "row selected" } else { "row" },
+                    "data-space": "{step.track.track_id}",
+                    onclick: {
+                        let id = step.track.track_id;
+                        move |_| {
+                            close();
+                            open_track(library, selected, id);
+                        }
+                    },
+                    "data-menu": MenuTarget::SpaceTrack(step.track.track_id).tag(),
+                    oncontextmenu: {
+                        let id = step.track.track_id;
+                        move |event: Event<MouseData>| {
+                            event.prevent_default();
+                            open_menu(&mut menu, &event, MenuTarget::SpaceTrack(id));
+                        }
+                    },
+                    {artist_link(
+                        library,
+                        Some(step.track.artist_id).filter(|id| *id >= 0),
+                        step.track.artist.clone(),
+                        "artist",
+                    )}
+                    span { class: "title", "{step.track.title}" }
+                    span { class: "muted",
+                        {step.similarity.map(|s| format!("{s:.3}")).unwrap_or_default()}
+                    }
+                    {menu_button(menu, MenuTarget::SpaceTrack(step.track.track_id))}
+                }
+            }
         }
     }
 }

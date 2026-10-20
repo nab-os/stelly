@@ -2155,7 +2155,9 @@ fn MixedRows() -> Element {
             },
             Item::Space(row) => rsx! {
                 li {
-                    class: if selection.read().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
+                    // Peeked: the selection moves the class itself, see `Shell`.
+                    class: if selection.peek().as_ref() == Some(&row.track_id) { "{tile} selected" } else { "{tile}" },
+                    "data-space": "{row.track_id}",
                     onclick: {
                         let id = row.track_id;
                         move |_| open_track(library, selection, id)
@@ -2335,14 +2337,17 @@ fn SpaceRows() -> Element {
             for row in rows.iter().take(visible) {
                 li {
                     key: "{row.track_id}",
+                    // Peeked: the selection moves the class itself, see
+                    // `Shell`.
                     class: {
                         let base = if grid { "tile" } else { "row" };
-                        if selection.read().as_ref() == Some(&row.track_id) {
+                        if selection.peek().as_ref() == Some(&row.track_id) {
                             format!("{base} selected")
                         } else {
                             base.to_string()
                         }
                     },
+                    "data-space": "{row.track_id}",
                     onclick: {
                         let id = row.track_id;
                         move |_| open_track(library, selection, id)

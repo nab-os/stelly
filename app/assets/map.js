@@ -847,15 +847,42 @@
     }
   }
 
-  // The selected point's card: Rust renders it, with the track's cover and
-  // names, and this pins it over the point every frame, so it rides along
-  // with a pan or a zoom. A DOM element over the canvas rather than something
-  // drawn into it, so it keeps the same size on screen at any zoom and can be
+  // The selected point's card: Rust renders the box, empty, and this fills
+  // it and pins it over the point every frame, so it rides along with a pan
+  // or a zoom. A DOM element over the canvas rather than something drawn
+  // into it, so it keeps the same size on screen at any zoom and can be
   // clicked. The canvas fills its parent, so its coordinates are the card's.
   // Moved by `transform` rather than `left`/`top`, so following the point
   // each frame costs no layout.
+  //
+  // Filled here so that it shows on the click itself: its title and artist
+  // are in the point's label already. The cover and the album are not; Rust
+  // leaves the track's row in `window.stellyCard` once it has it, which for
+  // a point not seen yet is a fetch away, and the card is completed then.
   let cardAt = "";
   let cardNode = null;
+  // The point the card's text is for.
+  let cardFor = -1;
+
+  function fillCard(card) {
+    cardFor = selected;
+    const row = window.stellyCard;
+    const known = row && row.track_id === ids[selected] ? row : null;
+    // "Artist - Title", or the title alone; an artist with " - " in their
+    // name is split wrong until the row arrives.
+    let title = meta.label(selected);
+    let artist = "";
+    const cut = title.indexOf(" - ");
+    if (cut >= 0) {
+      artist = title.slice(0, cut);
+      title = title.slice(cut + 3);
+    }
+    const [titleNode, albumNode, artistNode] = card.querySelectorAll(".map-card-text span");
+    titleNode.textContent = known ? known.title : title;
+    albumNode.textContent = known ? known.album : "";
+    artistNode.textContent = known ? known.artist : artist;
+    card.querySelector(".cover").style.backgroundImage = known && known.image ? `url('${known.image}')` : "";
+  }
 
   function placeCard() {
     const card = document.getElementById("map-card");
@@ -864,6 +891,7 @@
       card.style.visibility = "hidden";
       return;
     }
+    if (selected !== cardFor || card !== cardNode) fillCard(card);
     const [x, y] = toScreen(selected);
     const away = x < -40 || y < -40 || x > width + 40 || y > height + 40;
     card.style.visibility = away ? "hidden" : "visible";
@@ -876,6 +904,12 @@
       cardNode = card;
     }
   }
+
+  // Rust calls this when the selected track's row has arrived.
+  window.stellyCardArrived = () => {
+    cardFor = -1;
+    placeCard();
+  };
 
   /// A point worth looking at: halo, ring, core, and what it actually is.
   function marker(index, colour, persistent) {
@@ -1086,6 +1120,9 @@
     if (found >= 0) {
       selected = found;
       schedule();
+      // Now rather than on the next frame: the card is the answer to the
+      // click.
+      placeCard();
       // Small message: exactly what eval is for.
       dioxus.send({ type: "select", track_id: ids[found] });
     } else if (selected >= 0) {
@@ -1273,6 +1310,7 @@
       // is the closest equivalent.
       hover = found;
       schedule();
+      placeCard();
       dioxus.send({ type: "select", track_id: ids[found] });
     } else if (selected >= 0) {
       selected = -1;
@@ -1333,6 +1371,7 @@
   window.stellyReloadPoints = async () => {
     await loadPoints();
     selected = -1;
+    cardFor = -1;
     hover = -1;
     route = routeIds.map((id) => byId.get(id)).filter((i) => i !== undefined);
     // The first real points, if the map was opened before they arrived.

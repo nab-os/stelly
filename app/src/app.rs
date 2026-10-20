@@ -5,8 +5,9 @@
 
 use crate::api::{BlockedArtist, Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
 use crate::backend::{self, backend};
+use crate::catalogue::RemoteTrack;
 use crate::ui::{
-    icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
+    icons, Blocklist, ContextMenu, ContextMenuView, Crawler, Family, GeneratePanel, Generator,
     Library, LocalIds, MainScreen, MapView, Me, PathPill, Provider, Pipeline, Player, PlayerBar, QueueView,
     ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, TitleBar,
     View, Weights,
@@ -279,40 +280,54 @@ fn Setup(phase: Signal<Phase>, error: Option<String>) -> Element {
 /// way to the track's page. map.js pins it over the point on every frame, so
 /// it rides along with a pan or a zoom at the same size on screen.
 ///
-/// Rendered whenever the map is, empty when nothing is selected, because
-/// map.js looks it up by id and owns its position and visibility; a card
-/// that came and went would lose both between frames.
+/// Rendered once, empty, and never again: map.js fills it, from the point's
+/// label the moment it is clicked, and completes it with the row the
+/// selection effect in `Shell` hands over. Drawn from the selection here, it
+/// showed a round trip to Rust late, and for a point not seen yet a fetch
+/// later still. map.js also looks it up by id and owns its position and
+/// visibility; a card that came and went would lose both between frames.
 #[component]
 fn MapCard() -> Element {
     let library = use_context::<Library>();
     let map = use_context::<MapView>();
     let selected = use_context::<Selection>().0;
 
-    let track = selected()
-        .and_then(crate::ui::space_row)
-        .map(|meta| crate::ui::generate::as_remote(&meta));
-    let target = track.clone();
-
     rsx! {
         div {
             id: "map-card",
             class: "map-card",
+            // Peeked: the card is for whatever is selected when it is
+            // clicked, and must not be drawn again when that changes.
             onclick: move |_| {
-                if let Some(track) = target.clone() {
+                if let Some(id) = *selected.peek() {
                     map.close();
-                    library.go(View::Track(track));
+                    crate::ui::open_track(library, selected, id);
                 }
             },
-            if let Some(track) = track {
-                Cover { url: track.image.clone(), class: "thumb eager" }
-                div { class: "map-card-text",
-                    span { class: "title", "{track.title}" }
-                    span { class: "muted ellipsis", "{track.album}" }
-                    span { class: "muted ellipsis", "{track.artist}" }
-                }
+            div { class: "cover thumb" }
+            div { class: "map-card-text",
+                span { class: "title" }
+                span { class: "muted ellipsis" }
+                span { class: "muted ellipsis" }
             }
         }
     }
+}
+
+/// The selected track's row as map.js wants it for the card: left where the
+/// map can find it, as the selection is, and announced in case the card is
+/// waiting for it.
+fn card_row(track: &RemoteTrack) -> String {
+    // Quotes and parens would break out of `url('…')`, see `Cover`.
+    let image = track.image.as_deref().filter(|url| !url.contains(['\'', '(', ')']));
+    let row = serde_json::json!({
+        "track_id": track.id,
+        "title": track.title,
+        "album": track.album,
+        "artist": track.artist,
+        "image": image,
+    });
+    format!("window.stellyCard = {row};\nwindow.stellyCardArrived && window.stellyCardArrived();\n")
 }
 
 #[component]
@@ -792,6 +807,18 @@ fn Shell() -> Element {
         );
     });
 
+    // What the map itself last selected, so the effect below does not hand
+    // the map back its own click.
+    let mut from_map = use_hook(|| CopyValue::new(None::<Option<i64>>));
+    // The same point again, a second click on it, changes nothing, and wakes
+    // nothing.
+    let mut select_from_map = move |id: Option<i64>| {
+        if *selected.peek() != id {
+            from_map.set(Some(id));
+            selected.set(id);
+        }
+    };
+
     // Long-lived eval: runs the map, then waits for selection messages.
     use_future(move || async move {
         let script = format!("{}{}", crate::timings::script_flag(), include_str!("../assets/map.js"));
@@ -815,7 +842,7 @@ fn Shell() -> Element {
             // menu would never open.
             if message.get("type").and_then(|v| v.as_str()) == Some("menu") {
                 if let Some(id) = message.get("track_id").and_then(|v| v.as_f64()) {
-                    selected.set(Some(id as i64));
+                    select_from_map(Some(id as i64));
                     menu.set(Some(crate::ui::MenuState {
                         x: message.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
                         y: message.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -831,24 +858,60 @@ fn Shell() -> Element {
             // selection by accident. Selecting stays on the map: the point's
             // card is the way on to its page.
             if let Some(value) = message.get("track_id") {
-                selected.set(value.as_f64().map(|id| id as i64));
+                select_from_map(value.as_f64().map(|id| id as i64));
             }
         }
     });
 
     // Mirror the selection onto the map, it used to travel one way only,
-    // canvas outward.
+    // canvas outward, and onto the rows showing it. The rows read it without
+    // subscribing: a click on the map redrew every list holding a space
+    // track, hidden under the map or not, for one class on one row. So this
+    // moves the class itself, on whatever rows carry the track's
+    // `data-space`, as `use_playing_highlight` does for the playing track.
     use_effect(move || {
+        let id = selected();
+        let shown = id.map(|id| id.to_string());
         // Recorded as well as called: map.js is installed by a `use_future`,
         // so for the first few hundred ms this does not exist yet and a bare
-        // call would be swallowed by the `&&`.
-        let script = format!(
-            "window.stellySelected = {0};\n\
-             window.stellySetSelected && window.stellySetSelected({0});",
-            selected()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "null".into())
-        );
+        // call would be swallowed by the `&&`. Not called for the map's own
+        // click, which it has already drawn.
+        let mut script = format!("window.stellySelected = {};\n", shown.as_deref().unwrap_or("null"));
+        if from_map.take() != Some(id) {
+            script.push_str("window.stellySetSelected && window.stellySetSelected(window.stellySelected);\n");
+        }
+        script.push_str(&format!(
+            r#"(() => {{
+                const id = "{}";
+                for (const row of document.querySelectorAll("[data-space].selected")) {{
+                    if (row.dataset.space !== id) row.classList.remove("selected");
+                }}
+                if (id) {{
+                    for (const row of document.querySelectorAll(`[data-space="${{id}}"]`)) {{
+                        row.classList.add("selected");
+                    }}
+                }}
+            }})();
+"#,
+            shown.as_deref().unwrap_or_default()
+        ));
+        // The card's cover and album, which the map's labels do not carry.
+        // A row not seen yet is asked for, and handed over if the track is
+        // still the one selected when it arrives.
+        if let Some(id) = id {
+            match crate::ui::space_track(id) {
+                Some(track) => script.push_str(&card_row(&track)),
+                None => {
+                    spawn(async move {
+                        if let Some(meta) = crate::ui::space_meta(id).await {
+                            if *selected.peek() == Some(id) {
+                                document::eval(&card_row(&crate::ui::generate::as_remote(&meta)));
+                            }
+                        }
+                    });
+                }
+            }
+        }
         document::eval(&script);
     });
 
