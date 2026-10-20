@@ -11,6 +11,7 @@ use super::{album_link, artist_link, icons, Cover, Library};
 use crate::api::OrderRequest;
 use crate::backend::backend;
 use crate::catalogue::RemoteTrack;
+use dioxus::core::Task;
 use dioxus::prelude::*;
 
 /// Reorder what follows the current track so each step through the space is as
@@ -88,17 +89,18 @@ async fn sort_upcoming(mut player: Player, weights: std::collections::HashMap<St
     Ok(())
 }
 
+/// How long the drawer takes to slide shut, `.queue-drawer`'s transition.
+const SLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[component]
 pub fn QueueView() -> Element {
     let player = use_context::<Player>();
-    let library = use_context::<Library>();
     let mut queue_open = player.queue_open;
-    let mut menu = use_context::<ContextMenu>().0;
 
     // Long-lived: this component stays mounted whether or not the drawer is
     // open, so the channel outlives any one gesture. The script delegates
     // from the document and the drawer, so it does not care that the rows
-    // come and go.
+    // come and go, nor that they are only up while the drawer is open.
     use_future(move || async move {
         let mut handle = document::eval(include_str!("../../assets/queue-drag.js"));
         while let Ok(message) = handle.recv::<serde_json::Value>().await {
@@ -120,10 +122,34 @@ pub fn QueueView() -> Element {
         }
     });
 
-    let queue = player.queue.read().clone();
+    // The rows are up only while the drawer is open, and while it slides
+    // shut. Closed, it is hidden, and every row of a 500-track "play all"
+    // was being drawn there for nobody. Taken down rather than kept once
+    // opened: the queue is mostly replaced from the library, with the drawer
+    // shut, and opening it again draws them in the time the first opening
+    // did.
+    let mut rows_up = use_signal(|| false);
+    let mut closing = use_signal(|| None::<Task>);
+    use_effect(move || {
+        let open = queue_open();
+        if let Some(task) = closing.write().take() {
+            task.cancel();
+        }
+        if open {
+            if !*rows_up.peek() {
+                rows_up.set(true);
+            }
+        } else if *rows_up.peek() {
+            closing.set(Some(spawn(async move {
+                tokio::time::sleep(SLIDE).await;
+                rows_up.set(false);
+            })));
+        }
+    });
+    let shown = queue_open() || rows_up();
+
+    let total = player.queue.read().len();
     let current = *player.index.read();
-    let total = queue.len();
-    let keys = super::row_keys(queue.iter().map(|track| track.id));
 
     rsx! {
         // Always mounted, so opening and closing can slide rather than pop.
@@ -155,44 +181,80 @@ pub fn QueueView() -> Element {
 
             if total == 0 {
                 p { class: "muted", "Nothing queued." }
-            } else {
-                ol { class: "queue-list",
-                    for ((index, track), key) in queue.into_iter().enumerate().zip(keys) {
-                        li {
-                            key: "{key}",
-                            class: if index == current { "queue-row playing" } else { "queue-row" },
-                            onclick: move |_| play_at(player, index),
-                            // Right-click only: a long press here starts a
-                            // drag, see queue-drag.js.
-                            oncontextmenu: move |event: Event<MouseData>| {
-                                event.prevent_default();
-                                open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));
-                            },
-                            Cover { url: track.image.clone(), class: "thumb" }
-                            div { class: "queue-text",
-                                span { class: "title", "{track.title}" }
-                                div { class: "queue-sub",
-                                    {artist_link(library, track.artist_id, track.artist.clone(), "muted")}
-                                    if !track.album.is_empty() {
-                                        span { class: "muted", "·" }
-                                        {album_link(library, &track, "muted")}
-                                    }
-                                }
-                            }
-                            span { class: "muted duration", "{track.duration_label()}" }
-                            button {
-                                class: "queue-remove",
-                                title: "remove from the queue",
-                                onclick: move |event: Event<MouseData>| {
-                                    event.stop_propagation();
-                                    remove_at(player, index);
-                                },
-                                {icons::close()}
+            } else if shown {
+                QueueRows {}
+            }
+        }
+    }
+}
+
+/// The queue's rows. Apart from the drawer, and propless, so the drawer
+/// following the track to keep its head right does not draw them all again:
+/// what is playing is read here without subscribing, and its highlight is
+/// moved like any list's, see `use_playing_highlight`.
+#[component]
+fn QueueRows() -> Element {
+    let player = use_context::<Player>();
+    let library = use_context::<Library>();
+    let mut menu = use_context::<ContextMenu>().0;
+
+    let queue = player.queue.read().clone();
+    let now_playing = player.current().map(|track| track.id);
+    let keys = super::row_keys(queue.iter().map(|track| track.id));
+
+    rsx! {
+        ol { class: "queue-list",
+            for ((index, track), key) in queue.into_iter().enumerate().zip(keys) {
+                li {
+                    key: "{key}",
+                    class: if now_playing == Some(track.id) { "queue-row playing" } else { "queue-row" },
+                    "data-track": "{track.id}",
+                    onclick: move |_| play_at(player, index),
+                    // Right-click only: a long press here starts a
+                    // drag, see queue-drag.js.
+                    oncontextmenu: move |event: Event<MouseData>| {
+                        event.prevent_default();
+                        open_menu(&mut menu, &event, MenuTarget::QueueEntry(index));
+                    },
+                    Cover { url: track.image.clone(), class: "thumb" }
+                    div { class: "queue-text",
+                        span { class: "title", "{track.title}" }
+                        div { class: "queue-sub",
+                            {artist_link(library, track.artist_id, track.artist.clone(), "muted")}
+                            if !track.album.is_empty() {
+                                span { class: "muted", "·" }
+                                {album_link(library, &track, "muted")}
                             }
                         }
+                    }
+                    span { class: "muted duration", "{track.duration_label()}" }
+                    button {
+                        class: "queue-remove",
+                        title: "remove from the queue",
+                        onclick: move |event: Event<MouseData>| {
+                            event.stop_propagation();
+                            remove_at(player, index);
+                        },
+                        {icons::close()}
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Rows taken down before the drawer is out of sight would vanish
+    // mid-slide; long after, and a closed drawer keeps them for nothing.
+    #[test]
+    fn the_rows_wait_for_the_drawer_to_slide_shut() {
+        let css = include_str!("../../assets/style.css");
+        let at = css.find(".queue-drawer {").expect("the drawer's rule");
+        let rule = &css[at..at + css[at..].find('}').unwrap()];
+        let slide = format!("transform {}ms", SLIDE.as_millis());
+        assert!(rule.contains(&slide), "{rule}");
     }
 }
