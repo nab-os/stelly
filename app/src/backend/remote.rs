@@ -16,8 +16,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The token was refused: not a passing failure, the pairing itself is gone.
 #[derive(Debug)]
@@ -45,15 +44,22 @@ pub enum Sent {
     Unknown,
 }
 
+/// Who is following the pipeline log, and the task doing it.
+#[derive(Default)]
+struct Following {
+    views: usize,
+    task: Option<tokio::task::AbortHandle>,
+}
+
 pub struct Remote {
     http: reqwest::Client,
     /// No trailing slash.
     base: String,
     token: String,
     log: Arc<LogBuffer>,
-    /// Whether the SSE task is already running. The log is pushed, not polled,
-    /// so a stage that prints nothing for minutes costs nothing to watch.
-    streaming: Arc<AtomicBool>,
+    /// The SSE task and how many views show the log. Open only while one
+    /// does: every client holding a socket for its whole life adds up.
+    following: Mutex<Following>,
 }
 
 impl Remote {
@@ -64,7 +70,7 @@ impl Remote {
             base: base.trim_end_matches('/').to_string(),
             token: token.into(),
             log: Arc::new(LogBuffer::default()),
-            streaming: Arc::new(AtomicBool::new(false)),
+            following: Mutex::new(Following::default()),
         }
     }
 
@@ -433,11 +439,19 @@ impl Remote {
         self.get("/api/pipeline").await
     }
 
-    /// Read from the locally mirrored log, and make sure something is filling
-    /// it. SSE rather than a poll, so a silent `layout` costs one idle socket.
-    pub async fn pipeline_log(&self) -> Result<Vec<String>> {
-        self.ensure_streaming();
-        Ok(self.log.all())
+    /// The locally mirrored log, filled while it is followed.
+    pub fn pipeline_log(&self) -> Vec<String> {
+        self.log.all()
+    }
+
+    /// How many lines have come in, for `pipeline_log_past`.
+    pub fn pipeline_log_cursor(&self) -> u64 {
+        self.log.cursor()
+    }
+
+    /// Returns once a line has come in past `since`.
+    pub async fn pipeline_log_past(&self, since: u64) {
+        self.log.past(since).await;
     }
 
     pub async fn pipeline_clear_log(&self) -> Result<()> {
@@ -447,21 +461,38 @@ impl Remote {
         Ok(())
     }
 
-    fn ensure_streaming(&self) {
-        if self.streaming.swap(true, Ordering::SeqCst) {
-            return;
+    /// Follow the server's log while a view shows it. SSE rather than a
+    /// poll, so a silent `layout` costs one idle socket. Pair with
+    /// `unfollow_pipeline_log`.
+    pub fn follow_pipeline_log(&self) {
+        let mut following = self.following.lock().unwrap_or_else(|e| e.into_inner());
+        following.views += 1;
+        if following.task.is_none() {
+            following.task = Some(self.stream_log());
         }
+    }
 
+    /// The last view showing the log is gone: drop the socket.
+    pub fn unfollow_pipeline_log(&self) {
+        let mut following = self.following.lock().unwrap_or_else(|e| e.into_inner());
+        following.views = following.views.saturating_sub(1);
+        if following.views == 0 {
+            if let Some(task) = following.task.take() {
+                task.abort();
+            }
+        }
+    }
+
+    fn stream_log(&self) -> tokio::task::AbortHandle {
         let http = self.http.clone();
         let url = self.url("/api/pipeline/log");
         let token = self.token.clone();
         let log = self.log.clone();
-        let streaming = self.streaming.clone();
 
-        tokio::spawn(async move {
-            // One reconnecting reader for the life of the process. A dropped
-            // connection is ordinary, so it backs off rather than freezing the
-            // view on the last line it saw.
+        let task = tokio::spawn(async move {
+            // One reconnecting reader for as long as the log is shown. A
+            // dropped connection is ordinary, so it backs off rather than
+            // freezing the view on the last line it saw.
             loop {
                 let started = crate::timings::clock();
                 let sent = http.get(&url).bearer_auth(&token).send().await;
@@ -471,6 +502,10 @@ impl Remote {
                     Ok(response) if response.status().is_success() => {
                         let mut stream = response.bytes_stream();
                         let mut buffer = String::new();
+                        // Each connection opens with the server's retained
+                        // tail, which replaces what is held rather than
+                        // following it, or a reopened view shows it twice.
+                        let mut replaced = false;
 
                         while let Some(Ok(chunk)) = stream.next().await {
                             buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -482,6 +517,10 @@ impl Remote {
                                 buffer.drain(..end + 2);
                                 for line in frame.lines() {
                                     if let Some(rest) = line.strip_prefix("data:") {
+                                        if !replaced {
+                                            log.clear();
+                                            replaced = true;
+                                        }
                                         log.push(rest.trim_start().to_string());
                                     }
                                 }
@@ -489,8 +528,8 @@ impl Remote {
                         }
                     }
                     Ok(response) => {
+                        // Tried again the next time the log is opened.
                         log.push(format!("log stream refused: {}", response.status()));
-                        streaming.store(false, Ordering::SeqCst);
                         return;
                     }
                     Err(err) => {
@@ -501,6 +540,7 @@ impl Remote {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         });
+        task.abort_handle()
     }
 
     // ----------------------------------------------------------- the space
@@ -810,7 +850,7 @@ fn urlencode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Count the attempts at one address.
@@ -844,5 +884,68 @@ mod tests {
         assert!(err.is_timeout() && !err.is_connect());
         assert_eq!(tries, 1);
         drop(listener);
+    }
+
+    /// A server that answers each connect with the same two-line tail and
+    /// holds the stream open, handing over each accepted socket.
+    async fn log_server() -> (String, tokio::sync::mpsc::UnboundedReceiver<tokio::net::TcpStream>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = [0u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: one\n\ndata: two\n\n",
+                    )
+                    .await;
+                let _ = sender.send(socket);
+            }
+        });
+        (base, receiver)
+    }
+
+    async fn settled(remote: &Remote, want: &[&str]) {
+        let want: Vec<String> = want.iter().map(|line| line.to_string()).collect();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while remote.pipeline_log() != want {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the log should settle");
+    }
+
+    #[tokio::test]
+    async fn the_log_is_followed_only_while_shown() {
+        use tokio::io::AsyncReadExt;
+        let (base, mut sockets) = log_server().await;
+        let remote = Remote::new(base, "token");
+
+        remote.follow_pipeline_log();
+        remote.follow_pipeline_log();
+        let mut socket = sockets.recv().await.unwrap();
+        settled(&remote, &["one", "two"]).await;
+
+        // One of two views gone: still followed.
+        remote.unfollow_pipeline_log();
+        let mut byte = [0u8; 1];
+        let open = tokio::time::timeout(Duration::from_millis(100), socket.read(&mut byte)).await;
+        assert!(open.is_err(), "the socket should stay open");
+
+        // The last one gone: the socket closes.
+        remote.unfollow_pipeline_log();
+        let read = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte)).await;
+        assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "the socket should close");
+
+        // Reopened, the replayed tail replaces the one held.
+        remote.follow_pipeline_log();
+        let _socket = sockets.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        settled(&remote, &["one", "two"]).await;
+        remote.unfollow_pipeline_log();
     }
 }

@@ -18,11 +18,13 @@ use super::{
 use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
 use crate::catalogue::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 /// Add to or remove from this user's likes, which the server keeps and Qobuz
-/// never hears of. `kind` is "track", "album" or "artist". The heart flipping
-/// is the confirmation; only a failure is worth a line of text.
+/// never hears of. `kind` is "track", "album" or "artist". The heart flips at
+/// once, the server taking its time to look the item up; only a failure is
+/// worth a line of text, and puts the heart back.
 pub(super) fn toggle_like(
     kind: &'static str,
     id: String,
@@ -31,15 +33,19 @@ pub(super) fn toggle_like(
     mut status: Signal<Option<String>>,
 ) {
     let want = !currently_liked;
-    spawn(async move {
+    let ticket = library.flip(kind, &id, want);
+    // Not tied to the page: leaving it must not drop the request, nor leave
+    // the heart flipped for good.
+    spawn_forever(async move {
         let result = if want {
             backend().favorite_add(kind, &id).await
         } else {
             backend().favorite_remove(kind, &id).await
         };
-        match result {
-            Ok(()) => library.set_liked(kind, &id, want),
-            Err(err) => status.set(Some(format!("{err:#}"))),
+        library.settle(ticket, result.is_ok());
+        if let Err(err) = result {
+            let undone = if want { "like" } else { "unlike" };
+            status.set(Some(format!("could not {undone} it: {err:#}")));
         }
     });
 }
@@ -92,19 +98,32 @@ fn on_its_way(status: &PipelineStatus, target: &Target) -> (f64, &'static str) {
 /// "In your space" when it already is, "Adding…" while the server works on it,
 /// otherwise the button that asks it to: catalogue, analyse, then rebuild the
 /// space and the map, ahead of the rest of the backlog.
-fn add_or_badge(
+///
+/// Its own component, so the status changing under a running job redraws
+/// this button and not the tracklist or discography around it.
+#[component]
+fn AddOrBadge(
     held: Held,
-    target: Target,
+    target: ReadSignal<Target>,
     title: &'static str,
-    mut status: Signal<Option<String>>,
+    status: Signal<Option<String>>,
 ) -> Element {
-    let mut pipeline = consume_context::<Pipeline>();
+    let mut pipeline = use_context::<Pipeline>();
+    // Rounded to what the button shows, so a job creeping on does not
+    // redraw it with the same number.
+    let adding = use_memo(move || {
+        let pipeline_status = pipeline.status.read();
+        let target = target.read();
+        pipeline_status.adding.contains(&target).then(|| {
+            let (fraction, doing) = on_its_way(&pipeline_status, &target);
+            ((fraction * 100.0).round() as u32, doing)
+        })
+    });
+
     if held == Held::All {
         return rsx! { span { class: "badge in-space", "in your space" } };
     }
-    if pipeline.status.read().adding.contains(&target) {
-        let (fraction, doing) = on_its_way(&pipeline.status.read(), &target);
-        let percent = (fraction * 100.0).round();
+    if let Some((percent, doing)) = adding() {
         return rsx! {
             button {
                 class: "adding",
@@ -119,8 +138,9 @@ fn add_or_badge(
         button {
             title: "{title}",
             onclick: move |_| {
-                let target = target.clone();
+                let target = target();
                 status.set(None);
+                super::pace::kick();
                 spawn(async move {
                     match backend().pipeline_add(&target).await {
                         // Ahead of the next poll, so the button does not
@@ -282,12 +302,12 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                         }
                     }
                     div { class: "hero-actions",
-                        {add_or_badge(
-                            if in_space { Held::All } else { Held::None },
-                            Target::Track(track.id),
-                            "analyse this track and put it on the map",
+                        AddOrBadge {
+                            held: if in_space { Held::All } else { Held::None },
+                            target: Target::Track(track.id),
+                            title: "analyse this track and put it on the map",
                             status,
-                        )}
+                        }
                         PathButtons { track: track.clone(), enabled: in_space, compact: false }
                         if in_space {
                             button {
@@ -498,12 +518,12 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                             },
                             {icons::heart(liked)}
                         }
-                        {add_or_badge(
+                        AddOrBadge {
                             held,
-                            Target::Album(album.id.clone()),
-                            "analyse this album and put it on the map",
+                            target: Target::Album(album.id.clone()),
+                            title: "analyse this album and put it on the map",
                             status,
-                        )}
+                        }
                     }
                     if let Some(message) = status() {
                         p { class: "muted", "{message}" }
@@ -678,12 +698,12 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                             },
                             {icons::heart(followed)}
                         }
-                        {add_or_badge(
+                        AddOrBadge {
                             held,
-                            Target::Artist(artist.id),
-                            "analyse every album of theirs and put them on the map",
+                            target: Target::Artist(artist.id),
+                            title: "analyse every album of theirs and put them on the map",
                             status,
-                        )}
+                        }
                         if *blocklist.editable.read() {
                             button {
                                 class: "danger",

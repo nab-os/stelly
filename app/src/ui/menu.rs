@@ -312,7 +312,8 @@ fn ShelfAlbumItems(index: usize) -> Element {
     let artist = album.artist_id.map(|id| (id, album.artist.clone()));
 
     // Every playback item needs the tracklist, which an album row does not
-    // carry; one helper rather than the same fetch written three times.
+    // carry; one helper rather than the same fetch written three times. An
+    // album whose page was open lately already has it.
     //
     // It captures nothing but `Copy` values, the id is re-read from the
     // shelf rather than held, which is what lets the same closure be used
@@ -325,6 +326,10 @@ fn ShelfAlbumItems(index: usize) -> Element {
             .get(index)
             .map(|album| album.id.clone());
         let Some(id) = id else { return };
+        if let Some(tracks) = library.held_album_tracks(&id) {
+            then(player, tracks);
+            return;
+        }
 
         spawn_forever(async move {
             if let Ok(tracks) = backend().album_tracks(&id).await {

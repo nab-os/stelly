@@ -330,10 +330,13 @@ pub struct Library {
     pub only: Signal<Option<String>>,
     /// Where a search looks. Sticks across searches, like `liked_only`.
     pub source: Signal<Source>,
-    /// The three favourited-id sets a search result is checked against, or
-    /// `None` before the first time `liked_only` turns on, the fetch that
-    /// fills this is not worth paying for a session that never asks.
+    /// The three favourited-id sets hearts and the "liked" filter read.
+    /// Taken from the home page's answer, and at startup from last time's,
+    /// so a page opening does not ask for them again. `None` until either.
     liked: Signal<Option<Liked>>,
+    /// Likes and unlikes shown ahead of `liked`: sent and not yet answered,
+    /// or answered before `liked` had loaded. Oldest first.
+    flips: Signal<Vec<Flip>>,
     /// Bumped by every `show`. A fetch carries the value it started with and
     /// discards its result if it no longer matches, because `pending` is a
     /// single slot but the tasks it spawns are not: two views asked for in
@@ -356,11 +359,91 @@ const KEPT: usize = 8;
 
 /// This user's likes, by id, fetched once and cached rather than asked per
 /// row: the server lists them, it has no "is this one liked" lookup.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub(crate) struct Liked {
     pub(crate) tracks: std::collections::HashSet<i64>,
     pub(crate) albums: std::collections::HashSet<String>,
     pub(crate) artists: std::collections::HashSet<i64>,
+}
+
+impl Liked {
+    /// What a home page holds, before a liked album or artist stands in for
+    /// the tracks in it.
+    fn of(shelf: &Shelf) -> Self {
+        Self {
+            tracks: shelf.tracks.iter().map(|track| track.id).collect(),
+            albums: shelf.albums.iter().map(|album| album.id.clone()).collect(),
+            artists: shelf.artists.iter().map(|artist| artist.id).collect(),
+        }
+    }
+
+    /// Put one id in or out of its set. `kind` is "track", "album" or
+    /// "artist".
+    fn set(&mut self, kind: &str, id: &str, liked: bool) {
+        fn put<T: std::hash::Hash + Eq>(set: &mut std::collections::HashSet<T>, id: T, liked: bool) {
+            if liked {
+                set.insert(id);
+            } else {
+                set.remove(&id);
+            }
+        }
+        match kind {
+            "track" => {
+                if let Ok(id) = id.parse() {
+                    put(&mut self.tracks, id, liked);
+                }
+            }
+            "album" => put(&mut self.albums, id.to_string(), liked),
+            "artist" => {
+                if let Ok(id) = id.parse() {
+                    put(&mut self.artists, id, liked);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One like or unlike the hearts show before the loaded sets have it.
+#[derive(Clone, PartialEq)]
+struct Flip {
+    ticket: u64,
+    kind: &'static str,
+    id: String,
+    liked: bool,
+    /// The server has it, from before the fetch numbered this was asked
+    /// for. Kept until a fetch that late or later lands: an earlier one may
+    /// have been read before the change.
+    saved: Option<u64>,
+}
+
+/// Numbers the fetches of the liked sets, so a saved flip knows which
+/// answers may not have it yet.
+static LIKED_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The number of a fetch of the liked sets about to be sent.
+fn ask_liked() -> u64 {
+    LIKED_ASKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The number the next fetch will get.
+fn next_liked_ask() -> u64 {
+    LIKED_ASKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The loaded sets, or none yet, with the flips over them.
+fn with_flips(base: Option<&Liked>, flips: &[Flip]) -> Liked {
+    let mut liked = base.cloned().unwrap_or_default();
+    for flip in flips {
+        liked.set(flip.kind, &flip.id, flip.liked);
+    }
+    liked
+}
+
+/// Let go of the flips an answer to fetch `asked` already has: those saved
+/// before it was sent. The rest still show over it.
+fn drop_seen(flips: &mut Vec<Flip>, asked: u64) {
+    flips.retain(|flip| !flip.saved.is_some_and(|saved| saved <= asked));
 }
 
 impl Library {
@@ -385,6 +468,7 @@ impl Library {
             only: Signal::new(None),
             source: Signal::new(Source::Catalogue),
             liked: Signal::new(None),
+            flips: Signal::new(Vec::new()),
             epoch: Signal::new(0),
             kept: Signal::new(Vec::new()),
             searches: Signal::new(prefs.searches),
@@ -424,24 +508,51 @@ impl Library {
 
     /// Fetch the three favourited-id sets, once. Safe to call every time the
     /// toggle turns on, the `is_some` guard means only the first call after
-    /// launch actually reaches the network.
+    /// launch actually reaches the network, and then only when neither the
+    /// disk nor the home page has filled them in yet.
     pub(crate) fn ensure_liked_loaded(self) {
         if self.liked.peek().is_some() {
             return;
         }
-        let mut liked = self.liked;
+        let library = self;
         spawn(async move {
+            let asked = ask_liked();
             let (tracks, albums, artists) = tokio::join!(
                 backend().favourite_tracks(LIST_CAP),
                 backend().favourite_albums(LIST_CAP),
                 backend().favourite_artists(LIST_CAP),
             );
-            liked.set(Some(Liked {
-                tracks: tracks.unwrap_or_default().iter().map(|t| t.id).collect(),
-                albums: albums.unwrap_or_default().iter().map(|a| a.id.clone()).collect(),
-                artists: artists.unwrap_or_default().iter().map(|a| a.id).collect(),
-            }));
+            // A failed list would read as nothing liked, over sets the home
+            // page may have filled in meanwhile.
+            let (Ok(tracks), Ok(albums), Ok(artists)) = (tracks, albums, artists) else {
+                return;
+            };
+            let loaded = Liked {
+                tracks: tracks.iter().map(|t| t.id).collect(),
+                albums: albums.iter().map(|a| a.id.clone()).collect(),
+                artists: artists.iter().map(|a| a.id).collect(),
+            };
+            library.take_liked(loaded, Some(asked));
         });
+    }
+
+    /// Take fresh liked sets, from fetch `asked`, or from the disk with no
+    /// number, which only fills in for none.
+    fn take_liked(mut self, loaded: Liked, asked: Option<u64>) {
+        match asked {
+            Some(asked) => {
+                let mut flips = self.flips.peek().clone();
+                drop_seen(&mut flips, asked);
+                if flips != *self.flips.peek() {
+                    self.flips.set(flips);
+                }
+            }
+            None if self.liked.peek().is_some() => return,
+            None => {}
+        }
+        if self.liked.peek().as_ref() != Some(&loaded) {
+            self.liked.set(Some(loaded));
+        }
     }
 
     /// Whether the "liked" filter is on, and what to check against. Reading
@@ -459,47 +570,66 @@ impl Library {
     /// liked things". The detail sheet's heart icon is the other reader;
     /// both go through `ensure_liked_loaded` first, so whichever asks first
     /// pays for the fetch and the other finds it already there.
+    ///
+    /// Likes and unlikes not yet saved show as if they were.
     pub(crate) fn liked(&self) -> Liked {
-        self.liked.read().clone().unwrap_or_default()
+        with_flips(self.liked.read().as_ref(), &self.flips.read())
     }
 
-    /// Flip one id's membership in the cached favourite sets, optimistically,
-    /// after a successful favourite add/remove, so the heart in the
-    /// detail sheet does not sit wrong until the next full reload. A no-op
-    /// before the cache has ever been loaded: there is no set to flip a
-    /// member of yet, and by the time one is loaded it will ask Qobuz fresh
-    /// rather than replay this.
-    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool) {
-        let mut signal = self.liked;
-        let mut current = signal.write();
-        let Some(current) = current.as_mut() else { return };
-        match kind {
-            "track" => {
-                if let Ok(track_id) = id.parse::<i64>() {
-                    if liked {
-                        current.tracks.insert(track_id);
-                    } else {
-                        current.tracks.remove(&track_id);
-                    }
+    /// Show a like or unlike at once, before the server has it. Undone by
+    /// `settle` if it fails. Returns the ticket `settle` takes.
+    pub(crate) fn flip(mut self, kind: &'static str, id: &str, liked: bool) -> u64 {
+        static TICKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ticket = TICKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.flips.write().push(Flip {
+            ticket,
+            kind,
+            id: id.to_string(),
+            liked,
+            saved: None,
+        });
+        if !liked {
+            self.drop_from_favourites(kind, id);
+        }
+        ticket
+    }
+
+    /// The server has answered a `flip`. Saved, it stays until a fetch sent
+    /// after now lands; refused, it is let go of and the heart goes back.
+    /// Either way the home page asks again, to show what it now holds.
+    pub(crate) fn settle(mut self, ticket: u64, saved: bool) {
+        {
+            let mut flips = self.flips.write();
+            let Some(at) = flips.iter().position(|flip| flip.ticket == ticket) else {
+                return;
+            };
+            if saved {
+                flips[at].saved = Some(next_liked_ask());
+            } else {
+                flips.remove(at);
+            }
+        }
+        let view = self.view.peek().clone();
+        if matches!(view, View::Favourites { .. }) && !*self.loading.peek() {
+            self.show(view);
+        }
+    }
+
+    /// Take an unliked item off the home page, and off the copies of it kept
+    /// for going back, rather than leave it there until the next fetch.
+    fn drop_from_favourites(&mut self, kind: &str, id: &str) {
+        if matches!(*self.view.peek(), View::Favourites { .. }) {
+            for mut shelf in [self.shelf, self.loaded] {
+                let mut kept = shelf.peek().clone();
+                if kept.drop_liked(kind, id) {
+                    shelf.set(kept);
                 }
             }
-            "album" => {
-                if liked {
-                    current.albums.insert(id.to_string());
-                } else {
-                    current.albums.remove(id);
-                }
+        }
+        for (view, _, shelf) in self.kept.write().iter_mut() {
+            if matches!(view, View::Favourites { .. }) {
+                shelf.drop_liked(kind, id);
             }
-            "artist" => {
-                if let Ok(artist_id) = id.parse::<i64>() {
-                    if liked {
-                        current.artists.insert(artist_id);
-                    } else {
-                        current.artists.remove(&artist_id);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -638,6 +768,18 @@ impl Library {
         }
     }
 
+    /// An album's tracklist, if its page is open or was one of the last few
+    /// seen, so playing it from a menu need not ask again.
+    pub(crate) fn held_album_tracks(&self, id: &str) -> Option<Vec<RemoteTrack>> {
+        let open = (!*self.loading.peek()).then(|| (self.view.peek().clone(), self.loaded.peek().clone()));
+        let kept = self.kept.peek();
+        let views = open
+            .iter()
+            .map(|(view, shelf)| (view, shelf))
+            .chain(kept.iter().map(|(view, _, shelf)| (view, shelf)));
+        album_tracks_in(views, id)
+    }
+
     /// Whether a search is looking at the space rather than Qobuz.
     fn searching_space_only(&self) -> bool {
         matches!(&*self.view.read(), View::Search { .. }) && *self.source.read() == Source::Space
@@ -724,7 +866,22 @@ impl Library {
             } else {
                 None
             };
-            let loaded = load(target, space_only, only).await;
+            let favourites = match &target {
+                View::Favourites { scope } => Some((*scope, ask_liked())),
+                _ => None,
+            };
+            let mut loaded = load(target, space_only, only).await;
+            if let (Some((scope, asked)), Ok(shelf)) = (favourites, &mut loaded) {
+                // Every like, before the tiles stand in for some: what a page
+                // opening would otherwise fetch again for its heart.
+                if scope == Scope::Everything {
+                    library.take_liked(Liked::of(shelf), Some(asked));
+                }
+                if let Some(name) = cache.filter(|_| *library.epoch.peek() == epoch) {
+                    crate::cache::write(name, &*shelf);
+                }
+                shelf.stand_in(scope);
+            }
 
             // Someone asked for a different view while this was in flight.
             // Writing now would put these rows under that view's heading, and
@@ -736,7 +893,8 @@ impl Library {
             match loaded {
                 Ok(shelf) => {
                     crate::timings::nav_landed(epoch);
-                    if let Some(name) = cache {
+                    // Home's went to the disk as it came, above.
+                    if let Some(name) = cache.filter(|_| favourites.is_none()) {
                         crate::cache::write(name, &shelf);
                     }
                     let sort = *library.sort.peek();
@@ -749,6 +907,48 @@ impl Library {
             library.loading.set(false);
         });
     }
+}
+
+impl Shelf {
+    /// A liked album or artist is shown as its tile, not again as every
+    /// liked track inside it. Only when mixed: narrowed to tracks, there is
+    /// no tile to stand in for them.
+    fn stand_in(&mut self, scope: Scope) {
+        if scope != Scope::Everything {
+            return;
+        }
+        let albums: std::collections::HashSet<&str> =
+            self.albums.iter().map(|album| album.id.as_str()).collect();
+        let artists: std::collections::HashSet<i64> =
+            self.artists.iter().map(|artist| artist.id).collect();
+        self.tracks.retain(|track| {
+            !track.album_id.as_deref().is_some_and(|id| albums.contains(id))
+                && !track.artist_id.is_some_and(|id| artists.contains(&id))
+        });
+    }
+
+    /// Take out the track, album or artist `id`. Says whether it was there.
+    fn drop_liked(&mut self, kind: &str, id: &str) -> bool {
+        let before = self.tracks.len() + self.albums.len() + self.artists.len();
+        match kind {
+            "track" => self.tracks.retain(|track| track.id.to_string() != id),
+            "album" => self.albums.retain(|album| album.id != id),
+            "artist" => self.artists.retain(|artist| artist.id.to_string() != id),
+            _ => {}
+        }
+        before != self.tracks.len() + self.albums.len() + self.artists.len()
+    }
+}
+
+/// The tracklist of album `id` among loaded views. An empty one counts as
+/// not held: a page that found nothing is worth asking again.
+fn album_tracks_in<'a>(
+    mut views: impl Iterator<Item = (&'a View, &'a Shelf)>,
+    id: &str,
+) -> Option<Vec<RemoteTrack>> {
+    views
+        .find(|(view, shelf)| matches!(view, View::Album(album) if album.id == id) && !shelf.tracks.is_empty())
+        .map(|(_, shelf)| shelf.tracks.clone())
 }
 
 impl Default for Library {
@@ -826,7 +1026,10 @@ fn scroll_to(top: f64) {
 /// looking broken.
 pub fn open_initial(library: Library) {
     let mut library = library;
-    if let Some(shelf) = crate::cache::read::<Shelf>(HOME_CACHE) {
+    if let Some(mut shelf) = crate::cache::read::<Shelf>(HOME_CACHE) {
+        // Held as it came, so the hearts are right before anything lands.
+        library.take_liked(Liked::of(&shelf), None);
+        shelf.stand_in(Scope::Everything);
         let source = *library.source.peek();
         library.kept.write().push((home(), source, shelf));
     }
@@ -913,23 +1116,10 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
                     }
                 },
             );
+            // Every liked track, even those `stand_in` takes off later.
             shelf.tracks = tracks?;
             shelf.albums = albums?;
             shelf.artists = artists?;
-
-            // A liked album or artist is shown as its tile, not again as
-            // every liked track inside it. Only when mixed: narrowed to
-            // tracks, there is no tile to stand in for them.
-            if scope == Scope::Everything {
-                let albums: std::collections::HashSet<&str> =
-                    shelf.albums.iter().map(|album| album.id.as_str()).collect();
-                let artists: std::collections::HashSet<i64> =
-                    shelf.artists.iter().map(|artist| artist.id).collect();
-                shelf.tracks.retain(|track| {
-                    !track.album_id.as_deref().is_some_and(|id| albums.contains(id))
-                        && !track.artist_id.is_some_and(|id| artists.contains(&id))
-                });
-            }
         }
         View::Releases => shelf.albums = backend().recent_releases(RELEASES_DAYS).await?,
         View::Playlists => shelf.playlists = backend().playlists(LIST_CAP).await?,
@@ -2264,3 +2454,93 @@ fn PlaylistRows() -> Element {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(id: &str) -> View {
+        View::Album(RemoteAlbum { id: id.into(), ..Default::default() })
+    }
+
+    fn tracks(ids: &[i64]) -> Shelf {
+        Shelf {
+            tracks: ids.iter().map(|&id| RemoteTrack { id, ..Default::default() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn flip(ticket: u64, kind: &'static str, id: &str, liked: bool, saved: Option<u64>) -> Flip {
+        Flip { ticket, kind, id: id.into(), liked, saved }
+    }
+
+    #[test]
+    fn a_like_shows_before_the_sets_have_loaded() {
+        let liked = with_flips(None, &[flip(0, "track", "7", true, None)]);
+        assert!(liked.tracks.contains(&7));
+    }
+
+    #[test]
+    fn the_last_flip_of_an_id_wins() {
+        let mut base = Liked::default();
+        base.albums.insert("a".into());
+        let flips = [flip(0, "album", "a", false, None), flip(1, "album", "a", true, None)];
+        assert!(with_flips(Some(&base), &flips).albums.contains("a"));
+        assert!(!with_flips(Some(&base), &flips[..1]).albums.contains("a"));
+    }
+
+    #[test]
+    fn an_answer_lets_go_only_of_flips_saved_before_it_was_asked() {
+        let mut flips = vec![
+            flip(0, "artist", "3", false, Some(4)),
+            flip(1, "artist", "5", true, Some(6)),
+            flip(2, "track", "9", true, None),
+        ];
+        drop_seen(&mut flips, 5);
+        let left: Vec<u64> = flips.iter().map(|flip| flip.ticket).collect();
+        assert_eq!(left, vec![1, 2]);
+    }
+
+    #[test]
+    fn home_seeds_every_like_and_then_shows_tiles_for_albums() {
+        let mut shelf = tracks(&[1, 2]);
+        shelf.tracks[1].album_id = Some("a".into());
+        shelf.albums.push(RemoteAlbum { id: "a".into(), ..Default::default() });
+        let liked = Liked::of(&shelf);
+        assert!(liked.tracks.contains(&2));
+        assert!(liked.albums.contains("a"));
+        shelf.stand_in(Scope::Tracks);
+        assert_eq!(shelf.tracks.len(), 2);
+        shelf.stand_in(Scope::Everything);
+        assert_eq!(shelf.tracks.len(), 1);
+    }
+
+    #[test]
+    fn an_unlike_takes_the_row_off_a_shelf() {
+        let mut shelf = tracks(&[1, 2]);
+        assert!(shelf.drop_liked("track", "2"));
+        assert!(!shelf.drop_liked("track", "5"));
+        assert_eq!(shelf.tracks.len(), 1);
+    }
+
+    fn ids(tracks: Option<Vec<RemoteTrack>>) -> Option<Vec<i64>> {
+        tracks.map(|tracks| tracks.iter().map(|track| track.id).collect())
+    }
+
+    #[test]
+    fn an_album_seen_lately_is_played_from_what_it_loaded() {
+        let views = [(album("a"), tracks(&[1, 2])), (album("b"), tracks(&[3, 4, 5]))];
+        let found = album_tracks_in(views.iter().map(|(view, shelf)| (view, shelf)), "b");
+        assert_eq!(ids(found), Some(vec![3, 4, 5]));
+    }
+
+    #[test]
+    fn an_album_not_held_or_held_empty_is_fetched() {
+        let views = [
+            (album("a"), Shelf::default()),
+            (View::Releases, tracks(&[1])),
+        ];
+        assert_eq!(ids(album_tracks_in(views.iter().map(|(view, shelf)| (view, shelf)), "a")), None);
+        assert_eq!(ids(album_tracks_in(views.iter().map(|(view, shelf)| (view, shelf)), "z")), None);
+    }
+}

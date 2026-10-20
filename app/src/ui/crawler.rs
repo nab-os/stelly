@@ -4,7 +4,7 @@
 //! remotely, and this is the view's handle on it. That is what lets a crawl
 //! outlive the panel, and remotely the client.
 
-use super::POLL;
+use super::pace;
 use dioxus::prelude::*;
 use crate::api::CrawlStatus;
 use crate::backend::backend;
@@ -39,6 +39,7 @@ impl Crawler {
             return;
         }
         self.pending.set(true);
+        pace::kick();
         spawn(async move {
             let mut crawler = self;
             if let Err(err) = backend().crawl_start(DEFAULT_MAX_DISTANCE).await {
@@ -49,6 +50,7 @@ impl Crawler {
     }
 
     pub fn request_stop(self) {
+        pace::kick();
         spawn(async move {
             let mut crawler = self;
             if let Err(err) = backend().crawl_stop().await {
@@ -65,17 +67,29 @@ impl Default for Crawler {
 }
 
 /// Keep the crawl status fresh. Mounted once, for the life of the window.
+/// Only the pipeline view shows it, so between crawls it is asked for only
+/// while that is open; the pipeline's own poll is the heartbeat.
 pub fn use_crawl_status(crawler: Crawler) {
     use_future(move || async move {
         let mut crawler = crawler;
         loop {
             match backend().crawl_status().await {
-                Ok(status) => crawler.status.set(status),
+                // Only a change is written: every write redraws what reads it.
+                Ok(status) => {
+                    if *crawler.status.peek() != status {
+                        crawler.status.set(status);
+                    }
+                }
                 // A server that has gone away should not spin the log; the
                 // pipeline panel reports it once and the next poll retries.
-                Err(_) => crawler.status.write().running = false,
+                Err(_) => {
+                    if crawler.status.peek().running {
+                        crawler.status.write().running = false;
+                    }
+                }
             }
-            tokio::time::sleep(POLL).await;
+            let running = crawler.status.peek().running;
+            pace::wait(running, None).await;
         }
     });
 }
