@@ -149,7 +149,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 6.5 | Shelves shared by `Rc`, disk writes in the background | `app/src/ui/library.rs:664, 680, 736` | S–M | #155 |
 | 6.6 | Recent album and artist pages, portrait and bio cached on disk | `app/src/ui/library.rs`, `screens.rs:626` | M | #156 |
 | 6.7 | Map card filled in JS from the labels; selection highlight a CSS class | `app/src/app.rs:775`, `ui/mod.rs:210` | M | #157 |
-| 6.8 | SSE silence ~20 s; reconnect at once on an Android network change | `app/src/backend/remote.rs:623` | S | |
+| 6.8 | SSE silence ~20 s; reconnect at once on an Android network change | `app/src/backend/remote.rs:623` | S | #158 |
 | 6.9 | webkit2gtk hardware acceleration policy | `app/src/main.rs:43` | S | |
 
 ## Phase 7: provider structure
