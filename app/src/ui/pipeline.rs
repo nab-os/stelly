@@ -142,7 +142,11 @@ pub fn use_pipeline_watch(pipeline: Pipeline, space: Space) {
                         offline.set(None);
                     }
                     let generation = status.generation;
-                    pipeline.status.set(status);
+                    // Only a change is written: every write redraws what
+                    // reads it, and most polls bring the same answer.
+                    if *pipeline.status.peek() != status {
+                        pipeline.status.set(status);
+                    }
                     if generation != *pipeline.generation.peek() {
                         pipeline.generation.set(generation);
                     }

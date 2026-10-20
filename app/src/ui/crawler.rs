@@ -74,10 +74,19 @@ pub fn use_crawl_status(crawler: Crawler) {
         let mut crawler = crawler;
         loop {
             match backend().crawl_status().await {
-                Ok(status) => crawler.status.set(status),
+                // Only a change is written: every write redraws what reads it.
+                Ok(status) => {
+                    if *crawler.status.peek() != status {
+                        crawler.status.set(status);
+                    }
+                }
                 // A server that has gone away should not spin the log; the
                 // pipeline panel reports it once and the next poll retries.
-                Err(_) => crawler.status.write().running = false,
+                Err(_) => {
+                    if crawler.status.peek().running {
+                        crawler.status.write().running = false;
+                    }
+                }
             }
             let running = crawler.status.peek().running;
             pace::wait(running, None).await;
