@@ -8,9 +8,10 @@
 //! asks the catalogue behind it for nothing.
 //!
 //! Each row converted, or that the provider makes nothing of, loses its
-//! `legacy_json`, so this resumes where it stopped and costs nothing once
-//! done. The server runs it at start; `stelly-server convert-legacy` runs it by
-//! hand, as `stelly-server convert-legacy`.
+//! `legacy_json`, so this resumes where it stopped; a start that finds
+//! nothing left says so in `id_counters`, so it costs nothing once done. The
+//! server runs it at start; `stelly-server convert-legacy` runs it by hand,
+//! as `stelly-server convert-legacy`.
 
 use crate::provider::{Provider, RemoteAlbum, RemoteArtist, RemoteTrack};
 use anyhow::{Context, Result};
@@ -43,6 +44,24 @@ struct Row {
     legacy: String,
 }
 
+/// Kept in `id_counters` once a start finds nothing left to convert. No
+/// index covers `legacy_json`, so without it every start reads four whole
+/// tables to learn there is nothing to do.
+const CONVERTED: &str = "legacy-converted";
+
+#[derive(QueryableByName)]
+struct Count {
+    #[diesel(sql_type = BigInt)]
+    n: i64,
+}
+
+fn converted(conn: &mut SqliteConnection) -> Result<bool> {
+    let marks = diesel::sql_query("SELECT COUNT(*) AS n FROM id_counters WHERE kind = ?")
+        .bind::<Text, _>(CONVERTED)
+        .get_result::<Count>(conn)?;
+    Ok(marks.n > 0)
+}
+
 /// Whether anything is still waiting to be converted.
 pub fn pending(conn: &mut SqliteConnection) -> Result<bool> {
     for table in ["likes", "artists", "albums", "tracks"] {
@@ -66,7 +85,15 @@ pub async fn run(db_path: &Path, provider: &Provider, report: &(dyn Fn(String) +
     if crate::db::has_column(&mut conn, "likes", "qobuz_json")? {
         crate::likes::ensure_schema(&mut conn)?;
     }
+    if converted(&mut conn)? {
+        return Ok(Imported::default());
+    }
     if !pending(&mut conn)? {
+        // Nothing brings legacy rows back: the migration that made them
+        // runs once, on a database older than this.
+        diesel::sql_query("INSERT OR IGNORE INTO id_counters (kind, next) VALUES (?, 1)")
+            .bind::<Text, _>(CONVERTED)
+            .execute(&mut conn)?;
         return Ok(Imported::default());
     }
     // Only the provider that catalogue came from can make sense of it.
@@ -173,4 +200,30 @@ async fn fill<T: DeserializeOwned + Serialize>(
         }
     }
     Ok(extras)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn nothing_left_is_remembered() {
+        let dir = std::env::temp_dir().join(format!("stelly-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("stelly.db");
+        let conn = &mut crate::db::open_for_write(&db_path).unwrap();
+        // No provider configured: never asked while nothing is pending.
+        let provider = Provider::from_env(&dir, &db_path);
+
+        assert!(!converted(conn).unwrap());
+        assert_eq!(run(&db_path, &provider, &|_| {}).await.unwrap(), Imported::default());
+        assert!(converted(conn).unwrap());
+
+        // From then on the tables are not read at all.
+        conn.batch_execute("INSERT INTO artists (id, name, legacy_json) VALUES (1, 'a', '{}')").unwrap();
+        assert!(pending(conn).unwrap());
+        assert_eq!(run(&db_path, &provider, &|_| {}).await.unwrap(), Imported::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

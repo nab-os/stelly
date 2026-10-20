@@ -62,21 +62,21 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 2.1 | Device tokens held in memory (TTL or `PRAGMA data_version`); `last_seen` written at most once a minute, off the runtime | `server/src/auth.rs` | S–M | |
-| 2.2 | Text model loaded at start in `spawn_blocking`; `can_steer` an `AtomicBool` | `server/src/hub.rs:462–501` | S | |
-| 2.3 | Embeds in `spawn_blocking`; phrase → embedding LRU; mix `BASELINE` precomputed | `server/src/hub.rs:470`, `routes.rs:880` | S | |
-| 2.4 | Describe vocabulary and baseline built in the background after a reload | `server/src/hub.rs:484`, `space.rs:270` | S | |
-| 2.5 | `/api/corpus` cached 10–30 s, cleared when a stage ends; `db::connect`, not `open_for_write` | `server/src/stages.rs:74` | S | |
-| 2.6 | Partial index on `features(track_id) WHERE clap_f32 IS NOT NULL`, covering `(track_id, extractor_version)` | `schema.sql` | S | |
-| 2.7 | Crawl counts taken before the status mutex | `server/src/hub.rs:860` | S | |
-| 2.8 | Compression on every route; TCP_NODELAY on the listener | `server/src/routes.rs`, `main.rs:446` | S | |
-| 2.9 | Partial selection instead of full sorts in neighbours, radio, snap | `core/src/paths.rs:104, 168, 232` | S | |
-| 2.10 | Hidden artists as a per-row bitset; artist ids in their own array; radio penalty as a `Vec<u16>` | `core/src/db.rs:193`, `paths.rs:54–165` | S | |
-| 2.11 | Legacy conversion marked done; space load reads only the space's ids and only the bpm | `server/src/legacy.rs:47`, `core/src/db.rs:88` | S | |
-| 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | |
-| 2.13 | Layout, dedupe and analyse on all cores but one, or at a lower priority | `server/src/pipeline/layout.rs`, `dedupe.rs` | S | |
-| 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | |
-| 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | |
+| 2.1 | Device tokens held in memory (TTL or `PRAGMA data_version`); `last_seen` written at most once a minute, off the runtime | `server/src/auth.rs` | S–M | #100 |
+| 2.2 | Text model loaded at start in `spawn_blocking`; `can_steer` an `AtomicBool` | `server/src/hub.rs:462–501` | S | #101 |
+| 2.3 | Embeds in `spawn_blocking`; phrase → embedding LRU; mix `BASELINE` precomputed | `server/src/hub.rs:470`, `routes.rs:880` | S | #102 |
+| 2.4 | Describe vocabulary and baseline built in the background after a reload | `server/src/hub.rs:484`, `space.rs:270` | S | #103 |
+| 2.5 | `/api/corpus` cached 10–30 s, cleared when a stage ends; `db::connect`, not `open_for_write` | `server/src/stages.rs:74` | S | #97 |
+| 2.6 | Partial index on `features(track_id) WHERE clap_f32 IS NOT NULL`, covering `(track_id, extractor_version)` | `schema.sql` | S | #98 |
+| 2.7 | Crawl counts taken before the status mutex | `server/src/hub.rs:860` | S | #99 |
+| 2.8 | Compression on every route; TCP_NODELAY on the listener | `server/src/routes.rs`, `main.rs:446` | S | #107 |
+| 2.9 | Partial selection instead of full sorts in neighbours, radio, snap | `core/src/paths.rs:104, 168, 232` | S | #104 |
+| 2.10 | Hidden artists as a per-row bitset; artist ids in their own array; radio penalty as a `Vec<u16>` | `core/src/db.rs:193`, `paths.rs:54–165` | S | #105 |
+| 2.11 | Legacy conversion marked done; space load reads only the space's ids and only the bpm | `server/src/legacy.rs:47`, `core/src/db.rs:88` | S | #108 |
+| 2.12 | Mix reuses the loaded space; CLAP load without the doubled map | `server/src/mix.rs:149`, `core/src/db.rs:45` | S | #109 |
+| 2.13 | Layout, dedupe and analyse on all cores but one, or at a lower priority | `server/src/pipeline/layout.rs`, `dedupe.rs` | S | #110 |
+| 2.14 | Pipeline log published through `Notify`, not a 200 ms poll per subscriber | `server/src/routes.rs:572` | S | #111 |
+| 2.15 | nginx in front of production: pass `Accept-Encoding` through (or `gzip on; gzip_proxied any;` with the JSON and octet-stream types) | prod nginx | S | done, nginx passes Accept-Encoding |
 
 ## Phase 3: app quick wins
 

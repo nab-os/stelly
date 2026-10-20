@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, LogSlice, PipelineStatus, Stage, Target, FULL_RUN,
 };
@@ -42,6 +42,12 @@ const LIKED_ARTISTS_CAP: usize = 10_000;
 /// Each artist's newest few: enough to reach back months for all but the
 /// busiest, in one request.
 const RECENT_PER_ARTIST: usize = 20;
+/// How long the corpus counts are served from memory. They take seconds on a
+/// large database and every app polls them; a stage ending clears them.
+const CORPUS_TTL: Duration = Duration::from_secs(15);
+
+/// Phrases whose embedding is kept, 2 KB each.
+const EMBEDDINGS_HELD: u64 = 1_000;
 
 pub struct Hub {
     paths: Paths,
@@ -62,14 +68,21 @@ pub struct Hub {
     /// interval, which overwrites it, so a client never waits on the provider for an
     /// artist that check has seen.
     releases: Cache,
-    /// Loaded on first use and kept. `None` inside means the tower has not
-    /// been exported, which is not an error, the UI hides steering.
-    text: tokio::sync::Mutex<Option<TextEncoder>>,
-    text_tried: AtomicBool,
-    /// The describing words, embedded on first use and kept.
-    vocabulary: tokio::sync::Mutex<Option<Arc<Vocabulary>>>,
+    /// Loaded at start when it is on disk, else on first use, and kept.
+    /// `None` inside means the tower has not been exported, which is not an
+    /// error, the UI hides steering.
+    text: tokio::sync::OnceCell<Option<Arc<Mutex<TextEncoder>>>>,
+    /// Whether steering is on offer, answered without waiting for the load:
+    /// set when the export is on disk, cleared if it then fails to load.
+    steerable: AtomicBool,
+    /// Phrases already embedded. The same few come back on every drift and
+    /// mood regenerated, and mixing's baseline on every set.
+    embeddings: moka::future::Cache<String, Arc<Vec<f32>>>,
+    /// The describing words, embedded once the tower has loaded and kept.
+    vocabulary: tokio::sync::OnceCell<Arc<Vocabulary>>,
     crawl: Arc<CrawlJob>,
     pipeline: Arc<PipelineJob>,
+    corpus: Arc<CorpusCounts>,
     log: Arc<LogBuffer>,
     /// Whole tracks analysed for mixing, and the job that adds to them.
     mix: Arc<crate::mix::MixService>,
@@ -97,6 +110,23 @@ struct PipelineJob {
     generation: AtomicU64,
     /// The running stage's, cleared between stages.
     progress: ProgressSlot,
+}
+
+/// The last corpus counts and when they were taken. The lock is held while
+/// they are taken, so callers arriving meanwhile wait for that one answer
+/// rather than each running the counts again.
+#[derive(Default)]
+struct CorpusCounts {
+    held: tokio::sync::Mutex<Option<(Instant, u64, Corpus)>>,
+    /// Moved by whatever changes the counts. Counts taken before it moved
+    /// are not served after, even when they finish later.
+    epoch: AtomicU64,
+}
+
+impl CorpusCounts {
+    fn clear(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// What the pipeline is doing and will do, under one lock so a target
@@ -143,9 +173,11 @@ impl Queue {
 impl Hub {
     pub fn new(paths: Paths) -> Self {
         let log = Arc::new(LogBuffer::default());
+        let steerable = TextEncoder::exported(&paths.model_dir);
+        let space = Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone()));
         Self {
-            mix: Arc::new(crate::mix::MixService::new(paths.clone(), log.clone())),
-            space: Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone())),
+            mix: Arc::new(crate::mix::MixService::new(paths.clone(), space.clone(), log.clone())),
+            space,
             env_dir: paths.env_dir.clone(),
             db_path: paths.db_path.clone(),
             model_dir: paths.model_dir.clone(),
@@ -155,11 +187,13 @@ impl Hub {
             searches: Cache::new(Duration::from_secs(5 * 60), 500),
             account: Cache::new(Duration::from_secs(2 * 60), 200),
             releases: Cache::new(Duration::from_secs(48 * 60 * 60), 10_000),
-            text: tokio::sync::Mutex::new(None),
-            text_tried: AtomicBool::new(false),
-            vocabulary: tokio::sync::Mutex::new(None),
+            text: tokio::sync::OnceCell::new(),
+            steerable: AtomicBool::new(steerable),
+            embeddings: moka::future::Cache::new(EMBEDDINGS_HELD),
+            vocabulary: tokio::sync::OnceCell::new(),
             crawl: Arc::new(CrawlJob::default()),
             pipeline: Arc::new(PipelineJob::default()),
+            corpus: Arc::new(CorpusCounts::default()),
             log,
         }
     }
@@ -462,47 +496,98 @@ impl Hub {
 
     // --------------------------------------------------------- text steering
 
-    /// Load the tower once, remembering that we tried. A missing export is not
-    /// an error, it is the ordinary state of a fresh checkout.
-    async fn encoder(&self) -> tokio::sync::MutexGuard<'_, Option<TextEncoder>> {
-        let mut guard = self.text.lock().await;
-        if !self.text_tried.swap(true, Ordering::SeqCst) {
-            *guard = TextEncoder::load(&self.model_dir).unwrap_or(None);
+    /// Load the tower in the background, so the first request that steers
+    /// does not wait for it. Only when it is on disk: fetching
+    /// it is `models`' job, not the server's start.
+    pub fn load_text(self: &Arc<Self>) {
+        if !self.steerable.load(Ordering::SeqCst) {
+            return;
         }
-        guard
+        let hub = self.clone();
+        tokio::spawn(async move {
+            // Mixing asks for its baseline with every set, and describing
+            // for its words, so both are ready before the first.
+            let _ = hub.embed(stelly_mix::text::BASELINE).await;
+            if let Err(err) = hub.vocabulary().await {
+                hub.log.push(format!("embedding the describing words failed: {err:#}"));
+            }
+        });
     }
 
-    pub async fn embed(&self, phrase: &str) -> Result<Vec<f32>> {
-        let mut guard = self.encoder().await;
-        let encoder = guard.as_mut().ok_or_else(|| {
+    /// The tower, loaded once off the async threads; whoever asks while it
+    /// loads waits for that load. A missing export is not an error, it is the
+    /// ordinary state of a fresh checkout.
+    async fn encoder(&self) -> Option<&Arc<Mutex<TextEncoder>>> {
+        self.text
+            .get_or_init(|| async {
+                let model_dir = self.model_dir.clone();
+                let encoder = match tokio::task::spawn_blocking(move || TextEncoder::load(&model_dir)).await {
+                    Ok(Ok(encoder)) => encoder,
+                    Ok(Err(err)) => {
+                        self.log.push(format!("loading the text tower failed: {err:#}"));
+                        None
+                    }
+                    Err(err) => {
+                        self.log.push(format!("loading the text tower panicked: {err}"));
+                        None
+                    }
+                };
+                self.steerable.store(encoder.is_some(), Ordering::SeqCst);
+                encoder.map(|encoder| Arc::new(Mutex::new(encoder)))
+            })
+            .await
+            .as_ref()
+    }
+
+    /// A phrase's embedding, from memory when it has been asked for before.
+    /// Callers asking for the same phrase at once share one run of the tower.
+    pub async fn embed(&self, phrase: &str) -> Result<Arc<Vec<f32>>> {
+        self.embeddings
+            .try_get_with(phrase.to_string(), async { self.encode(phrase).await.map(Arc::new) })
+            .await
+            .map_err(|err| anyhow::anyhow!("{err:#}"))
+    }
+
+    /// Run the tower, off the async threads: milliseconds of ONNX on several
+    /// cores, which would otherwise hold a worker other requests need.
+    async fn encode(&self, phrase: &str) -> Result<Vec<f32>> {
+        let encoder = self.encoder().await.ok_or_else(|| {
             anyhow::anyhow!(
                 "text steering needs {}/{}; fetch it with: stelly-server models",
                 self.model_dir.display(),
                 crate::pipeline::models::CLAP_TEXT
             )
         })?;
-        encoder.embed(phrase)
+        let (encoder, phrase) = (encoder.clone(), phrase.to_string());
+        tokio::task::spawn_blocking(move || encoder.lock().unwrap_or_else(|e| e.into_inner()).embed(&phrase))
+            .await
+            .context("the worker thread panicked")?
     }
 
-    /// Every word a track can be described with, embedded. The first call
-    /// embeds them all, a few seconds; after that it is free.
+    /// Every word a track can be described with, embedded. Done in the
+    /// background once the tower loads, a second or so; whoever asks before
+    /// it is done waits for it.
     pub async fn vocabulary(&self) -> Result<Arc<Vocabulary>> {
-        let mut held = self.vocabulary.lock().await;
-        if let Some(vocabulary) = held.as_ref() {
-            return Ok(vocabulary.clone());
-        }
-        let mut vocabulary = Vocabulary::default();
-        for (word, phrase) in crate::pipeline::labels::vocabulary() {
-            vocabulary.vectors.push(self.embed(&phrase).await?);
-            vocabulary.words.push(word);
-        }
-        let vocabulary = Arc::new(vocabulary);
-        *held = Some(vocabulary.clone());
-        Ok(vocabulary)
+        self.vocabulary
+            .get_or_try_init(|| async {
+                let mut vocabulary = Vocabulary::default();
+                // Past the cache, which these would fill with phrases no one types.
+                for (word, phrase) in crate::pipeline::labels::vocabulary() {
+                    vocabulary.vectors.push(self.encode(&phrase).await?);
+                    vocabulary.words.push(word);
+                }
+                let vocabulary = Arc::new(vocabulary);
+                self.space.set_vocabulary(vocabulary.clone());
+                Ok(vocabulary)
+            })
+            .await
+            .cloned()
     }
 
-    pub async fn can_steer(&self) -> Result<bool> {
-        Ok(self.encoder().await.is_some())
+    /// True while the tower is still loading: a request that steers waits
+    /// for it rather than being told there is none.
+    pub fn can_steer(&self) -> bool {
+        self.steerable.load(Ordering::SeqCst)
     }
 
     // ---------------------------------------------------------------- hiding
@@ -524,6 +609,7 @@ impl Hub {
     /// Tell the loaded space, which filters on every read rather than being
     /// rebuilt.
     async fn refresh_blocked(&self) -> Result<()> {
+        self.corpus.clear();
         let blocked = db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
         let space = self.space.clone();
         tokio::task::spawn_blocking(move || space.set_blocked(blocked))
@@ -533,8 +619,22 @@ impl Hub {
 
     // ------------------------------------------- extending the catalogue
 
+    /// The counts as of at most `CORPUS_TTL` ago. Taken on a blocking
+    /// thread: they scan whole tables.
     pub async fn corpus(&self) -> Result<Corpus> {
-        stages::corpus(&self.db_path)
+        let mut held = self.corpus.held.lock().await;
+        let epoch = self.corpus.epoch.load(Ordering::SeqCst);
+        if let Some((at, taken, corpus)) = &*held {
+            if *taken == epoch && at.elapsed() < CORPUS_TTL {
+                return Ok(corpus.clone());
+            }
+        }
+        let db_path = self.db_path.clone();
+        let corpus = tokio::task::spawn_blocking(move || stages::corpus(&db_path))
+            .await
+            .context("the worker thread panicked")??;
+        *held = Some((Instant::now(), epoch, corpus.clone()));
+        Ok(corpus)
     }
 
     // -------------------------------------------------------------- crawling
@@ -645,6 +745,7 @@ impl Hub {
             queue.adding.push(target);
             queue.rebuild_next();
         }
+        self.corpus.clear();
         self.drain().await
     }
 
@@ -667,6 +768,7 @@ impl Hub {
         let log = self.log.clone();
         let paths = self.paths.clone();
         let space = self.space.clone();
+        let corpus = self.corpus.clone();
 
         job.cancel.store(false, Ordering::SeqCst);
 
@@ -690,6 +792,7 @@ impl Hub {
                     stages::run(stage, scope.as_ref(), &stage_paths, &reporter).await
                 })
                 .await;
+                corpus.clear();
 
                 // Build-space is nearly always followed by layout, and telling
                 // clients after both would have them fetch the space twice for
@@ -787,6 +890,11 @@ impl Hub {
         Ok(self.log.since(since))
     }
 
+    /// Returns once the pipeline log holds a line past `since`.
+    pub async fn pipeline_log_past(&self, since: u64) {
+        self.log.past(since).await
+    }
+
     pub async fn pipeline_clear_log(&self) -> Result<()> {
         self.log.clear();
         Ok(())
@@ -862,6 +970,14 @@ async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance
 
         let keep_going = stats.absorb(&result);
 
+        // Counted before the lock is taken: a client reading the status
+        // should not wait on SQL.
+        let tracks = tracks::table.count().get_result(&mut conn).unwrap_or(0);
+        let pending = frontier::table
+            .filter(frontier::state.eq("pending"))
+            .count()
+            .get_result(&mut conn)
+            .unwrap_or(0);
         {
             let mut status = job.status.lock().unwrap();
             status.last = Some(line);
@@ -870,12 +986,8 @@ async fn crawl_loop(job: &CrawlJob, env_dir: &Path, db_path: &Path, max_distance
             status.tracks_added = stats.tracks_added;
             status.errors = stats.errors;
             status.blocked_skipped = stats.blocked_skipped;
-            status.tracks = tracks::table.count().get_result(&mut conn).unwrap_or(0);
-            status.pending = frontier::table
-                .filter(frontier::state.eq("pending"))
-                .count()
-                .get_result(&mut conn)
-                .unwrap_or(0);
+            status.tracks = tracks;
+            status.pending = pending;
         }
 
         if !keep_going {

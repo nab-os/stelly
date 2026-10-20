@@ -29,6 +29,9 @@ pub struct SpaceService {
     data_dir: PathBuf,
     db_path: PathBuf,
     loaded: RwLock<Option<Arc<Loaded>>>,
+    /// The describing words, once embedded. Each load works out its baseline
+    /// against them in the background as soon as both are there.
+    vocabulary: OnceLock<Arc<Vocabulary>>,
 }
 
 struct Loaded {
@@ -42,9 +45,9 @@ struct Loaded {
     /// What follows from which artists are hidden, rebuilt when that changes.
     /// Its own lock, so a long radio walk does not hold up the map.
     derived: RwLock<Arc<Derived>>,
-    /// Where each describing word sits across this corpus, worked out on the
-    /// first description asked of it. The words never change while the
-    /// server runs, so the corpus is all it depends on.
+    /// Where each describing word sits across this corpus, worked out in the
+    /// background after the load. The words never change while the server
+    /// runs, so the corpus is all it depends on.
     baseline: OnceLock<Vec<(f32, f32)>>,
 }
 
@@ -81,6 +84,7 @@ impl SpaceService {
             data_dir,
             db_path,
             loaded: RwLock::new(None),
+            vocabulary: OnceLock::new(),
         }
     }
 
@@ -110,8 +114,31 @@ impl SpaceService {
             derived: RwLock::new(Arc::new(derived)),
             baseline: OnceLock::new(),
         };
-        *self.loaded.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(loaded));
+        let loaded = Arc::new(loaded);
+        // Under the lock `set_vocabulary` reads the load through, so
+        // whichever of the two comes last starts the baseline.
+        let vocabulary = {
+            let mut slot = self.loaded.write().unwrap_or_else(|e| e.into_inner());
+            *slot = Some(loaded.clone());
+            self.vocabulary.get().cloned()
+        };
+        if let Some(vocabulary) = vocabulary {
+            loaded.prepare(vocabulary);
+        }
         Ok(())
+    }
+
+    /// Hand over the describing words, once embedded, and start the loaded
+    /// space's baseline against them.
+    pub fn set_vocabulary(&self, vocabulary: Arc<Vocabulary>) {
+        let loaded = {
+            let slot = self.loaded.read().unwrap_or_else(|e| e.into_inner());
+            let _ = self.vocabulary.set(vocabulary.clone());
+            slot.clone()
+        };
+        if let Some(loaded) = loaded {
+            loaded.prepare(vocabulary);
+        }
     }
 
     fn loaded(&self) -> Option<Arc<Loaded>> {
@@ -271,10 +298,11 @@ impl SpaceService {
     /// best first. Empty when the space holds no CLAP vector for it.
     pub fn describe(&self, track_id: i64, vocabulary: &Vocabulary, count: usize) -> Option<Vec<Word>> {
         let loaded = self.loaded()?;
+        // Before the engine, which the baseline does not need: when it is
+        // still being worked out this waits for it, holding up no one else.
+        let baseline = loaded.baseline(vocabulary);
         let engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        let navigator = &engine.navigator;
-        let baseline = loaded.baseline.get_or_init(|| navigator.text_baseline(&vocabulary.vectors));
-        let Some(scores) = navigator.describe(track_id, &vocabulary.vectors, baseline) else {
+        let Some(scores) = engine.navigator.describe(track_id, &vocabulary.vectors, baseline) else {
             return Some(Vec::new());
         };
         let mut words: Vec<Word> = vocabulary
@@ -300,6 +328,29 @@ impl Loaded {
     fn derived(&self) -> Arc<Derived> {
         self.derived.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
+
+    /// The baseline, worked out by whoever asks first while the others wait.
+    /// Half a second on 23k tracks, seconds on a large corpus, so the engine
+    /// is held only for as long as it takes to share its vectors.
+    fn baseline(&self, vocabulary: &Vocabulary) -> &[(f32, f32)] {
+        self.baseline.get_or_init(|| {
+            let (clap, dims) = {
+                let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+                (engine.navigator.catalog.clap.clone(), engine.navigator.catalog.clap_dims)
+            };
+            let clap = clap.as_deref().map_or(&[][..], Vec::as_slice);
+            stelly_core::paths::text_baseline(clap, dims, &vocabulary.vectors)
+        })
+    }
+
+    /// Work the baseline out in the background, so the first description
+    /// asked of this load does not.
+    fn prepare(self: &Arc<Self>, vocabulary: Arc<Vocabulary>) {
+        let loaded = self.clone();
+        std::thread::spawn(move || {
+            loaded.baseline(&vocabulary);
+        });
+    }
 }
 
 fn derive(engine: &Engine, built_at: &str) -> Derived {
@@ -307,7 +358,7 @@ fn derive(engine: &Engine, built_at: &str) -> Derived {
 
     // The build and the hidden artists are all a client's copy depends on.
     // Hashed rather than counted, so it survives a server restart.
-    let mut blocked: Vec<i64> = catalog.blocked_artists.iter().copied().collect();
+    let mut blocked: Vec<i64> = catalog.blocked_artists().iter().copied().collect();
     blocked.sort_unstable();
     let mut hasher = DefaultHasher::new();
     blocked.hash(&mut hasher);

@@ -120,8 +120,8 @@ pub fn umap(data: &[f32], n: usize, d: usize, options: &Options, job: &Job) -> R
 // ---------------------------------------------------------------- neighbours
 
 /// (index, cosine distance) of each row's k nearest, self excluded, nearest
-/// first. Brute force, spread over the cores: quadratic, but a 30k corpus is
-/// seconds and the stage runs rarely. `report` hears how many rows are done,
+/// first. Brute force, spread over all the cores but one, behind requests:
+/// quadratic, but a 30k corpus is seconds and the stage runs rarely. `report` hears how many rows are done,
 /// now and then.
 fn nearest(
     data: &[f32],
@@ -138,6 +138,7 @@ fn nearest(
         for (t, slots) in out.chunks_mut(chunk).enumerate() {
             let done = &done;
             scope.spawn(move || {
+                super::step_back();
                 let mut scores = vec![0f32; n];
                 for (offset, slot) in slots.iter_mut().enumerate() {
                     let i = t * chunk + offset;
@@ -163,10 +164,7 @@ fn nearest(
 }
 
 fn threads(n: usize) -> usize {
-    std::thread::available_parallelism()
-        .map(|t| t.get())
-        .unwrap_or(4)
-        .min(n)
+    super::stage_threads().min(n)
 }
 
 /// Each point's neighbourhood as fuzzy memberships, then the fuzzy union of

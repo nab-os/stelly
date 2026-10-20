@@ -49,19 +49,13 @@ impl Engine {
             return;
         }
 
-        let catalog = Catalog {
-            tracks: std::mem::take(&mut self.navigator.catalog.tracks),
-            clap: self.navigator.catalog.clap.take(),
-            clap_dims: self.navigator.catalog.clap_dims,
-            blocked_artists: std::mem::take(&mut self.navigator.catalog.blocked_artists),
-            twins: std::mem::take(&mut self.navigator.catalog.twins),
-        };
+        let catalog = std::mem::take(&mut self.navigator.catalog);
         self.navigator = Navigator::new(&self.space, &weights, catalog);
         self.weights = weights;
     }
 
     /// Apply a block list. Blocking only filters, so nothing needs rebuilding.
     pub fn set_blocked(&mut self, blocked: HashSet<i64>) {
-        self.navigator.catalog.blocked_artists = blocked;
+        self.navigator.catalog.set_blocked(blocked);
     }
 }

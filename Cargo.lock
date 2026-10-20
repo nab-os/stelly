@@ -6029,6 +6029,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stelly-provider",
+ "tokio",
 ]
 
 [[package]]
@@ -6072,6 +6073,7 @@ dependencies = [
  "bytemuck",
  "diesel",
  "futures-util",
+ "libc",
  "moka",
  "nalgebra",
  "ort",

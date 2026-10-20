@@ -49,3 +49,7 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["onig"]
 # eigensolver.
 nalgebra = "0.35.0"
 
+# A stage's worker threads step back behind requests: nice is per thread on
+# Linux only.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

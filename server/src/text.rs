@@ -11,23 +11,35 @@ use ort::value::TensorRef;
 use std::path::Path;
 use tokenizers::Tokenizer;
 
+/// One phrase is too small to share across every core: past four threads an
+/// embed got no faster, and a radio running beside sixteen of them went from
+/// 84 to 137 ms instead of about 100.
+const THREADS: usize = 4;
+
 pub struct TextEncoder {
     session: Session,
     tokenizer: Tokenizer,
 }
 
 impl TextEncoder {
+    /// Whether the weights and tokenizer are on disk, without loading them.
+    pub fn exported(model_dir: &Path) -> bool {
+        model_dir.join(CLAP_TEXT).is_file() && model_dir.join(CLAP_TOKENIZER).is_file()
+    }
+
     /// Returns Ok(None) when the weights have not been fetched, so the app can
     /// hide text steering rather than refusing to start.
     pub fn load(model_dir: &Path) -> Result<Option<Self>> {
-        let onnx_path = model_dir.join(CLAP_TEXT);
-        let tokenizer_path = model_dir.join(CLAP_TOKENIZER);
-        if !onnx_path.is_file() || !tokenizer_path.is_file() {
+        if !Self::exported(model_dir) {
             return Ok(None);
         }
+        let onnx_path = model_dir.join(CLAP_TEXT);
+        let tokenizer_path = model_dir.join(CLAP_TOKENIZER);
 
         let session = Session::builder()
             .context("creating ONNX session builder")?
+            .with_intra_threads(THREADS)
+            .map_err(|e| anyhow::anyhow!("setting ONNX threads: {e}"))?
             .commit_from_file(&onnx_path)
             .with_context(|| format!("loading {}", onnx_path.display()))?;
 

@@ -21,13 +21,8 @@ use stelly_core::session::{Command, Session, Update};
 use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
-use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::compression::CompressionLayer;
-
-/// How often the SSE task looks for new output. Matches the client's old poll
-/// interval, except now it costs one in-memory read rather than a request.
-const LOG_POLL: Duration = Duration::from_millis(200);
 
 /// The most tracks one generate request gets: the app's slider stops at 60
 /// and its longest list at 500. Radio and path cost a pass over the whole
@@ -82,20 +77,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pipeline/log", get(pipeline_log))
         // ------------------------------------------------------------ space
         .route("/api/space", get(space_info))
-        // zstd, for whoever asks: the index and the map are the only big
-        // bodies here, the map's labels most of all.
-        .route("/api/space/index", get(space_index).layer(CompressionLayer::new()))
-        .route("/api/space/points", get(space_points).layer(CompressionLayer::new()))
-        .route("/api/space/points/meta", get(space_points_meta).layer(CompressionLayer::new()))
+        .route("/api/space/index", get(space_index))
+        .route("/api/space/points", get(space_points))
+        .route("/api/space/points/meta", get(space_points_meta))
         .route("/api/space/tracks", post(space_tracks))
-        .route("/api/space/search", get(space_search).layer(CompressionLayer::new()))
+        .route("/api/space/search", get(space_search))
         .route("/api/space/generate", post(space_generate))
         .route("/api/space/order", post(space_order))
         .route("/api/space/describe/{id}", get(space_describe))
         .route("/api/mix/status", get(mix_status))
-        .route("/api/mix/library", get(mix_library).layer(CompressionLayer::new()))
-        .route("/api/mix/tracks", post(mix_tracks).layer(CompressionLayer::new()))
-        .route("/api/mix/tracks/{id}", get(mix_track).layer(CompressionLayer::new()))
+        .route("/api/mix/library", get(mix_library))
+        .route("/api/mix/tracks", post(mix_tracks))
+        .route("/api/mix/tracks/{id}", get(mix_track))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
         .route("/api/mix/find", get(mix_find))
@@ -109,6 +102,11 @@ pub fn router(state: AppState) -> Router {
         // ----------------------------------------------------------- health
         .route("/api/health", get(health))
         .with_state(state)
+        // zstd, for whoever asks, on every route: favourites, search,
+        // generate and the session are tens to hundreds of KB of JSON. The
+        // default predicate leaves the event streams alone, so they are not
+        // buffered, and skips bodies too small to gain anything.
+        .layer(CompressionLayer::new())
 }
 
 // ------------------------------------------------------------------ queries
@@ -425,13 +423,13 @@ async fn embed(
     Json(body): Json<EmbedBody>,
 ) -> Reply<Embedding> {
     Ok(Json(Embedding {
-        embedding: state.hub.embed(&body.phrase).await?,
+        embedding: state.hub.embed(&body.phrase).await?.to_vec(),
     }))
 }
 
 async fn embed_available(State(state): State<AppState>, _: PlayAuth) -> Reply<Steering> {
     Ok(Json(Steering {
-        available: state.hub.can_steer().await.unwrap_or(false),
+        available: state.hub.can_steer(),
     }))
 }
 
@@ -591,7 +589,11 @@ async fn pipeline_log(State(state): State<AppState>, _: PlayAuth) -> impl IntoRe
                 }
             }
             cursor = slice.cursor;
-            tokio::time::sleep(LOG_POLL).await;
+            // Asleep until a line comes in, or the client goes.
+            tokio::select! {
+                _ = hub.pipeline_log_past(cursor) => {}
+                _ = sender.closed() => return,
+            }
         }
     });
 
@@ -618,7 +620,7 @@ async fn on_space<T: Send + 'static>(
 }
 
 async fn space_info(State(state): State<AppState>, _: PlayAuth) -> Reply<SpaceInfo> {
-    let tower = state.hub.can_steer().await.unwrap_or(false);
+    let tower = state.hub.can_steer();
     Ok(Json(on_space(&state, move |space| Some(space.info(tower))).await?))
 }
 
@@ -707,7 +709,7 @@ async fn space_generate(
         _ => None,
     };
     Ok(Json(
-        on_space(&state, move |space| space.generate(&body, embedding.as_deref())).await?,
+        on_space(&state, move |space| space.generate(&body, embedding.as_deref().map(Vec::as_slice))).await?,
     ))
 }
 

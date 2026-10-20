@@ -92,6 +92,33 @@ pub fn progress_of(slot: &ProgressSlot) -> Option<Progress> {
     })
 }
 
+/// Threads for a stage's own number crunching: every core but one, so the
+/// server's runtime always has one to answer requests on.
+pub fn stage_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(1).max(1)
+}
+
+/// Put the calling thread behind the server's own threads: a stage's workers
+/// then take what the cores have left over rather than an even share with
+/// requests. Nice is per thread on Linux, so this touches nothing else. Best
+/// effort, and nothing elsewhere.
+pub fn step_back() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: plain system calls on this thread's own id; a refusal leaves
+    // the thread as it was.
+    unsafe {
+        let tid = libc::gettid() as libc::id_t;
+        // From wherever the server itself was started, which may already be
+        // niced.
+        let nice = libc::getpriority(libc::PRIO_PROCESS, tid);
+        libc::setpriority(libc::PRIO_PROCESS, tid, (nice + STAGE_NICE).min(19));
+    }
+}
+
+/// How far `step_back` lowers a worker below the server's own threads.
+#[cfg(target_os = "linux")]
+const STAGE_NICE: libc::c_int = 10;
+
 /// Where everything lives on this machine.
 #[derive(Debug, Clone)]
 pub struct Paths {

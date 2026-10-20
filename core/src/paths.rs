@@ -2,7 +2,7 @@
 
 pub use crate::api::Step;
 use crate::db::Catalog;
-use crate::space::{argsort_desc, Space, WeightedSpace};
+use crate::space::{ranked, Space, WeightedSpace};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -35,6 +35,11 @@ impl Default for Constraints {
 const CORRIDOR_WAYPOINTS: usize = 16;
 const CORRIDOR_WIDTH: usize = 384;
 
+/// How far down a ranking a walk's step sorts before looking: past the
+/// rows already played, their other releases and a cooldown's artists, the
+/// first one taken is almost always in here. More are sorted when it is not.
+const RANKED_FIRST: usize = 64;
+
 pub struct Navigator {
     pub space: WeightedSpace,
     pub catalog: Catalog,
@@ -53,11 +58,11 @@ impl Navigator {
     /// Push blocked rows out of reach of any argsort over similarities.
     /// Cheaper than filtering afterwards, and matches `exclude_same_artist`.
     fn mask_blocked(&self, sims: &mut [f32]) {
-        if self.catalog.blocked_artists.is_empty() {
+        if self.catalog.blocked_artists().is_empty() {
             return;
         }
-        for (j, s) in sims.iter_mut().enumerate() {
-            if self.catalog.is_blocked(j) {
+        for (s, &blocked) in sims.iter_mut().zip(self.catalog.blocked_rows()) {
+            if blocked {
                 *s = f32::NEG_INFINITY;
             }
         }
@@ -90,10 +95,9 @@ impl Navigator {
         }
         self.mask_blocked(&mut sims);
 
-        if exclude_same_artist {
-            let artist = self.catalog.get(i).artist_id;
-            for (j, s) in sims.iter_mut().enumerate() {
-                if artist != -1 && self.catalog.get(j).artist_id == artist {
+        if let Some(artist) = self.catalog.artist(i).filter(|_| exclude_same_artist) {
+            for (s, &other) in sims.iter_mut().zip(self.catalog.artist_rows()) {
+                if other == artist {
                     *s = f32::NEG_INFINITY;
                 }
             }
@@ -101,10 +105,11 @@ impl Navigator {
 
         // Nearest first, skipping a release of a song already listed: they
         // sit practically on top of each other, so would come out together.
+        // Twice `k` ranked to begin with leaves room for the skipped ones.
         let mut taken = HashSet::new();
-        argsort_desc(&sims)
-            .into_iter()
-            .filter(|&j| sims[j].is_finite())
+        let mut order = Vec::new();
+        ranked(&sims, &mut order, (2 * k).max(RANKED_FIRST))
+            .take_while(|&j| sims[j].is_finite())
             .filter(|&j| {
                 let fresh = !taken.contains(&j);
                 if fresh {
@@ -142,38 +147,42 @@ impl Navigator {
         self.take(&mut used, start);
         let mut similarity: Vec<Option<f32>> = vec![None];
 
+        let mut sims = vec![0.0f32; self.space.n_tracks];
+        let mut order = Vec::new();
+        // Times each artist has come up in the walk so far.
+        let mut times = vec![0u16; self.catalog.artist_count()];
+        if let Some(artist) = self.catalog.artist(start) {
+            times[artist as usize] = 1;
+        }
         while chosen.len() < steps {
             let current = *chosen.last().expect("seeded above");
-            let mut sims = self.space.similarities(self.space.row(current));
+            self.space.similarities_into(self.space.row(current), &mut sims);
             for &i in &used {
                 sims[i] = f32::NEG_INFINITY;
             }
             self.mask_blocked(&mut sims);
 
             if artist_penalty > 0.0 {
-                let mut seen: HashMap<i64, usize> = HashMap::new();
-                for &i in &chosen {
-                    let artist = self.catalog.get(i).artist_id;
-                    if artist != -1 {
-                        *seen.entry(artist).or_insert(0) += 1;
-                    }
-                }
-                for (j, score) in sims.iter_mut().enumerate() {
-                    if let Some(times) = seen.get(&self.catalog.get(j).artist_id) {
-                        *score -= artist_penalty * *times as f32;
+                for (score, &artist) in sims.iter_mut().zip(self.catalog.artist_rows()) {
+                    match times.get(artist as usize) {
+                        Some(&n) if n > 0 => *score -= artist_penalty * n as f32,
+                        _ => {}
                     }
                 }
             }
 
             // The first candidate the constraints accept, in descending order.
-            let pick = argsort_desc(&sims)
-                .into_iter()
-                .find(|&j| sims[j].is_finite() && self.allowed(j, &chosen, c));
+            let pick = ranked(&sims, &mut order, RANKED_FIRST)
+                .take_while(|&j| sims[j].is_finite())
+                .find(|&j| self.allowed(j, &chosen, c));
 
             let Some(pick) = pick else { break };
             similarity.push(Some(sims[pick]));
             chosen.push(pick);
             self.take(&mut used, pick);
+            if let Some(artist) = self.catalog.artist(pick) {
+                times[artist as usize] = times[artist as usize].saturating_add(1);
+            }
         }
 
         chosen
@@ -195,12 +204,9 @@ impl Navigator {
             return true;
         };
 
-        if meta.artist_id != -1 && c.artist_cooldown > 0 {
+        if let Some(artist) = self.catalog.artist(candidate).filter(|_| c.artist_cooldown > 0) {
             let start = chosen.len().saturating_sub(c.artist_cooldown);
-            if chosen[start..]
-                .iter()
-                .any(|&p| self.catalog.get(p).artist_id == meta.artist_id)
-            {
+            if chosen[start..].iter().any(|&p| self.catalog.artist(p) == Some(artist)) {
                 return false;
             }
         }
@@ -222,17 +228,20 @@ impl Navigator {
         true
     }
 
+    /// The track nearest `waypoint` that the constraints accept. `scratch`
+    /// is the caller's, kept from one waypoint to the next.
     fn snap(
         &self,
         waypoint: &[f32],
         chosen: &[usize],
         used: &HashSet<usize>,
         c: &Constraints,
+        scratch: &mut (Vec<f32>, Vec<usize>),
     ) -> Option<usize> {
-        let sims = self.space.similarities(waypoint);
-        argsort_desc(&sims)
-            .into_iter()
-            .find(|&j| !used.contains(&j) && self.allowed(j, chosen, c))
+        let (sims, order) = scratch;
+        sims.resize(self.space.n_tracks, 0.0);
+        self.space.similarities_into(waypoint, sims);
+        ranked(sims, order, RANKED_FIRST).find(|&j| !used.contains(&j) && self.allowed(j, chosen, c))
     }
 
     // ----------------------------------------------------------------- modes
@@ -259,10 +268,11 @@ impl Navigator {
         self.take(&mut used, a);
         self.take(&mut used, b);
 
+        let mut scratch = Default::default();
         for step in 1..steps.saturating_sub(1) {
             let t = step as f32 / (steps - 1) as f32;
             let waypoint: Vec<f32> = (0..d).map(|k| (1.0 - t) * start[k] + t * end[k]).collect();
-            match self.snap(&waypoint, &chosen, &used, c) {
+            match self.snap(&waypoint, &chosen, &used, c, &mut scratch) {
                 Some(pick) => {
                     chosen.push(pick);
                     self.take(&mut used, pick);
@@ -619,6 +629,7 @@ impl Navigator {
         let mut used: HashSet<usize> = HashSet::new();
         self.take(&mut used, start_index);
 
+        let mut scratch = Default::default();
         for step in 1..steps {
             let t = step as f32 / (steps - 1) as f32;
             let waypoint: Vec<f32> = start
@@ -626,7 +637,7 @@ impl Navigator {
                 .zip(&target)
                 .map(|(s, g)| (1.0 - t) * s + t * g)
                 .collect();
-            match self.snap(&waypoint, &chosen, &used, c) {
+            match self.snap(&waypoint, &chosen, &used, c, &mut scratch) {
                 Some(pick) => {
                     chosen.push(pick);
                     self.take(&mut used, pick);
@@ -705,27 +716,10 @@ impl Navigator {
         row.iter().any(|v| *v != 0.0).then_some(row)
     }
 
-    /// Where each phrase's similarity sits across the corpus: (mean, spread).
-    /// Depends on the corpus alone, so it is worked out once per load.
-    ///
-    /// Without it the words that describe a track best are the ones that
-    /// describe every track: "music" matches anything, "piano" matches far
-    /// more than it should. Measured against the corpus, a word only scores
-    /// when this track sounds like it more than the others do.
+    /// See `text_baseline`, over this catalogue's CLAP vectors.
     pub fn text_baseline(&self, phrases: &[Vec<f32>]) -> Vec<(f32, f32)> {
-        let rows: Vec<&[f32]> = (0..self.catalog.len()).filter_map(|i| self.clap_row(i)).collect();
-        phrases
-            .iter()
-            .map(|phrase| {
-                if rows.is_empty() || phrase.len() != self.catalog.clap_dims {
-                    return (0.0, 1.0);
-                }
-                let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
-                let mean = sims.iter().sum::<f32>() / sims.len() as f32;
-                let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
-                (mean, variance.sqrt().max(1e-6))
-            })
-            .collect()
+        let clap = self.catalog.clap.as_deref().map_or(&[][..], Vec::as_slice);
+        text_baseline(clap, self.catalog.clap_dims, phrases)
     }
 
     /// How much more than the average track this one sounds like each
@@ -741,6 +735,35 @@ impl Navigator {
                 .collect(),
         )
     }
+}
+
+/// Where each phrase's similarity sits across the corpus: (mean, spread),
+/// over `clap`'s rows of `dims`. Depends on the corpus alone, so it is worked
+/// out once per load. A free function so it can run on a shared copy of the
+/// vectors, without the navigator they belong to.
+///
+/// Without it the words that describe a track best are the ones that
+/// describe every track: "music" matches anything, "piano" matches far
+/// more than it should. Measured against the corpus, a word only scores
+/// when this track sounds like it more than the others do.
+pub fn text_baseline(clap: &[f32], dims: usize, phrases: &[Vec<f32>]) -> Vec<(f32, f32)> {
+    // A track analysed before the embeddings were stored has a row of zeros.
+    let rows: Vec<&[f32]> = clap
+        .chunks_exact(dims.max(1))
+        .filter(|row| row.iter().any(|v| *v != 0.0))
+        .collect();
+    phrases
+        .iter()
+        .map(|phrase| {
+            if rows.is_empty() || phrase.len() != dims {
+                return (0.0, 1.0);
+            }
+            let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
+            let mean = sims.iter().sum::<f32>() / sims.len() as f32;
+            let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
+            (mean, variance.sqrt().max(1e-6))
+        })
+        .collect()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -809,13 +832,7 @@ mod tests {
                 n_dims: 2,
                 scale: vec![1.0, 1.0],
             },
-            catalog: Catalog {
-                tracks,
-                clap: None,
-                clap_dims: 0,
-                blocked_artists: HashSet::new(),
-                twins: HashMap::new(),
-            },
+            catalog: Catalog::new(tracks, None, 0, HashSet::new()),
             index_of,
         }
     }
@@ -825,11 +842,12 @@ mod tests {
     fn scored(rows: &[(i64, f32, f32, i64)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        nav.catalog.clap = Some(rows.iter().map(|&(_, _, score, _)| score).collect());
-        nav.catalog.clap_dims = 1;
-        for (track, &(_, _, _, artist)) in nav.catalog.tracks.iter_mut().zip(rows) {
+        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        for (track, &(_, _, _, artist)) in tracks.iter_mut().zip(rows) {
             track.artist_id = artist;
         }
+        let clap = std::sync::Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect());
+        nav.catalog = Catalog::new(tracks, Some(clap), 1, HashSet::new());
         nav
     }
 
@@ -911,7 +929,7 @@ mod tests {
     #[test]
     fn describe_favours_what_sets_a_track_apart() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0), (12, 20.0)]);
-        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1]);
+        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1].into());
         nav.catalog.clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let baseline = nav.text_baseline(&phrases);
@@ -923,7 +941,7 @@ mod tests {
     #[test]
     fn describe_needs_a_clap_vector() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0)]);
-        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0]);
+        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0].into());
         nav.catalog.clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0]];
         let baseline = nav.text_baseline(&phrases);
@@ -973,11 +991,12 @@ mod tests {
     fn with_twins(rows: &[(i64, f32, &str)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        for (track, &(_, _, title)) in nav.catalog.tracks.iter_mut().zip(rows) {
+        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        for (track, &(_, _, title)) in tracks.iter_mut().zip(rows) {
             track.title = title.into();
             track.artist_id = 1;
         }
-        nav.catalog.twins = Catalog::twins_of(&nav.catalog.tracks);
+        nav.catalog = Catalog::new(tracks, None, 0, HashSet::new());
         nav
     }
 
@@ -1047,7 +1066,7 @@ mod tests {
     fn mood_never_takes_a_song_twice() {
         let mut nav = with_twins(&TWINS);
         // The twins score highest, both of each pair.
-        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1]);
+        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1].into());
         nav.catalog.clap_dims = 1;
         let picked = nav.mood(&[1.0], 3, 0.0, &loose());
         assert_no_song_twice(&nav, &picked);

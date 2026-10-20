@@ -112,13 +112,15 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// Every pair of tracks, at least one of them new, that are one recording,
 /// with how alike they are. `tracks` sorted by length.
 fn pairs(tracks: &[Track], options: &Options) -> Vec<(usize, usize, f32)> {
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    // All the cores but one, behind requests, as layout's neighbours.
+    let threads = crate::pipeline::stage_threads();
     let chunk = tracks.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..tracks.len())
             .step_by(chunk)
             .map(|start| {
                 scope.spawn(move || {
+                    crate::pipeline::step_back();
                     let mut found = Vec::new();
                     for i in start..(start + chunk).min(tracks.len()) {
                         let a = &tracks[i];
