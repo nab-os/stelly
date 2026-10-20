@@ -66,6 +66,10 @@ pub(crate) const SEARCH_LIMIT: usize = 50;
 /// where a counter starts to look stuck. Only while one is watched, see `pace`.
 pub(crate) const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How long the search box waits after a keystroke before asking the
+/// server. Each keystroke starts it again, so only the last one asks.
+pub(crate) const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+
 // ------------------------------------------------------------------ context
 
 /// Track ids in the analysed space and not hidden. A memo, not a snapshot,

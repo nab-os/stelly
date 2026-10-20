@@ -15,6 +15,7 @@ use super::{
     Search, Selection, SpaceMatches, SpaceReach, SpaceRow, row_keys, space_mark, LIST_CAP,
     SEARCH_LIMIT,
 };
+use dioxus::core::Task;
 use dioxus::prelude::*;
 use crate::api::Target;
 use crate::backend::backend;
@@ -295,6 +296,12 @@ pub struct Library {
     loaded: Signal<Shelf>,
     pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
+    /// Loading, but a refined search's previous results stay on screen
+    /// meanwhile rather than "loading…" in their place. See `keeps_results`.
+    pub refining: Signal<bool>,
+    /// The search fetch in flight, cancelled when another is asked for: its
+    /// answer would only be thrown away, see `epoch`.
+    searching: CopyValue<Option<Task>>,
     pub error: Signal<Option<String>>,
     /// Views visited on the way here, for the back button, each with how
     /// far down it was scrolled when it was left.
@@ -456,6 +463,8 @@ impl Library {
             loaded: Signal::new(Shelf::default()),
             sort: Signal::new(Sort::default()),
             loading: Signal::new(true),
+            refining: Signal::new(false),
+            searching: CopyValue::new(None),
             error: Signal::new(None),
             history: Signal::new(Vec::new()),
             forward: Signal::new(Vec::new()),
@@ -825,6 +834,7 @@ impl Library {
         if crate::timings::enabled() {
             crate::timings::nav_asked(timing_name(&target), *self.epoch.peek() + 1, known.is_some());
         }
+        let refining = known.is_none() && keeps_results(&self.view.peek(), &target);
         self.view.set(target.clone());
         self.error.set(None);
         self.notice.set(None);
@@ -835,11 +845,15 @@ impl Library {
                 self.shelf.set(shelf.sorted(sort));
                 self.loading.set(false);
             }
+            None if refining => self.loading.set(true),
             None => {
                 self.shelf.set(Shelf::default());
                 self.loaded.set(Shelf::default());
                 self.loading.set(true);
             }
+        }
+        if *self.refining.peek() != refining {
+            self.refining.set(refining);
         }
         self.pending.set(Some(target));
         *self.epoch.write() += 1;
@@ -857,8 +871,12 @@ impl Library {
         // Already showing what `kept` had for this view: a failed refresh
         // leaves that up rather than swapping it for an error.
         let refreshing = !*self.loading.peek();
+        if let Some(task) = self.searching.take() {
+            task.cancel();
+        }
+        let search = matches!(target, View::Search { .. });
 
-        spawn(async move {
+        let task = spawn(async move {
             let mut library = self;
             let cache = if target == home() {
                 Some(HOME_CACHE)
@@ -903,11 +921,35 @@ impl Library {
                     library.shelf.set(shelf.sorted(sort));
                 }
                 Err(_) if refreshing => {}
-                Err(err) => library.error.set(Some(format!("{err:#}"))),
+                Err(err) => {
+                    // A refined search kept the last answer up meanwhile;
+                    // it is not this query's, so "play all" must not reach it.
+                    if *library.refining.peek() {
+                        library.loaded.set(Shelf::default());
+                        library.shelf.set(Shelf::default());
+                    }
+                    library.error.set(Some(format!("{err:#}")));
+                }
             }
             library.loading.set(false);
+            if *library.refining.peek() {
+                library.refining.set(false);
+            }
         });
+        if search {
+            self.searching.set(Some(task));
+        }
     }
+}
+
+/// Whether going from `from` to `to` keeps what is on screen until the new
+/// answer lands: a search refined in place, by its text or its chips. The
+/// list stays put and is replaced in one go, rather than emptied for
+/// "loading…" and rebuilt on every keystroke. An emptied box is not a
+/// search, and clears at once.
+fn keeps_results(from: &View, to: &View) -> bool {
+    matches!(from, View::Search { .. })
+        && matches!(to, View::Search { query, .. } if !query.trim().is_empty())
 }
 
 impl Shelf {
@@ -1518,6 +1560,10 @@ fn BrowseScreen() -> Element {
                 }
             }
             span { class: "spacer" }
+            // The results below are the last query's until this one lands.
+            if *library.refining.read() {
+                span { class: "busy-dot", title: "searching" }
+            }
             SortMenu {}
             if mixed {
                 GroupingToggle {}
@@ -1558,7 +1604,7 @@ fn BrowseScreen() -> Element {
             p { class: "muted notice", "{message}" }
         }
 
-        if *library.loading.read() {
+        if *library.loading.read() && !*library.refining.read() {
             p { class: "muted", "loading…" }
         } else if let Some(message) = library.error.read().clone() {
             p { class: "muted error", "{message}" }
@@ -2063,13 +2109,15 @@ fn SpaceRows() -> Element {
     } else {
         (rows, total)
     };
-    let searching = !search.text.read().trim().is_empty();
+    // Whether the box is empty, not what is in it: read directly, every
+    // keystroke would draw all these rows again.
+    let searching = use_memo(move || !search.text.read().trim().is_empty());
     let visible = shown().min(rows.len());
     let grid = library.layout() == TracksView::Grid;
 
     if total == 0 {
         return rsx! {
-            if searching {
+            if searching() {
                 h3 { class: "shelf-head source-head", "In your space" }
                 if liked_only {
                     p { class: "muted", "Nothing you've liked matches." }
@@ -2473,6 +2521,26 @@ fn PlaylistRows() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search(query: &str) -> View {
+        View::Search { query: query.into(), scope: Scope::Everything }
+    }
+
+    #[test]
+    fn a_refined_search_keeps_its_results() {
+        assert!(keeps_results(&search("radio"), &search("radiohead")));
+        let narrowed = View::Search { query: "radio".into(), scope: Scope::Albums };
+        assert!(keeps_results(&search("radio"), &narrowed));
+    }
+
+    #[test]
+    fn only_a_refined_search_keeps_its_results() {
+        // An emptied box clears at once, and a search opened from elsewhere
+        // has nothing of its own to keep.
+        assert!(!keeps_results(&search("radio"), &search(" ")));
+        assert!(!keeps_results(&home(), &search("radio")));
+        assert!(!keeps_results(&search("radio"), &home()));
+    }
 
     fn album(id: &str) -> View {
         View::Album(RemoteAlbum { id: id.into(), ..Default::default() })

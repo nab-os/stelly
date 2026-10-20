@@ -468,6 +468,15 @@ button.danger:hover:not(:disabled),
   margin-bottom: 8px;
 }
 .filters { display: flex; flex-wrap: wrap; gap: 6px; }
+/* A refined search in flight, over the previous query's results. */
+.busy-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: sync-notice-pulse 1.4s ease-in-out infinite;
+}
 .view-toggle { display: flex; gap: 2px; flex: none; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }

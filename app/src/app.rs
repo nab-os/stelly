@@ -15,6 +15,7 @@ use crate::Wiring;
 use crate::ui::library::Sort;
 use crate::ui::tour::{Tour, TourView};
 use crate::platform::wry::http::Response;
+use dioxus::core::Task;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -733,36 +734,31 @@ fn Shell() -> Element {
 
     // The remote half of the search box. The local filter above runs on every
     // keystroke because it is a scan of memory; Qobuz is a network round trip
-    // and must not, so this waits for the text to stop moving before asking.
-    //
-    // A polling loop rather than a cancellable timer task: the app already
-    // keeps one of these for crawl and pipeline status, and the cancellation
-    // semantics of a respawned Dioxus task are subtler than the 200ms of
-    // latency this costs. Enter bypasses it entirely.
-    use_future(move || async move {
+    // and must not, so each keystroke starts a short timer and cancels the
+    // one before it: only the last keystroke asks. Enter bypasses it.
+    let mut typed = use_hook(|| CopyValue::new(None::<Task>));
+    use_effect(move || {
         let mut search = search;
-        let mut previous = String::new();
-
-        loop {
-            tokio::time::sleep(crate::ui::POLL).await;
-            let current = search.text.peek().trim().to_string();
-
-            // Stable for two ticks, i.e. the user has stopped typing.
-            if current == previous {
-                if current.is_empty() {
-                    // Emptying the box empties the results; no round trip.
-                    if !search.submitted.peek().is_empty() {
-                        search.submitted.set(String::new());
-                        library.clear_search();
-                    }
-                } else if current.chars().count() >= 2 && current != *search.submitted.peek() {
-                    search.submitted.set(current.clone());
-                    library.search_to(current.clone());
-                }
-            }
-
-            previous = current;
+        let current = search.text.read().trim().to_string();
+        if let Some(task) = typed.take() {
+            task.cancel();
         }
+        // Emptying the box empties the results at once; no round trip.
+        if current.is_empty() {
+            if !search.submitted.peek().is_empty() {
+                search.submitted.set(String::new());
+                library.clear_search();
+            }
+            return;
+        }
+        if current.chars().count() < 2 || current == *search.submitted.peek() {
+            return;
+        }
+        typed.set(Some(spawn(async move {
+            tokio::time::sleep(crate::ui::DEBOUNCE).await;
+            search.submitted.set(current.clone());
+            library.search_to(current);
+        })));
     });
 
     // Bulk point data crosses as binary here, never through eval. Answered
@@ -877,51 +873,60 @@ fn Shell() -> Element {
 
     // The space's tracks matching the search box, asked of the server once
     // the text stops moving, and only while a search is showing: the list is
-    // the search screen's, and nothing else needs it fetched.
+    // the search screen's, and nothing else needs it fetched. A keystroke
+    // cancels the ask before it, timer and request both.
     let mut filtered = use_signal(|| (Vec::<SpaceRow>::new(), 0usize));
-    use_future(move || async move {
-        let mut asked: Option<(String, Sort, String)> = None;
-        loop {
-            tokio::time::sleep(crate::ui::POLL).await;
-            if !matches!(&*library.view.peek(), View::Search { .. }) {
-                continue;
-            }
-            let text = query.peek().trim().to_lowercase();
-            let wanted = (text.clone(), *library.sort.peek(), space.info.peek().stamp.clone());
-            if asked.as_ref() == Some(&wanted) {
-                continue;
-            }
-            // Stable for two ticks, i.e. the user has stopped typing.
-            tokio::time::sleep(crate::ui::POLL).await;
-            if query.peek().trim().to_lowercase() != text {
-                continue;
-            }
-
-            let (sort, descending) = space_sort(wanted.1);
-            match backend().space_search(&text, sort, descending, SHOWN).await {
-                Ok(found) => {
-                    crate::ui::remember(&found.tracks);
-                    let rows = found
-                        .tracks
-                        .iter()
-                        .map(|t| SpaceRow {
-                            track_id: t.track_id,
-                            artist: t.artist.clone(),
-                            artist_id: Some(t.artist_id).filter(|id| *id >= 0),
-                            title: t.title.clone(),
-                            album: t.album.clone(),
-                            album_id: t.album_id.clone(),
-                            image: t.image.clone(),
-                        })
-                        .collect();
-                    filtered.set((rows, found.total));
-                    asked = Some(wanted);
-                }
-                // Offline, or no space yet: the refresh loop says so, and
-                // this tries again once things have had time to change.
-                Err(_) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
-            }
+    let on_search = use_memo(move || matches!(&*library.view.read(), View::Search { .. }));
+    // What was last answered, and what is being asked now with the task
+    // asking it. Neither is drawn from, so neither is a signal.
+    let mut answered = use_hook(|| CopyValue::new(None::<(String, Sort, String)>));
+    let mut asking = use_hook(|| CopyValue::new(None::<((String, Sort, String), Task)>));
+    use_effect(move || {
+        let text = query.read().trim().to_lowercase();
+        let wanted = (text.clone(), *library.sort.read(), space.info.read().stamp.clone());
+        let searching = on_search();
+        if searching && asking.peek().as_ref().is_some_and(|(asked, _)| *asked == wanted) {
+            return;
         }
+        if let Some((_, task)) = asking.take() {
+            task.cancel();
+        }
+        if !searching || answered.peek().as_ref() == Some(&wanted) {
+            return;
+        }
+        let asked = wanted.clone();
+        let task = spawn(async move {
+            tokio::time::sleep(crate::ui::DEBOUNCE).await;
+            let (sort, descending) = space_sort(asked.1);
+            loop {
+                match backend().space_search(&text, sort, descending, SHOWN).await {
+                    Ok(found) => {
+                        crate::ui::remember(&found.tracks);
+                        let rows = found
+                            .tracks
+                            .iter()
+                            .map(|t| SpaceRow {
+                                track_id: t.track_id,
+                                artist: t.artist.clone(),
+                                artist_id: Some(t.artist_id).filter(|id| *id >= 0),
+                                title: t.title.clone(),
+                                album: t.album.clone(),
+                                album_id: t.album_id.clone(),
+                                image: t.image.clone(),
+                            })
+                            .collect();
+                        filtered.set((rows, found.total));
+                        answered.set(Some(asked));
+                        asking.set(None);
+                        return;
+                    }
+                    // Offline, or no space yet: the refresh loop says so, and
+                    // this tries again once things have had time to change.
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_secs(3)).await,
+                }
+            }
+        });
+        asking.set(Some((wanted, task)));
     });
 
     use_context_provider(|| SpaceMatches(filtered));
