@@ -93,7 +93,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 3.9 | Space cache written only on a new stamp, off the UI thread; parsed off it too | `app/src/app.rs:354, 1065` | S | #120 |
 | 3.10 | Rows keyed by id, not index | `app/src/ui/library.rs`, `queue.rs:160`, `screens.rs` | S | #124 |
 | 3.11 | Search keeps its results while refining; a cancellable 150 ms debounce | `app/src/ui/library.rs:692`, `app.rs:698, 830` | S | #125 |
-| 3.12 | Seek and volume commit on release | `app/src/ui/player.rs:787, 904` | S | |
+| 3.12 | Seek and volume commit on release | `app/src/ui/player.rs:787, 904` | S | #126 |
 | 3.13 | Android: non-passive `touchmove` only during a queue drag | `app/assets/queue-drag.js:194, 283` | S | |
 | 3.14 | Map: `resize()` skipped when unchanged; cached rect on touch; card placed with `transform` | `app/assets/map.js:179, 759, 1027` | S | |
 | 3.15 | Android HTTP client built once, reused by the update check | `app/src/backend/remote.rs:729`, `update/mod.rs:81` | S | #121 |
