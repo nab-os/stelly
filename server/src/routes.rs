@@ -19,7 +19,7 @@ use stelly_core::api::{
     PipelineStatus, Recipe, Scope, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
     Target, TrackMeta, TracksRequest, User, Word,
 };
-use stelly_core::session::{Command, Session, Update};
+use stelly_core::session::{Command, Session};
 use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -335,10 +335,12 @@ where
 /// it is held open for as long as the app runs. The queue is left out of an
 /// update when it has not changed since the last one on this stream, which is
 /// most of them: a position report every few seconds should not resend
-/// hundreds of tracks to every device.
+/// hundreds of tracks to every device. When it has, an app that asks for
+/// splices gets only what changed.
 async fn session_events(
     State(state): State<AppState>,
     PlayAuth(device): PlayAuth,
+    Query(query): Query<EventsQuery>,
 ) -> impl IntoResponse {
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);
     let (mut published, listening) = state.playback.of(device.user_id).connect(&device);
@@ -358,28 +360,24 @@ async fn session_events(
                 _ = sender.closed() => return,
             }
 
-            let mut session = published.borrow_and_update().clone();
-            let same_queue = sent_queue == Some(session.queue_version);
-            if same_queue {
-                session.queue = Vec::new();
-            }
-            sent_queue = Some(session.queue_version);
-
-            let update = Update {
-                you: device.id,
-                same_queue,
-                session,
-            };
-            let Ok(event) = Event::default().json_data(&update) else {
-                return;
-            };
-            if sender.send(Ok(event)).await.is_err() {
+            let session = published.borrow_and_update().clone();
+            let update = session.update(device.id, sent_queue, query.splices);
+            sent_queue = Some(session.queue_version());
+            if sender.send(Ok(Event::default().data(update))).await.is_err() {
                 return;
             }
         }
     });
 
     unbuffered(Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    /// Whether the app applies `Update::splice`. Apps from before it do not
+    /// ask, and get the whole queue on every change as they always did.
+    #[serde(default)]
+    splices: bool,
 }
 
 #[derive(Deserialize)]

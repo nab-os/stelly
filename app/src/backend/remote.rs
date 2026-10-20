@@ -325,7 +325,9 @@ impl Remote {
     pub fn follow_session(&self) -> tokio::sync::mpsc::UnboundedReceiver<SessionFeed> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let http = self.http.clone();
-        let url = self.url("/api/session/events");
+        // Splices of the queue rather than all of it on every change. A
+        // server from before them ignores the parameter and sends it whole.
+        let url = self.url("/api/session/events?splices=true");
         let token = self.token.clone();
 
         tokio::spawn(async move {

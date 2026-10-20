@@ -81,6 +81,10 @@ struct Mirror {
     /// Commands sent and not yet answered. While there are any, this copy
     /// may be ahead of what the server has pushed.
     pending: usize,
+    /// The queue as the server last sent it, and its `queue_version`: what an
+    /// update that leaves the queue out, or sends a splice of it, is read
+    /// against. This copy's own may have moved on since.
+    confirmed: Option<(u64, Vec<RemoteTrack>)>,
     /// The cue and track the audio element was last pointed at. `None` when
     /// it holds nothing.
     loaded: Option<(u64, i64)>,
@@ -109,6 +113,7 @@ impl Default for Mirror {
             me: SOLO,
             shared: false,
             pending: 0,
+            confirmed: None,
             loaded: None,
             loading: None,
             tickets: 0,
@@ -185,19 +190,36 @@ fn receive(player: Player, update: Update) {
         mirror.me = update.you;
 
         let mut session = update.session;
+        // The queue first, even from a push skipped below: the next one may
+        // be a splice of it.
+        let confirmed = |version: u64| match &mirror.confirmed {
+            Some((at, queue)) if *at == version => Some(queue.clone()),
+            _ => None,
+        };
+        let queue = match &update.splice {
+            Some(splice) => confirmed(splice.base).and_then(|mut queue| splice.apply(&mut queue).then_some(queue)),
+            None if update.same_queue => confirmed(session.queue_version),
+            None => Some(std::mem::take(&mut session.queue)),
+        };
+        match queue {
+            Some(queue) => {
+                mirror.confirmed = Some((session.queue_version, queue.clone()));
+                session.queue = queue;
+            }
+            None => {
+                // The stream thinks this copy has a queue it does not: an
+                // update that carried it went unread, or came while a full
+                // fetch was out. Only another full fetch can say which.
+                resync = true;
+                mirror.confirmed = None;
+                session.queue = mirror.session().queue.clone();
+            }
+        }
+
         // With commands still in flight this copy is ahead, and an older
         // push would only undo them for a moment.
         if mirror.pending > 0 && session.version < mirror.session().version {
             return;
-        }
-        if update.same_queue {
-            // The stream thinks this copy has a queue it does not: an update
-            // that carried it was skipped above, or this copy has moved on
-            // on its own. Either way only a full fetch can say which.
-            if session.queue_version != mirror.session().queue_version {
-                resync = true;
-            }
-            session.queue = mirror.session().queue.clone();
         }
         let first = !mirror.shared;
         mirror.shared = true;
@@ -250,6 +272,7 @@ async fn catch_up(player: Player) {
                 Update {
                     you,
                     same_queue: false,
+                    splice: None,
                     session,
                 },
             );

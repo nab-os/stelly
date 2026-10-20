@@ -125,7 +125,55 @@ pub struct Update {
     /// since the previous update on this stream. A queue is most of the
     /// bytes, and a position report every few seconds should not resend it.
     pub same_queue: bool,
+    /// The queue as a change to the one this stream sent before, for an app
+    /// that asked for changes: `session.queue` is left empty then. Absent
+    /// from servers older than it, and from updates to apps that did not ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub splice: Option<Splice>,
     pub session: Session,
+}
+
+/// A queue as a change to an earlier one: `removed` entries at `at` replaced
+/// by `tracks`. An append, a removal, a drag or a play-next each come down to
+/// one, a few tracks rather than the whole queue.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Splice {
+    /// The `queue_version` of the queue it changes. Only that queue, exactly,
+    /// gives the right result, which is what makes the change safe to send.
+    pub base: u64,
+    pub at: usize,
+    pub removed: usize,
+    pub tracks: Vec<RemoteTrack>,
+}
+
+impl Splice {
+    /// The change from `before`, at `base`, to `after`: whatever lies between
+    /// what the two start and end with in common.
+    pub fn between(base: u64, before: &[RemoteTrack], after: &[RemoteTrack]) -> Self {
+        let head = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+        let tail = before[head..]
+            .iter()
+            .rev()
+            .zip(after[head..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        Splice {
+            base,
+            at: head,
+            removed: before.len() - head - tail,
+            tracks: after[head..after.len() - tail].to_vec(),
+        }
+    }
+
+    /// Make the change to `queue`, which has to be the one at `base`. False,
+    /// and `queue` left alone, when the change does not fit it.
+    pub fn apply(&self, queue: &mut Vec<RemoteTrack>) -> bool {
+        let Some(end) = self.at.checked_add(self.removed).filter(|&end| end <= queue.len()) else {
+            return false;
+        };
+        queue.splice(self.at..end, self.tracks.iter().cloned());
+        true
+    }
 }
 
 /// Drop tracks already spoken for, keeping the first of each.
@@ -661,6 +709,63 @@ mod tests {
         let mut session = loaded(&[1, 2, 3, 4], 1);
         apply(&mut session, Op::Upcoming { tracks: tracks(&[4, 3, 1]) });
         assert_eq!(ids(&session), vec![1, 2, 4, 3]);
+    }
+
+    /// Every queue op, from one queue, and the splice between before and
+    /// after rebuilding the after from the before.
+    #[test]
+    fn a_splice_rebuilds_the_queue_after_any_op() {
+        let ops = [
+            Op::Append { tracks: tracks(&[9, 1]) },
+            Op::PlayNext { tracks: tracks(&[8, 7]) },
+            Op::Upcoming { tracks: tracks(&[6, 5, 4]) },
+            Op::Remove { at: 0 },
+            Op::Remove { at: 3 },
+            Op::Remove { at: 5 },
+            Op::Move { from: 1, to: 4 },
+            Op::Move { from: 5, to: 0 },
+            Op::Shift { at: 2, delta: 1 },
+            Op::Load { tracks: tracks(&[3, 2]), index: 0 },
+            Op::Clear,
+        ];
+        for op in ops {
+            let mut session = loaded(&[1, 2, 3, 4, 5, 6], 2);
+            let before = session.queue.clone();
+            let base = session.queue_version;
+            apply(&mut session, op.clone());
+            let splice = Splice::between(base, &before, &session.queue);
+            let mut rebuilt = before.clone();
+            assert!(splice.apply(&mut rebuilt), "{op:?}");
+            assert_eq!(rebuilt, session.queue, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn a_splice_is_only_the_part_that_changed() {
+        let before = tracks(&[1, 2, 3, 4, 5]);
+        let splice = Splice::between(4, &before, &tracks(&[1, 2, 3, 4, 5, 6]));
+        assert_eq!((splice.at, splice.removed, splice.tracks), (5, 0, tracks(&[6])));
+        let splice = Splice::between(4, &before, &tracks(&[1, 4, 2, 3, 5]));
+        assert_eq!((splice.at, splice.removed, splice.tracks), (1, 3, tracks(&[4, 2, 3])));
+        // A repeated track at the seam is not counted twice.
+        let splice = Splice::between(4, &tracks(&[1, 1]), &tracks(&[1, 1, 1]));
+        assert_eq!((splice.at, splice.removed, splice.tracks.len()), (2, 0, 1));
+    }
+
+    #[test]
+    fn a_splice_that_does_not_fit_leaves_the_queue_alone() {
+        let splice = Splice { base: 1, at: 3, removed: 2, tracks: tracks(&[9]) };
+        let mut queue = tracks(&[1, 2, 3, 4]);
+        assert!(!splice.apply(&mut queue));
+        assert_eq!(queue, tracks(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn an_update_from_an_older_server_has_no_splice() {
+        let json = r#"{"you":1,"same_queue":true,"session":{"version":1,"queue_version":0,
+            "queue":[],"index":0,"playing":false,"position":0.0,"cue":0,"output":null,"devices":[]}}"#;
+        let update: Update = serde_json::from_str(json).unwrap();
+        assert_eq!(update.splice, None);
     }
 
     #[test]
