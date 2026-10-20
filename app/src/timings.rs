@@ -175,15 +175,16 @@ pub fn http(method: &str, path: &str, status: Option<u16>, started: Option<Insta
 // ------------------------------------------------------------- navigation
 
 /// The page asked for last, until what it shows has been rendered: a page
-/// `Library` remembered first from memory, then again once the refetch
-/// underneath lands.
+/// `Library` remembered first from memory or the disk, then again once the
+/// refetch underneath lands.
 struct Nav {
     name: String,
     started: Instant,
     /// `Library::epoch` when asked, which is how a fetch says it was this
     /// page's.
     epoch: u64,
-    cached: bool,
+    /// "cached", "disk" or "fetched": what it is first shown from.
+    from: &'static str,
     shown: bool,
     landed: bool,
 }
@@ -203,10 +204,21 @@ pub fn nav_asked(kind: &str, epoch: u64, cached: bool) {
         name: format!("nav-{kind}"),
         started: Instant::now(),
         epoch,
-        cached,
+        from: if cached { "cached" } else { "fetched" },
         shown: false,
         landed: false,
     });
+}
+
+/// The page asked for at `epoch` is in the shelf from the disk, ahead of its
+/// fetch.
+pub fn nav_from_disk(epoch: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Some(nav) = nav().as_mut().filter(|nav| nav.epoch == epoch && !nav.shown) {
+        nav.from = "disk";
+    }
 }
 
 /// The fetch for the page asked for at `epoch` has its answer in the shelf.
@@ -230,12 +242,12 @@ pub fn nav_rendered(loading: bool) {
     let span = Some(nav.started.elapsed());
     if !nav.shown {
         nav.shown = true;
-        let from = if nav.cached { "cached" } else { "fetched" };
+        let from = nav.from;
         print(&nav.name, span, &from);
         if nav.name == "nav-search" {
             end("search-shown", "search", from);
         }
-        if !nav.cached {
+        if from == "fetched" {
             *held = None;
         }
     } else if nav.landed {

@@ -23,6 +23,7 @@ use crate::backend::backend;
 use crate::catalogue::{RemoteAlbum, RemoteArtist, RemoteTrack};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Which kinds of result a search shows. Every search starts with all of
 /// them; the tracks/albums/artists chips narrow it, and tapping the lit one
@@ -289,10 +290,14 @@ pub struct Library {
     /// `loaded`, in `sort` order. Everything that indexes into the shelf
     /// (the menus, "play all", a click on row N) reads this one, so the
     /// order on screen and the order acted on cannot drift apart.
-    pub shelf: Signal<Shelf>,
+    ///
+    /// Shared rather than owned, here, in `loaded` and in `kept`: a shelf
+    /// runs to thousands of rows, and copying it whole on every page turned
+    /// was most of what a page turn cost before anything was drawn.
+    pub shelf: Signal<Arc<Shelf>>,
     /// The shelf as it came, kept so a different sort, or "default" again,
     /// does not need another fetch.
-    loaded: Signal<Shelf>,
+    loaded: Signal<Arc<Shelf>>,
     pub sort: Signal<Sort>,
     pub loading: Signal<bool>,
     /// Loading, but a refined search's previous results stay on screen
@@ -355,9 +360,20 @@ pub struct Library {
     /// instead of an empty page until the fetch lands, which is a flash on
     /// every back. Keyed on the source as well: the same search asked of the
     /// space and of Qobuz finds different things.
-    kept: Signal<Vec<(View, Source, Shelf)>>,
+    kept: Signal<Vec<Kept>>,
     /// Recent searches, newest first, saved. See `search_history`.
     pub(crate) searches: Signal<Vec<String>>,
+}
+
+/// One view `Library::kept` remembers: what it loaded, and that in the order
+/// it was last shown, so going back to it under the same sort sorts nothing.
+#[derive(Clone)]
+struct Kept {
+    view: View,
+    source: Source,
+    loaded: Arc<Shelf>,
+    sort: Sort,
+    shown: Arc<Shelf>,
 }
 
 /// How many views `Library::kept` remembers. Enough to step back through a
@@ -477,8 +493,8 @@ impl Library {
         let prefs = Prefs::load();
         Self {
             view: Signal::new(View::Favourites { scope: Scope::Everything }),
-            shelf: Signal::new(Shelf::default()),
-            loaded: Signal::new(Shelf::default()),
+            shelf: Signal::new(Arc::default()),
+            loaded: Signal::new(Arc::default()),
             sort: Signal::new(Sort::default()),
             loading: Signal::new(true),
             refining: Signal::new(false),
@@ -659,15 +675,19 @@ impl Library {
     fn drop_from_favourites(&mut self, kind: &str, id: &str) {
         if matches!(*self.view.peek(), View::Favourites { .. }) {
             for mut shelf in [self.shelf, self.loaded] {
-                let mut kept = shelf.peek().clone();
-                if kept.drop_liked(kind, id) {
-                    shelf.set(kept);
+                let dropped = without(&shelf.peek(), kind, id);
+                if let Some(dropped) = dropped {
+                    shelf.set(dropped);
                 }
             }
         }
-        for (view, _, shelf) in self.kept.write().iter_mut() {
-            if matches!(view, View::Favourites { .. }) {
-                shelf.drop_liked(kind, id);
+        for kept in self.kept.write().iter_mut() {
+            if matches!(kept.view, View::Favourites { .. }) {
+                for shelf in [&mut kept.loaded, &mut kept.shown] {
+                    if let Some(dropped) = without(shelf, kind, id) {
+                        *shelf = dropped;
+                    }
+                }
             }
         }
     }
@@ -801,8 +821,8 @@ impl Library {
 
     fn set_sort(mut self, sort: Sort) {
         self.sort.set(sort);
-        let loaded = self.loaded.peek().clone();
-        self.shelf.set(loaded.sorted(sort));
+        let sorted = in_order(&self.loaded.peek(), sort);
+        self.shelf.set(sorted);
     }
 
     /// Whether the space's own tracks are part of this view. Only for a
@@ -823,8 +843,8 @@ impl Library {
         let kept = self.kept.peek();
         let views = open
             .iter()
-            .map(|(view, shelf)| (view, shelf))
-            .chain(kept.iter().map(|(view, _, shelf)| (view, shelf)));
+            .map(|(view, shelf)| (view, &**shelf))
+            .chain(kept.iter().map(|kept| (&kept.view, &*kept.loaded)));
         album_tracks_in(views, id)
     }
 
@@ -850,10 +870,17 @@ impl Library {
             }
         }
         let source = *self.source.peek();
+        let sort = *self.sort.peek();
         if !*self.loading.peek() && self.error.peek().is_none() {
-            let leaving = (self.view.peek().clone(), source, self.loaded.peek().clone());
+            let leaving = Kept {
+                view: self.view.peek().clone(),
+                source,
+                loaded: self.loaded.peek().clone(),
+                sort,
+                shown: self.shelf.peek().clone(),
+            };
             let mut kept = self.kept.write();
-            kept.retain(|(view, from, _)| (view, from) != (&leaving.0, &leaving.1));
+            kept.retain(|kept| (&kept.view, kept.source) != (&leaving.view, leaving.source));
             kept.push(leaving);
             if kept.len() > KEPT {
                 kept.remove(0);
@@ -863,11 +890,11 @@ impl Library {
             .kept
             .peek()
             .iter()
-            .find(|(view, from, _)| *view == target && *from == source)
-            .map(|(_, _, shelf)| shelf.clone())
-            // Releases can take minutes to fetch cold, so last time's list is
-            // shown in the meantime, not only at startup the way home's is.
-            .or_else(|| (target == View::Releases).then(|| crate::cache::read(RELEASES_CACHE)).flatten());
+            .find(|kept| kept.view == target && kept.source == source)
+            .map(|kept| {
+                let shown = if kept.sort == sort { kept.shown.clone() } else { in_order(&kept.loaded, sort) };
+                (kept.loaded.clone(), shown)
+            });
 
         if crate::timings::enabled() {
             crate::timings::nav_asked(timing_name(&target), *self.epoch.peek() + 1, known.is_some());
@@ -877,16 +904,15 @@ impl Library {
         self.error.set(None);
         self.notice.set(None);
         match known {
-            Some(shelf) => {
-                let sort = *self.sort.peek();
-                self.loaded.set(shelf.clone());
-                self.shelf.set(shelf.sorted(sort));
+            Some((loaded, shown)) => {
+                self.loaded.set(loaded);
+                self.shelf.set(shown);
                 self.loading.set(false);
             }
             None if refining => self.loading.set(true),
             None => {
-                self.shelf.set(Shelf::default());
-                self.loaded.set(Shelf::default());
+                self.shelf.set(Arc::default());
+                self.loaded.set(Arc::default());
                 self.loading.set(true);
             }
         }
@@ -906,39 +932,45 @@ impl Library {
         let epoch = *self.epoch.peek();
         let space_only = *self.source.peek() == Source::Space;
         let only = self.only.peek().clone();
-        // Already showing what `kept` had for this view: a failed refresh
-        // leaves that up rather than swapping it for an error.
-        let refreshing = !*self.loading.peek();
         if let Some(task) = self.searching.take() {
             task.cancel();
         }
         let search = matches!(target, View::Search { .. });
+        let cache = if target == home() {
+            Some(HOME_CACHE)
+        } else if target == View::Releases {
+            Some(RELEASES_CACHE)
+        } else {
+            None
+        };
+        // Releases can take minutes to fetch cold, so last time's list is
+        // shown in the meantime, not only at startup the way home's is.
+        if *self.loading.peek() && target == View::Releases {
+            self.from_disk(epoch, RELEASES_CACHE);
+        }
 
         let task = spawn(async move {
             let mut library = self;
-            let cache = if target == home() {
-                Some(HOME_CACHE)
-            } else if target == View::Releases {
-                Some(RELEASES_CACHE)
-            } else {
-                None
-            };
             let favourites = match &target {
                 View::Favourites { scope } => Some((*scope, ask_liked())),
                 _ => None,
             };
-            let mut loaded = load(target, space_only, only).await;
-            if let (Some((scope, asked)), Ok(shelf)) = (favourites, &mut loaded) {
-                // Every like, before the tiles stand in for some: what a page
-                // opening would otherwise fetch again for its heart.
-                if scope == Scope::Everything {
-                    library.take_liked(Liked::of(shelf), Some(asked));
+            let loaded = load(target, space_only, only).await.map(|mut shelf| {
+                if let Some((scope, asked)) = favourites {
+                    // Every like, before the tiles stand in for some: what a
+                    // page opening would otherwise fetch again for its heart.
+                    if scope == Scope::Everything {
+                        library.take_liked(Liked::of(&shelf), Some(asked));
+                    }
+                    // As it came, and so a copy: the tiles are about to stand
+                    // in for some of its tracks.
+                    if let Some(name) = cache.filter(|_| *library.epoch.peek() == epoch) {
+                        crate::cache::write_soon(name, shelf.clone());
+                    }
+                    shelf.stand_in(scope);
                 }
-                if let Some(name) = cache.filter(|_| *library.epoch.peek() == epoch) {
-                    crate::cache::write(name, &*shelf);
-                }
-                shelf.stand_in(scope);
-            }
+                Arc::new(shelf)
+            });
 
             // Someone asked for a different view while this was in flight.
             // Writing now would put these rows under that view's heading, and
@@ -952,19 +984,21 @@ impl Library {
                     crate::timings::nav_landed(epoch);
                     // Home's went to the disk as it came, above.
                     if let Some(name) = cache.filter(|_| favourites.is_none()) {
-                        crate::cache::write(name, &shelf);
+                        crate::cache::write_soon(name, shelf.clone());
                     }
-                    let sort = *library.sort.peek();
-                    library.loaded.set(shelf.clone());
-                    library.shelf.set(shelf.sorted(sort));
+                    let sorted = in_order(&shelf, *library.sort.peek());
+                    library.loaded.set(shelf);
+                    library.shelf.set(sorted);
                 }
-                Err(_) if refreshing => {}
+                // Already showing what `kept` or the disk had for this view:
+                // a failed refresh leaves that up rather than an error.
+                Err(_) if !*library.loading.peek() => {}
                 Err(err) => {
                     // A refined search kept the last answer up meanwhile;
                     // it is not this query's, so "play all" must not reach it.
                     if *library.refining.peek() {
-                        library.loaded.set(Shelf::default());
-                        library.shelf.set(Shelf::default());
+                        library.loaded.set(Arc::default());
+                        library.shelf.set(Arc::default());
                     }
                     library.error.set(Some(format!("{err:#}")));
                 }
@@ -977,6 +1011,28 @@ impl Library {
         if search {
             self.searching.set(Some(task));
         }
+    }
+
+    /// Show what the disk kept of the view asked for at `epoch`, read off
+    /// the UI thread, unless its fetch has landed first or it was left.
+    fn from_disk(self, epoch: u64, name: &'static str) {
+        spawn(async move {
+            let mut library = self;
+            let read = tokio::task::spawn_blocking(move || crate::cache::read::<Shelf>(name)).await;
+            let Ok(Some(shelf)) = read else { return };
+            if *library.epoch.peek() != epoch || !*library.loading.peek() {
+                return;
+            }
+            crate::timings::nav_from_disk(epoch);
+            let shelf = Arc::new(shelf);
+            let sorted = in_order(&shelf, *library.sort.peek());
+            library.loaded.set(shelf);
+            library.shelf.set(sorted);
+            library.loading.set(false);
+            if *library.refining.peek() {
+                library.refining.set(false);
+            }
+        });
     }
 }
 
@@ -1140,8 +1196,15 @@ pub fn open_initial(library: Library) {
         // Held as it came, so the hearts are right before anything lands.
         library.take_liked(Liked::of(&shelf), None);
         shelf.stand_in(Scope::Everything);
-        let source = *library.source.peek();
-        library.kept.write().push((home(), source, shelf));
+        let loaded = Arc::new(shelf);
+        let sort = *library.sort.peek();
+        library.kept.write().push(Kept {
+            view: home(),
+            source: *library.source.peek(),
+            shown: in_order(&loaded, sort),
+            loaded,
+            sort,
+        });
     }
     library.show(home());
 }
@@ -2275,6 +2338,32 @@ fn SpaceRows() -> Element {
     }
 }
 
+/// `shelf` in `sort` order: a sorted copy, or the same one if `sort` keeps
+/// the order it came in.
+fn in_order(shelf: &Arc<Shelf>, sort: Sort) -> Arc<Shelf> {
+    if sort == (Sort { key: SortKey::Default, descending: false }) {
+        shelf.clone()
+    } else {
+        Arc::new(Shelf::clone(shelf).sorted(sort))
+    }
+}
+
+/// `shelf` without the track, album or artist `id`, if it was on it: copied
+/// only then, as it is shared with whatever else holds it.
+fn without(shelf: &Shelf, kind: &str, id: &str) -> Option<Arc<Shelf>> {
+    let on = match kind {
+        "track" => shelf.tracks.iter().any(|track| track.id.to_string() == id),
+        "album" => shelf.albums.iter().any(|album| album.id == id),
+        "artist" => shelf.artists.iter().any(|artist| artist.id.to_string() == id),
+        _ => false,
+    };
+    on.then(|| {
+        let mut copy = shelf.clone();
+        copy.drop_liked(kind, id);
+        Arc::new(copy)
+    })
+}
+
 impl Shelf {
     fn sorted(self, sort: Sort) -> Shelf {
         let artist = |artist: &RemoteArtist, key: SortKey| match key {
@@ -2328,7 +2417,7 @@ impl Shelf {
     }
 
     /// The same rows, in place, for asking whether there are any.
-    fn visible_tracks_iter<'a>(
+    pub(crate) fn visible_tracks_iter<'a>(
         &'a self,
         blocked: &'a Blocklist,
     ) -> impl Iterator<Item = &'a RemoteTrack> {
@@ -2740,6 +2829,16 @@ mod tests {
 
     fn ids(tracks: Option<Vec<RemoteTrack>>) -> Option<Vec<i64>> {
         tracks.map(|tracks| tracks.iter().map(|track| track.id).collect())
+    }
+
+    #[test]
+    fn a_shared_shelf_is_copied_only_when_it_changes() {
+        let shelf = Arc::new(tracks(&[1, 2]));
+        let as_it_came = Sort { key: SortKey::Default, descending: false };
+        assert!(Arc::ptr_eq(&in_order(&shelf, as_it_came), &shelf));
+        assert!(without(&shelf, "track", "5").is_none());
+        assert_eq!(without(&shelf, "track", "2").map(|left| left.tracks.len()), Some(1));
+        assert_eq!(shelf.tracks.len(), 2);
     }
 
     #[test]

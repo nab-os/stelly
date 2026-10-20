@@ -444,8 +444,10 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
     let liked = library.is_liked("album", &album.id);
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
-    // `ShelfTrack` indices address the same list.
-    let tracks = library.shelf.read().visible_tracks(&blocklist);
+    // `ShelfTrack` indices address the same list. Read where they are, as
+    // every render would otherwise copy the whole tracklist.
+    let shelf = library.shelf.read().clone();
+    let tracks: Vec<&RemoteTrack> = shelf.visible_tracks_iter(&blocklist).collect();
     let no_tracks = tracks.is_empty();
     let visible = window.shown().min(tracks.len());
     let more = visible < tracks.len();
@@ -545,7 +547,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                 p { class: "muted error", "{message}" }
             } else {
                 ol { class: "list album-tracks",
-                    for ((index, track), key) in tracks.into_iter().enumerate().take(visible).zip(keys) {
+                    for ((index, track), key) in tracks.iter().copied().enumerate().take(visible).zip(keys) {
                         li {
                             key: "{key}",
                             class: if now_playing == Some(track.id) { "row playing" } else { "row" },
@@ -676,23 +678,23 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     let biography = fetched.as_ref().and_then(|a| a.biography.clone());
     let albums_count = fetched.as_ref().and_then(|a| a.albums_count).or(artist.albums_count);
 
+    // Sorted and keyed once per shelf, not on every render: the follow
+    // button, the bio folding out and each step of the window render again.
+    let id = artist.id;
+    let grouped = use_memo(move || sections(library.shelf.read().visible_albums(&blocklist), id));
+    let grouped = grouped.read();
     let shelf = library.shelf.read().clone();
-    let sections = sections(shelf.visible_albums(&blocklist), artist.id);
     // One window over the whole discography, in page order: a section
     // further down starts only once those above it are drawn in full.
-    let lengths: Vec<usize> = sections.iter().map(|(_, albums, _)| albums.len()).collect();
+    let lengths: Vec<usize> = grouped.iter().map(|(_, albums, _)| albums.len()).collect();
     let count: usize = lengths.iter().sum();
     let drawn = split_window(&lengths, window.shown());
     let visible: usize = drawn.iter().sum();
-    let sections: Vec<Section> = sections
-        .into_iter()
+    let sections: Vec<(&str, &[(usize, RemoteAlbum)], &[String])> = grouped
+        .iter()
         .zip(drawn)
         .filter(|(_, drawn)| *drawn > 0)
-        .map(|((heading, mut albums, mut keys), drawn)| {
-            albums.truncate(drawn);
-            keys.truncate(drawn);
-            (heading, albums, keys)
-        })
+        .map(|((heading, albums, keys), drawn)| (*heading, &albums[..drawn], &keys[..drawn]))
         .collect();
     let has_similar = !shelf.visible_artists(&blocklist, true).is_empty();
     let loading = *library.loading.read();
@@ -804,7 +806,7 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                         }
                     }
                     ul { class: if grid { "tiles" } else { "list" },
-                        for ((index, album), key) in albums.into_iter().zip(keys) {
+                        for ((index, album), key) in albums.iter().map(|(index, album)| (*index, album)).zip(keys) {
                             li {
                                 key: "{key}",
                                 class: if grid { "tile" } else { "row" },
