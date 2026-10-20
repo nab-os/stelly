@@ -217,20 +217,112 @@ impl WeightedSpace {
     /// The same, into a caller-owned buffer, the kNN build runs this once
     /// per track and a fresh vector each time is pure churn. The arithmetic is
     /// deliberately identical to `similarities`: a different summation order
-    /// can reorder near-ties between the two.
+    /// can reorder near-ties between the two. Every product in the space goes
+    /// through `dot` or `dots` for the same reason.
     pub fn similarities_into(&self, query: &[f32], out: &mut [f32]) {
-        let norm = query
-            .iter()
-            .map(|v| v * v)
-            .sum::<f32>()
-            .sqrt()
-            .max(1e-9);
-
-        for (i, slot) in out.iter_mut().enumerate().take(self.n_tracks) {
-            let row = self.row(i);
-            *slot = row.iter().zip(query).map(|(a, b)| a * b).sum::<f32>() / norm;
+        let norm = dot(query, query).sqrt().max(1e-9);
+        let n = self.n_tracks.min(out.len());
+        let out = &mut out[..n];
+        dots(query, out, |i| self.row(i));
+        for slot in out {
+            *slot /= norm;
         }
     }
+}
+
+/// How many running sums a dot product keeps. One sum is a chain of adds,
+/// each waiting on the last; eight independent ones fill a vector register
+/// and let the adds overlap.
+const LANES: usize = 8;
+
+/// `a · b`, summed in `LANES` lanes, the lanes folded in a fixed order, then
+/// whatever is left over one at a time.
+///
+/// No fused multiply-add, on purpose: every product is rounded before it is
+/// added, whatever the processor, so a server on an older CPU, or an ARM one,
+/// ranks exactly as this one does.
+#[inline(always)]
+fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (a, rest_a) = a[..n].as_chunks::<LANES>();
+    let (b, rest_b) = b[..n].as_chunks::<LANES>();
+    let mut acc = [0.0f32; LANES];
+    for (x, y) in a.iter().zip(b) {
+        for k in 0..LANES {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    let mut sum = ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
+    for (x, y) in rest_a.iter().zip(rest_b) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// `out[i] = query · row(i)` for every slot of `out`.
+#[inline(always)]
+fn dots_lanes<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]) {
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = dot_lanes(row(i), query);
+    }
+}
+
+/// The same loop built for AVX2, picked at run time: the server's CPU is not
+/// known when it is compiled.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn dots_avx2<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]) {
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = dot_avx2(row(i), query);
+    }
+}
+
+/// `dot_lanes` in one AVX register: the same lanes, folded in the same order,
+/// so the same sums to the last bit. Written out by hand, as left to itself
+/// the compiler splits the lanes over four half-empty registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = a.len().min(b.len());
+    let (a, rest_a) = a[..n].as_chunks::<LANES>();
+    let (b, rest_b) = b[..n].as_chunks::<LANES>();
+    let mut acc = _mm256_setzero_ps();
+    for (x, y) in a.iter().zip(b) {
+        // SAFETY: each chunk is LANES = 8 floats, one unaligned load.
+        let (x, y) = unsafe { (_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr())) };
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(x, y));
+    }
+    // Lane k with lane k + 4, then k with k + 2, then the two left.
+    let half = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps::<1>(acc));
+    let quarter = _mm_add_ps(half, _mm_movehl_ps(half, half));
+    let mut sum = _mm_cvtss_f32(_mm_add_ss(quarter, _mm_movehdup_ps(quarter)));
+    for (x, y) in rest_a.iter().zip(rest_b) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// One dot product. For a scan over many rows, `dots` checks the CPU once
+/// rather than per row.
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has just been seen to support AVX2.
+        return unsafe { dot_avx2(a, b) };
+    }
+    dot_lanes(a, b)
+}
+
+/// `out[i] = query · row(i)` for every slot of `out`, summed as `dot` sums.
+pub fn dots<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has just been seen to support AVX2.
+        return unsafe { dots_avx2(query, out, row) };
+    }
+    dots_lanes(query, out, row)
 }
 
 /// Indices of the `k` highest scores, ordered as `argsort_desc` would.
@@ -334,6 +426,24 @@ impl Iterator for Ranked<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AVX2 build and the portable one sum the same lanes in the same
+    /// order: the same bits, at every length, remainders included.
+    #[test]
+    fn dot_is_the_same_on_every_processor() {
+        let mut x = 0x2545f491u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as f32 / u32::MAX as f32 - 0.5
+        };
+        for n in (0..100).chain([512, 517]) {
+            let a: Vec<f32> = (0..n).map(|_| next()).collect();
+            let b: Vec<f32> = (0..n).map(|_| next()).collect();
+            assert_eq!(dot(&a, &b).to_bits(), dot_lanes(&a, &b).to_bits(), "length {n}");
+        }
+    }
 
     /// Read to the end from one row, across several widenings, it is the full
     /// sort: ties in index order, minus infinity last.

@@ -2,7 +2,7 @@
 
 pub use crate::api::Step;
 use crate::db::Catalog;
-use crate::space::{ranked, WeightedSpace};
+use crate::space::{dot, dots, ranked, WeightedSpace};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
@@ -328,9 +328,7 @@ impl Navigator {
                     for (offset, edges) in slice.iter_mut().enumerate() {
                         let i = index * chunk + offset;
                         let row = self.space.row(rows[i]);
-                        for (s, &j) in sims.iter_mut().zip(rows) {
-                            *s = dot(row, self.space.row(j));
-                        }
+                        dots(row, &mut sims, |j| self.space.row(rows[j]));
                         sims[i] = f32::NEG_INFINITY;
                         *edges = crate::space::top_k(&sims, k)
                             .into_iter()
@@ -387,7 +385,7 @@ impl Navigator {
         for a in 0..n {
             for b in (a + 1)..n {
                 let (x, y) = (self.space.row(rows[a]), self.space.row(rows[b]));
-                let d = 1.0 - x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+                let d = 1.0 - dot(x, y);
                 dist[a * n + b] = d;
                 dist[b * n + a] = d;
             }
@@ -554,15 +552,8 @@ impl Navigator {
             return None;
         }
 
-        let mut sims: Vec<f32> = (0..self.catalog.len())
-            .map(|i| {
-                matrix[i * dims..(i + 1) * dims]
-                    .iter()
-                    .zip(clap)
-                    .map(|(a, b)| a * b)
-                    .sum()
-            })
-            .collect();
+        let mut sims = vec![0.0f32; self.catalog.len()];
+        dots(clap, &mut sims, |i| &matrix[i * dims..(i + 1) * dims]);
         self.mask_blocked(&mut sims);
         Some(sims)
     }
@@ -754,16 +745,13 @@ pub fn text_baseline(clap: &[f32], dims: usize, phrases: &[Vec<f32>]) -> Vec<(f3
             if rows.is_empty() || phrase.len() != dims {
                 return (0.0, 1.0);
             }
-            let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
+            let mut sims = vec![0.0f32; rows.len()];
+            dots(phrase, &mut sims, |i| rows[i]);
             let mean = sims.iter().sum::<f32>() / sims.len() as f32;
             let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
             (mean, variance.sqrt().max(1e-6))
         })
         .collect()
-}
-
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Min-heap entry for Dijkstra. BinaryHeap is a max-heap, so the ordering is
