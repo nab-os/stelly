@@ -44,11 +44,20 @@ const LOAD_BATCH: usize = 10_000;
 /// An artist number for a track without an artist.
 pub const NO_ARTIST: u32 = u32::MAX;
 
+/// Read only, and in one go: waits for a stage's lock rather than failing at
+/// once, and reads the embeddings straight from the mapped file rather than
+/// through SQLite's cache.
 fn open(db_path: &Path) -> Result<SqliteConnection> {
+    use diesel::connection::SimpleConnection;
+
     let url = db_path
         .to_str()
         .with_context(|| format!("{} is not a UTF-8 path", db_path.display()))?;
-    SqliteConnection::establish(url).with_context(|| format!("opening {}", db_path.display()))
+    let mut conn = SqliteConnection::establish(url).with_context(|| format!("opening {}", db_path.display()))?;
+    conn.batch_execute(
+        "PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 268435456; PRAGMA temp_store = MEMORY; PRAGMA query_only = ON;",
+    )?;
+    Ok(conn)
 }
 
 /// Artists the user has blocked. The server honours the list everywhere; the

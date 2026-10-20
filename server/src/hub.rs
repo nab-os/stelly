@@ -53,6 +53,8 @@ pub struct Hub {
     paths: Paths,
     env_dir: PathBuf,
     db_path: PathBuf,
+    /// What requests read and write the database through.
+    db: Arc<db::Db>,
     model_dir: PathBuf,
     /// Built on first use. The provider holds the account; without it,
     /// browsing the space still works, and only reaching for it fails.
@@ -180,6 +182,7 @@ impl Hub {
             space,
             env_dir: paths.env_dir.clone(),
             db_path: paths.db_path.clone(),
+            db: db::Db::shared(&paths.db_path),
             model_dir: paths.model_dir.clone(),
             paths,
             client: OnceLock::new(),
@@ -267,7 +270,10 @@ impl Hub {
     /// One person's likes, from the database alone. Named favourites on the
     /// wire, which is what they were when they were the account's.
     pub async fn favourite_tracks(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
-        Ok(likes::list(&self.db_path, user_id, "track", cap)?
+        Ok(self
+            .db
+            .read(move |conn| likes::list(conn, user_id, "track", cap))
+            .await?
             .into_iter()
             .map(|(mut track, liked_at): (RemoteTrack, i64)| {
                 track.liked_at = Some(liked_at);
@@ -277,7 +283,10 @@ impl Hub {
     }
 
     pub async fn favourite_albums(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        Ok(likes::list(&self.db_path, user_id, "album", cap)?
+        Ok(self
+            .db
+            .read(move |conn| likes::list(conn, user_id, "album", cap))
+            .await?
             .into_iter()
             .map(|(mut album, liked_at): (RemoteAlbum, i64)| {
                 album.liked_at = Some(liked_at);
@@ -287,7 +296,10 @@ impl Hub {
     }
 
     pub async fn favourite_artists(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteArtist>> {
-        Ok(likes::list(&self.db_path, user_id, "artist", cap)?
+        Ok(self
+            .db
+            .read(move |conn| likes::list(conn, user_id, "artist", cap))
+            .await?
             .into_iter()
             .map(|(mut artist, liked_at): (RemoteArtist, i64)| {
                 artist.liked_at = Some(liked_at);
@@ -350,7 +362,7 @@ impl Hub {
             .into_iter()
             .map(|artist| artist.id)
             .collect();
-        let albums = self.artists_recent(self.unblocked(artists)?, false).await;
+        let albums = self.artists_recent(self.unblocked(artists).await?, false).await;
         Ok(released_within(albums, days))
     }
 
@@ -359,7 +371,7 @@ impl Hub {
     /// unless `add_days` is 0, whatever came out in the last `add_days` and
     /// is not in the space yet is added to it.
     pub async fn check_releases(&self, add_days: u32) -> Result<()> {
-        let liked = likes::family(&mut db::connect(&self.db_path, Duration::from_secs(5))?)?;
+        let liked = self.db.read(|conn| likes::family(conn)).await?;
         let artists = liked
             .into_iter()
             .filter_map(|liked| match liked {
@@ -367,7 +379,7 @@ impl Hub {
                 _ => None,
             })
             .collect();
-        let artists = self.unblocked(artists)?;
+        let artists = self.unblocked(artists).await?;
         let checked = artists.len();
         let albums = self.artists_recent(artists, true).await;
         self.log.push(format!("checked {checked} liked artists for new releases"));
@@ -375,11 +387,21 @@ impl Hub {
             return Ok(());
         }
 
-        let mut conn = db::connect(&self.db_path, Duration::from_secs(5))?;
-        for album in released_within(albums, add_days) {
-            if db::album_known(&mut conn, &album.id)? {
-                continue;
-            }
+        // One trip off the async threads for all of them, not a blocking
+        // query an album on one.
+        let fresh = self
+            .db
+            .read(move |conn| {
+                let mut fresh = Vec::new();
+                for album in released_within(albums, add_days) {
+                    if !db::album_known(conn, &album.id)? {
+                        fresh.push(album);
+                    }
+                }
+                Ok(fresh)
+            })
+            .await?;
+        for album in fresh {
             self.log.push(format!("adding new release {} by {} to the space", album.title, album.artist));
             self.pipeline_add(Target::Album(album.id)).await?;
         }
@@ -399,9 +421,9 @@ impl Hub {
         }
     }
 
-    fn unblocked(&self, artists: Vec<i64>) -> Result<Vec<i64>> {
+    async fn unblocked(&self, artists: Vec<i64>) -> Result<Vec<i64>> {
         let blocked: std::collections::HashSet<i64> =
-            db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+            self.blocked_artists().await?.into_iter().map(|a| a.artist_id).collect();
         Ok(artists.into_iter().filter(|id| !blocked.contains(id)).collect())
     }
 
@@ -487,11 +509,13 @@ impl Hub {
             }
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };
-        likes::record(&self.db_path, user_id, id, &item, likes::now()).map(|_| ())
+        let id = id.to_string();
+        self.db.write(move |conn| likes::record(conn, user_id, &id, &item, likes::now())).await.map(|_| ())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
-        likes::forget(&self.db_path, user_id, kind, id)
+        let (kind, id) = (kind.to_string(), id.to_string());
+        self.db.write(move |conn| likes::forget(conn, user_id, &kind, &id)).await
     }
 
     // --------------------------------------------------------- text steering
@@ -593,16 +617,17 @@ impl Hub {
     // ---------------------------------------------------------------- hiding
 
     pub async fn blocked_artists(&self) -> Result<Vec<BlockedArtist>> {
-        db::blocked_artists(&self.db_path)
+        self.db.read(|conn| db::blocked_artists(conn)).await
     }
 
     pub async fn block_artist(&self, artist_id: i64, name: &str) -> Result<()> {
-        db::block_artist(&self.db_path, artist_id, name, None)?;
+        let name = name.to_string();
+        self.db.write(move |conn| db::block_artist(conn, artist_id, &name, None)).await?;
         self.refresh_blocked().await
     }
 
     pub async fn unblock_artist(&self, artist_id: i64) -> Result<()> {
-        db::unblock_artist(&self.db_path, artist_id)?;
+        self.db.write(move |conn| db::unblock_artist(conn, artist_id)).await?;
         self.refresh_blocked().await
     }
 
@@ -610,7 +635,7 @@ impl Hub {
     /// rebuilt.
     async fn refresh_blocked(&self) -> Result<()> {
         self.corpus.clear();
-        let blocked = db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+        let blocked = self.blocked_artists().await?.into_iter().map(|a| a.artist_id).collect();
         let space = self.space.clone();
         tokio::task::spawn_blocking(move || space.set_blocked(blocked))
             .await
@@ -619,8 +644,7 @@ impl Hub {
 
     // ------------------------------------------- extending the catalogue
 
-    /// The counts as of at most `CORPUS_TTL` ago. Taken on a blocking
-    /// thread: they scan whole tables.
+    /// The counts as of at most `CORPUS_TTL` ago. They scan whole tables.
     pub async fn corpus(&self) -> Result<Corpus> {
         let mut held = self.corpus.held.lock().await;
         let epoch = self.corpus.epoch.load(Ordering::SeqCst);
@@ -629,10 +653,7 @@ impl Hub {
                 return Ok(corpus.clone());
             }
         }
-        let db_path = self.db_path.clone();
-        let corpus = tokio::task::spawn_blocking(move || stages::corpus(&db_path))
-            .await
-            .context("the worker thread panicked")??;
+        let corpus = self.db.read(|conn| stages::corpus(conn)).await?;
         *held = Some((Instant::now(), epoch, corpus.clone()));
         Ok(corpus)
     }

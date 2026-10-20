@@ -20,7 +20,7 @@ use stelly_core::api::{Device, PairingGrant, Scope, User};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -69,7 +69,7 @@ const TRUSTED_FOR: Duration = Duration::from_secs(30);
 const SEEN_EVERY: Duration = Duration::from_secs(60);
 
 pub struct AuthStore {
-    db_path: PathBuf,
+    db: Arc<crate::db::Db>,
     trusted_for: Duration,
     verified: Mutex<Verified>,
     /// When each device's `last_seen` was last written, by device id.
@@ -153,17 +153,13 @@ macro_rules! device_rows {
 impl AuthStore {
     pub fn new(db_path: &Path) -> Result<Self> {
         let store = Self {
-            db_path: db_path.to_path_buf(),
+            db: crate::db::Db::shared(db_path),
             trusted_for: TRUSTED_FOR,
             verified: Mutex::default(),
             seen: Mutex::default(),
         };
         store.ensure_schema()?;
         Ok(store)
-    }
-
-    fn open(&self) -> Result<SqliteConnection> {
-        crate::db::connect(&self.db_path, Duration::from_secs(5))
     }
 
     /// Forget every device found so far, after a change to who may get in
@@ -179,7 +175,10 @@ impl AuthStore {
     /// the whole backup. Created here rather than in the shared `schema.sql`
     /// because the pipeline has no business knowing which phones are paired.
     fn ensure_schema(&self) -> Result<()> {
-        let conn = &mut self.open()?;
+        self.db.write_here(|conn| Self::make_tables(conn))
+    }
+
+    fn make_tables(conn: &mut SqliteConnection) -> Result<()> {
         conn.batch_execute(
             "CREATE TABLE IF NOT EXISTS users (
                  id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,10 +239,9 @@ impl AuthStore {
     // ------------------------------------------------------------- users
 
     pub fn users(&self) -> Result<Vec<User>> {
-        let rows = users::table
-            .order(users::id)
-            .select(UserRow::as_select())
-            .load(&mut self.open()?)?;
+        let rows = self
+            .db
+            .read_here(|conn| Ok(users::table.order(users::id).select(UserRow::as_select()).load(conn)?))?;
         Ok(rows.into_iter().map(User::from).collect())
     }
 
@@ -252,16 +250,18 @@ impl AuthStore {
         if name.is_empty() {
             bail!("a user needs a name");
         }
-        let conn = &mut self.open()?;
-        if self.find_user(conn, name)?.is_some() {
-            bail!("there is already a user called “{name}”");
-        }
-        insert_user(conn, name)
+        self.db.write_here(|conn| {
+            if self.find_user(conn, name)?.is_some() {
+                bail!("there is already a user called “{name}”");
+            }
+            insert_user(conn, name)
+        })
     }
 
     /// By name, which is what the CLI and the app both speak.
     pub fn user(&self, name: &str) -> Result<User> {
-        self.find_user(&mut self.open()?, name)?
+        self.db
+            .read_here(|conn| self.find_user(conn, name))?
             .ok_or_else(|| anyhow::anyhow!("no user called “{name}”; see `stelly-server user list`"))
     }
 
@@ -272,19 +272,20 @@ impl AuthStore {
         if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
             return self.user(name);
         }
-        let conn = &mut self.open()?;
-        let mut everyone = users::table
-            .order(users::id)
-            .select(UserRow::as_select())
-            .load(conn)?;
-        match everyone.len() {
-            0 => insert_user(conn, FIRST_USER),
-            1 => Ok(everyone.remove(0).into()),
-            _ => {
-                let names: Vec<String> = everyone.into_iter().map(|user| user.name).collect();
-                bail!("whose device is it? pass --user, one of: {}", names.join(", "))
+        self.db.write_here(|conn| {
+            let mut everyone = users::table
+                .order(users::id)
+                .select(UserRow::as_select())
+                .load(conn)?;
+            match everyone.len() {
+                0 => insert_user(conn, FIRST_USER),
+                1 => Ok(everyone.remove(0).into()),
+                _ => {
+                    let names: Vec<String> = everyone.into_iter().map(|user| user.name).collect();
+                    bail!("whose device is it? pass --user, one of: {}", names.join(", "))
+                }
             }
-        }
+        })
     }
 
     fn find_user(&self, conn: &mut SqliteConnection, name: &str) -> Result<Option<User>> {
@@ -302,13 +303,15 @@ impl AuthStore {
             bail!("a user needs a name");
         }
         let user = self.user(from)?;
-        let conn = &mut self.open()?;
-        if self.find_user(conn, to)?.is_some() {
-            bail!("there is already a user called “{to}”");
-        }
-        diesel::update(users::table.find(user.id))
-            .set(users::name.eq(to))
-            .execute(conn)?;
+        self.db.write_here(|conn| {
+            if self.find_user(conn, to)?.is_some() {
+                bail!("there is already a user called “{to}”");
+            }
+            diesel::update(users::table.find(user.id))
+                .set(users::name.eq(to))
+                .execute(conn)?;
+            Ok(())
+        })?;
         self.forget();
         Ok(())
     }
@@ -317,15 +320,17 @@ impl AuthStore {
     /// locks a phone out.
     pub fn remove_user(&self, name: &str) -> Result<()> {
         let user = self.user(name)?;
-        let conn = &mut self.open()?;
-        let paired: i64 = devices::table
-            .filter(devices::user_id.eq(user.id))
-            .count()
-            .get_result(conn)?;
-        if paired > 0 {
-            bail!("“{name}” still has {paired} paired device(s); revoke them first");
-        }
-        diesel::delete(users::table.find(user.id)).execute(conn)?;
+        self.db.write_here(|conn| {
+            let paired: i64 = devices::table
+                .filter(devices::user_id.eq(user.id))
+                .count()
+                .get_result(conn)?;
+            if paired > 0 {
+                bail!("“{name}” still has {paired} paired device(s); revoke them first");
+            }
+            diesel::delete(users::table.find(user.id)).execute(conn)?;
+            Ok(())
+        })?;
         self.forget();
         Ok(())
     }
@@ -340,16 +345,18 @@ impl AuthStore {
         let token = hex(&raw);
         let now = crate::db::utc_now();
 
-        let id = diesel::insert_into(devices::table)
-            .values((
-                devices::name.eq(name),
-                devices::scope.eq(scope.as_str()),
-                devices::token_hash.eq(hash(&token)),
-                devices::created_at.eq(&now),
-                devices::user_id.eq(user.id),
-            ))
-            .returning(devices::id)
-            .get_result(&mut self.open()?)?;
+        let id = self.db.write_here(|conn| {
+            Ok(diesel::insert_into(devices::table)
+                .values((
+                    devices::name.eq(name),
+                    devices::scope.eq(scope.as_str()),
+                    devices::token_hash.eq(hash(&token)),
+                    devices::created_at.eq(&now),
+                    devices::user_id.eq(user.id),
+                ))
+                .returning(devices::id)
+                .get_result(conn)?)
+        })?;
 
         Ok(PairingGrant {
             device: Device {
@@ -406,11 +413,13 @@ impl AuthStore {
     /// time; it would not be for a password.
     fn verify(&self, token_hash: String) -> Result<Option<Device>> {
         let generation = self.verified.lock().unwrap().generation;
-        let Some(row) = device_rows!()
-            .filter(devices::token_hash.eq(&token_hash))
-            .first::<DeviceRow>(&mut self.open()?)
-            .optional()?
-        else {
+        let found = self.db.read_here(|conn| {
+            Ok(device_rows!()
+                .filter(devices::token_hash.eq(&token_hash))
+                .first::<DeviceRow>(conn)
+                .optional()?)
+        })?;
+        let Some(row) = found else {
             return Ok(None);
         };
         let device = Device::from(row);
@@ -435,11 +444,10 @@ impl AuthStore {
 
     /// A failure is only logged; the next one due records it.
     fn record_seen(&self, device_id: i64) {
-        let written = self.open().and_then(|mut conn| {
-            diesel::update(devices::table.find(device_id))
+        let written = self.db.write_here(|conn| {
+            Ok(diesel::update(devices::table.find(device_id))
                 .set(devices::last_seen.eq(crate::db::utc_now()))
-                .execute(&mut conn)
-                .map_err(anyhow::Error::from)
+                .execute(conn)?)
         });
         if let Err(err) = written {
             eprintln!("recording when device {device_id} was last seen failed: {err:#}");
@@ -452,7 +460,7 @@ impl AuthStore {
         if let Some(user_id) = user_id {
             query = query.filter(devices::user_id.eq(user_id));
         }
-        let rows = query.load::<DeviceRow>(&mut self.open()?)?;
+        let rows = self.db.read_here(|conn| Ok(query.load::<DeviceRow>(conn)?))?;
         Ok(rows.into_iter().map(Device::from).collect())
     }
 
@@ -462,7 +470,7 @@ impl AuthStore {
         if let Some(user_id) = user_id {
             target = target.filter(devices::user_id.eq(user_id));
         }
-        if target.execute(&mut self.open()?)? == 0 {
+        if self.db.write_here(|conn| Ok(target.execute(conn)?))? == 0 {
             bail!("no device with id {device_id}");
         }
         self.forget();
@@ -470,7 +478,7 @@ impl AuthStore {
     }
 
     pub fn count(&self) -> Result<i64> {
-        Ok(devices::table.count().get_result(&mut self.open()?)?)
+        self.db.read_here(|conn| Ok(devices::table.count().get_result(conn)?))
     }
 }
 
@@ -572,6 +580,7 @@ impl FromRequestParts<crate::AppState> for AdminAuth {
 mod tests {
     use super::*;
     use diesel::connection::SimpleConnection;
+    use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("stelly-auth-{name}-{}", std::process::id()));

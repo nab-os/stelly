@@ -737,8 +737,20 @@ fn owned_by(device: &Device) -> Option<i64> {
     }
 }
 
+/// Run something against the devices and users off the async threads: it
+/// reads and writes the database, and a write can wait on a stage's lock.
+async fn on_auth<T: Send + 'static>(
+    state: &AppState,
+    work: impl FnOnce(&crate::auth::AuthStore) -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, Failure> {
+    let auth = state.auth.clone();
+    Ok(tokio::task::spawn_blocking(move || work(&auth))
+        .await
+        .map_err(|err| anyhow::anyhow!("the worker thread panicked: {err}"))??)
+}
+
 async fn devices(State(state): State<AppState>, PlayAuth(device): PlayAuth) -> Reply<Vec<Device>> {
-    Ok(Json(state.auth.list(owned_by(&device))?))
+    Ok(Json(on_auth(&state, move |auth| auth.list(owned_by(&device))).await?))
 }
 
 #[derive(Deserialize)]
@@ -766,10 +778,12 @@ async fn pair_device(
             return Err(Failure::forbidden("only an admin device can pair someone else's"));
         }
     }
-    let user = state
-        .auth
-        .user_for_pairing(Some(body.user.as_deref().unwrap_or(&device.user)))?;
-    Ok(Json(state.auth.issue(&body.name, body.scope, &user)?))
+    let grant = on_auth(&state, move |auth| {
+        let user = auth.user_for_pairing(Some(body.user.as_deref().unwrap_or(&device.user)))?;
+        auth.issue(&body.name, body.scope, &user)
+    })
+    .await?;
+    Ok(Json(grant))
 }
 
 /// `play` may revoke its own user's devices, a lost phone should not need
@@ -779,12 +793,12 @@ async fn revoke_device(
     PlayAuth(device): PlayAuth,
     Path(id): Path<i64>,
 ) -> Reply<serde_json::Value> {
-    state.auth.revoke(id, owned_by(&device))?;
+    on_auth(&state, move |auth| auth.revoke(id, owned_by(&device))).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn users(State(state): State<AppState>, _: AdminAuth) -> Reply<Vec<User>> {
-    Ok(Json(state.auth.users()?))
+    Ok(Json(on_auth(&state, |auth| auth.users()).await?))
 }
 
 #[derive(Deserialize)]
@@ -799,7 +813,7 @@ async fn add_user(
     _: AdminAuth,
     Json(body): Json<UserBody>,
 ) -> Reply<User> {
-    Ok(Json(state.auth.add_user(&body.name)?))
+    Ok(Json(on_auth(&state, move |auth| auth.add_user(&body.name)).await?))
 }
 
 // ------------------------------------------------------------------- health
@@ -887,15 +901,18 @@ async fn mix_set(
     Json(request): Json<stelly_mix::api::SetRequest>,
 ) -> Reply<stelly_mix::api::SetPlan> {
     let mix = state.hub.mix().mix().await?;
-    let like = match request.like.as_deref().filter(|d| !d.trim().is_empty()) {
+    let embedded = match request.like.as_deref().filter(|d| !d.trim().is_empty()) {
         Some(description) => {
             let query = state.hub.embed(description).await?;
-            let baseline = state.hub.embed(stelly_mix::text::BASELINE).await?;
-            Some(mix.likeness(&query, &baseline))
+            Some((query, state.hub.embed(stelly_mix::text::BASELINE).await?))
         }
         None => None,
     };
-    let plan = tokio::task::spawn_blocking(move || mix.set(&request, like))
+    let plan = tokio::task::spawn_blocking(move || {
+        // Scored against every phrase, so on this side too.
+        let like = embedded.map(|(query, baseline)| mix.likeness(&query, &baseline));
+        mix.set(&request, like)
+    })
         .await
         .map_err(anyhow::Error::from)??;
     Ok(Json(plan))
@@ -916,7 +933,11 @@ async fn mix_find(
     let mix = state.hub.mix().mix().await?;
     let description = state.hub.embed(&query.q).await?;
     let baseline = state.hub.embed(stelly_mix::text::BASELINE).await?;
-    Ok(Json(mix.find(&description, &baseline, query.limit)))
+    // A pass over every phrase of every track mix-analysed.
+    let found = tokio::task::spawn_blocking(move || mix.find(&description, &baseline, query.limit))
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(Json(found))
 }
 
 async fn mix_job(State(state): State<AppState>, _: AdminAuth) -> Reply<stelly_mix::api::JobStatus> {
