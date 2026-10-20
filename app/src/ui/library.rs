@@ -1169,10 +1169,16 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
         View::Playlist { id, .. } => shelf.tracks = backend().playlist_tracks(id, LIST_CAP).await?,
         View::Album(album) => shelf.tracks = backend().album_tracks(&album.id).await?,
         View::Artist(artist) => {
-            shelf.albums = backend().artist_albums(artist.id, LIST_CAP).await?;
+            // Asked together: neither needs the other, and one after the
+            // other the page waited out both round trips.
+            let (albums, similar) = tokio::join!(
+                backend().artist_albums(artist.id, LIST_CAP),
+                backend().similar_artists(artist.id, 20),
+            );
+            shelf.albums = albums?;
             // Not fatal: an artist with no similar list should still show a
             // discography rather than an error.
-            shelf.similar = backend().similar_artists(artist.id, 20).await.unwrap_or_default();
+            shelf.similar = similar.unwrap_or_default();
         }
         // Pages that carry what they show, or fetch it themselves.
         View::Track(_) | View::Settings => {}

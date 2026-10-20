@@ -568,11 +568,13 @@ fn Shell() -> Element {
     use_context_provider(|| Provider(provider, providers));
     use_future(move || async move {
         let (mut provider, mut providers) = (provider, providers);
-        if let Ok(found) = backend().capabilities().await {
+        // Together, as neither answer waits on the other.
+        let (capabilities, found) = tokio::join!(backend().capabilities(), backend().providers());
+        if let Ok(found) = capabilities {
             crate::cache::write(PROVIDER_CACHE, &found);
             provider.set(Some(found));
         }
-        if let Ok(found) = backend().providers().await {
+        if let Ok(found) = found {
             crate::cache::write(PROVIDERS_CACHE, &found);
             providers.set(found);
         }
