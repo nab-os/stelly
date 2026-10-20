@@ -638,6 +638,18 @@ impl Library {
         }
     }
 
+    /// An album's tracklist, if its page is open or was one of the last few
+    /// seen, so playing it from a menu need not ask again.
+    pub(crate) fn held_album_tracks(&self, id: &str) -> Option<Vec<RemoteTrack>> {
+        let open = (!*self.loading.peek()).then(|| (self.view.peek().clone(), self.loaded.peek().clone()));
+        let kept = self.kept.peek();
+        let views = open
+            .iter()
+            .map(|(view, shelf)| (view, shelf))
+            .chain(kept.iter().map(|(view, _, shelf)| (view, shelf)));
+        album_tracks_in(views, id)
+    }
+
     /// Whether a search is looking at the space rather than Qobuz.
     fn searching_space_only(&self) -> bool {
         matches!(&*self.view.read(), View::Search { .. }) && *self.source.read() == Source::Space
@@ -749,6 +761,17 @@ impl Library {
             library.loading.set(false);
         });
     }
+}
+
+/// The tracklist of album `id` among loaded views. An empty one counts as
+/// not held: a page that found nothing is worth asking again.
+fn album_tracks_in<'a>(
+    mut views: impl Iterator<Item = (&'a View, &'a Shelf)>,
+    id: &str,
+) -> Option<Vec<RemoteTrack>> {
+    views
+        .find(|(view, shelf)| matches!(view, View::Album(album) if album.id == id) && !shelf.tracks.is_empty())
+        .map(|(_, shelf)| shelf.tracks.clone())
 }
 
 impl Default for Library {
@@ -2264,3 +2287,40 @@ fn PlaylistRows() -> Element {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(id: &str) -> View {
+        View::Album(RemoteAlbum { id: id.into(), ..Default::default() })
+    }
+
+    fn tracks(ids: &[i64]) -> Shelf {
+        Shelf {
+            tracks: ids.iter().map(|&id| RemoteTrack { id, ..Default::default() }).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn ids(tracks: Option<Vec<RemoteTrack>>) -> Option<Vec<i64>> {
+        tracks.map(|tracks| tracks.iter().map(|track| track.id).collect())
+    }
+
+    #[test]
+    fn an_album_seen_lately_is_played_from_what_it_loaded() {
+        let views = [(album("a"), tracks(&[1, 2])), (album("b"), tracks(&[3, 4, 5]))];
+        let found = album_tracks_in(views.iter().map(|(view, shelf)| (view, shelf)), "b");
+        assert_eq!(ids(found), Some(vec![3, 4, 5]));
+    }
+
+    #[test]
+    fn an_album_not_held_or_held_empty_is_fetched() {
+        let views = [
+            (album("a"), Shelf::default()),
+            (View::Releases, tracks(&[1])),
+        ];
+        assert_eq!(ids(album_tracks_in(views.iter().map(|(view, shelf)| (view, shelf)), "a")), None);
+        assert_eq!(ids(album_tracks_in(views.iter().map(|(view, shelf)| (view, shelf)), "z")), None);
+    }
+}
