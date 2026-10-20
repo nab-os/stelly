@@ -325,7 +325,16 @@ fn follow(player: Player) {
         } else if !playing && mirror.sounding {
             transport("stellyPause");
         }
+        // Once this one has started, so the two requests do not race.
+        let next = upcoming(mirror.session()).cloned();
+        drop(mirror);
+        presign_next(player, &track, next.as_ref());
     }
+}
+
+/// The track that plays when the current one ends, `Op::Ended`'s pick.
+fn upcoming(session: &Session) -> Option<&RemoteTrack> {
+    session.queue.get(session.index + 1)
 }
 
 /// Hand the audio element a track, starting from wherever the session is by
@@ -585,6 +594,9 @@ pub fn quality_label(quality: Quality) -> &'static str {
 struct Signed {
     urls: HashMap<(i64, Quality), (String, Instant)>,
     signing: HashSet<(i64, Quality)>,
+    /// What the output signed as the next track. Let go of once the queue
+    /// says something else comes next.
+    ahead: Option<(i64, Quality)>,
 }
 
 const SIGNED_FOR: Duration = Duration::from_secs(40 * 60);
@@ -605,12 +617,46 @@ impl Signed {
         self.urls.retain(|_, (_, at)| at.elapsed() < SIGNED_FOR);
         self.urls.insert(key, (url, Instant::now()));
     }
+
+    /// Mark `next` as the track coming up, dropping the one that was unless
+    /// it is `current`, which is playing from it. Says whether `next` is to
+    /// be signed now, and marks it as signing if so. Only once per change: a
+    /// request that failed is not sent again on every push, the load will
+    /// ask for itself.
+    fn ahead(&mut self, next: Option<(i64, Quality)>, current: Option<(i64, Quality)>) -> bool {
+        if self.ahead == next {
+            return false;
+        }
+        if let Some(old) = self.ahead.take().filter(|old| Some(*old) != current) {
+            self.urls.remove(&old);
+        }
+        self.ahead = next;
+        next.is_some_and(|key| self.fresh(key).is_none() && self.signing.insert(key))
+    }
 }
+
+/// Said each time a presign is done, for a load waiting on it.
+static SIGNED_NOW: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 async fn stream_url(track_id: i64, quality: Quality) -> anyhow::Result<String> {
     let key = (track_id, quality);
-    if let Some(url) = signed().fresh(key) {
-        return Ok(url);
+    loop {
+        // Registered before looking, so a presign ending in between still
+        // wakes it.
+        let done = SIGNED_NOW.notified();
+        tokio::pin!(done);
+        done.as_mut().enable();
+        {
+            let mut signed = signed();
+            if let Some(url) = signed.fresh(key) {
+                return Ok(url);
+            }
+            if !signed.signing.contains(&key) {
+                break;
+            }
+        }
+        // Already on its way: a second request would only arrive later.
+        done.await;
     }
     let url = backend().file_url(track_id, quality).await?;
     signed().keep(key, url.clone());
@@ -632,13 +678,32 @@ fn presign(player: Player, track: &RemoteTrack) {
             return;
         }
     }
+    sign(key);
+}
+
+/// Sign the next queued track on the output, so that the end of this one
+/// goes straight to the next without waiting on the provider.
+fn presign_next(player: Player, current: &RemoteTrack, next: Option<&RemoteTrack>) {
+    let quality = *player.quality.peek();
+    let next = next.filter(|track| track.streamable).map(|track| (track.id, quality));
+    let ahead = signed().ahead(next, Some((current.id, quality)));
+    if let Some(key) = next.filter(|_| ahead) {
+        sign(key);
+    }
+}
+
+/// Ask for `key`'s URL in the background, already marked as signing.
+fn sign(key: (i64, Quality)) {
     spawn_forever(async move {
         let url = backend().file_url(key.0, key.1).await;
-        let mut signed = signed();
-        signed.signing.remove(&key);
-        if let Ok(url) = url {
-            signed.keep(key, url);
+        {
+            let mut signed = signed();
+            signed.signing.remove(&key);
+            if let Ok(url) = url {
+                signed.keep(key, url);
+            }
         }
+        SIGNED_NOW.notify_waiters();
     });
 }
 
@@ -1200,4 +1265,58 @@ pub fn use_session(player: Player) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOSSLESS: Quality = Quality::Lossless;
+
+    #[test]
+    fn the_next_track_is_signed_once() {
+        let mut signed = Signed::default();
+        assert!(signed.ahead(Some((2, LOSSLESS)), Some((1, LOSSLESS))));
+        assert!(signed.signing.contains(&(2, LOSSLESS)));
+        // A later push does not ask again, even after a failure.
+        signed.signing.clear();
+        assert!(!signed.ahead(Some((2, LOSSLESS)), Some((1, LOSSLESS))));
+    }
+
+    #[test]
+    fn a_track_already_signed_is_not_signed_again() {
+        let mut signed = Signed::default();
+        signed.keep((2, LOSSLESS), "two".into());
+        assert!(!signed.ahead(Some((2, LOSSLESS)), Some((1, LOSSLESS))));
+        assert_eq!(signed.fresh((2, LOSSLESS)).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn a_queue_change_drops_the_old_next() {
+        let mut signed = Signed::default();
+        signed.ahead(Some((2, LOSSLESS)), Some((1, LOSSLESS)));
+        signed.keep((2, LOSSLESS), "two".into());
+        assert!(signed.ahead(Some((3, LOSSLESS)), Some((1, LOSSLESS))));
+        assert_eq!(signed.fresh((2, LOSSLESS)), None);
+    }
+
+    #[test]
+    fn the_next_track_once_playing_keeps_its_url() {
+        let mut signed = Signed::default();
+        signed.ahead(Some((2, LOSSLESS)), Some((1, LOSSLESS)));
+        signed.keep((2, LOSSLESS), "two".into());
+        // Track 2 ended up playing, track 3 is next.
+        signed.ahead(Some((3, LOSSLESS)), Some((2, LOSSLESS)));
+        assert_eq!(signed.fresh((2, LOSSLESS)).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn the_end_of_the_queue_has_nothing_to_sign() {
+        let mut signed = Signed::default();
+        signed.ahead(Some((2, LOSSLESS)), Some((1, LOSSLESS)));
+        signed.keep((2, LOSSLESS), "two".into());
+        assert!(!signed.ahead(None, Some((1, LOSSLESS))));
+        assert_eq!(signed.ahead, None);
+        assert_eq!(signed.fresh((2, LOSSLESS)), None);
+    }
 }
