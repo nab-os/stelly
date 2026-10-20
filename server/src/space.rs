@@ -79,8 +79,10 @@ pub struct Derived {
     pub index_body: Prepared,
     /// `map::payload`, the binary the map's canvas reads.
     pub points: Prepared,
-    /// `map::meta`, as JSON.
+    /// `map::meta`, as JSON, for apps from before `meta_binary`.
     pub meta: Prepared,
+    /// `map::meta_binary`.
+    pub meta_binary: Prepared,
     pub in_space: i64,
     pub on_map: i64,
 }
@@ -401,24 +403,31 @@ fn derive(catalog: &Catalog, built_at: &str) -> Derived {
         albums: albums.into_iter().collect(),
         artists: artists.into_iter().collect(),
     };
-    // Side by side: the meta's labels take the longest to compress.
-    let (index_body, points, meta) = std::thread::scope(|scope| {
+    let stamp = &index.stamp;
+    let map_meta = map::meta(catalog);
+    // Side by side: the labels take the longest to compress, in both forms.
+    let (index_body, points, meta, meta_binary) = std::thread::scope(|scope| {
         let points = scope.spawn(|| {
-            Prepared::new(&index.stamp, "points", "application/octet-stream", map::payload(catalog))
+            Prepared::new(stamp, "points", "application/octet-stream", map::payload(catalog))
         });
         let meta = scope.spawn(|| {
-            let meta = serde_json::to_vec(&map::meta(catalog)).unwrap_or_default();
-            Prepared::new(&index.stamp, "meta", "application/json", meta)
+            let meta = serde_json::to_vec(&map_meta).unwrap_or_default();
+            Prepared::new(stamp, "meta", "application/json", meta)
+        });
+        let meta_binary = scope.spawn(|| {
+            Prepared::new(stamp, "meta-binary", "application/octet-stream", map::meta_binary(&map_meta))
         });
         let index_body = serde_json::to_vec(&index).unwrap_or_default();
-        let index_body = Prepared::new(&index.stamp, "index", "application/json", index_body);
-        (index_body, points.join(), meta.join())
+        let index_body = Prepared::new(stamp, "index", "application/json", index_body);
+        (index_body, points.join(), meta.join(), meta_binary.join())
     });
+    let joined = |body: std::thread::Result<Prepared>| body.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 
     Derived {
         index_body,
-        points: points.unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-        meta: meta.unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        points: joined(points),
+        meta: joined(meta),
+        meta_binary: joined(meta_binary),
         index,
         in_space,
         on_map,

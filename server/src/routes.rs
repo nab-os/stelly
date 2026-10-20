@@ -642,9 +642,26 @@ async fn space_points(State(state): State<AppState>, _: PlayAuth, headers: Heade
     Ok(prepared(&headers, &derived.points))
 }
 
-async fn space_points_meta(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
+#[derive(Deserialize)]
+struct MetaQuery {
+    /// `binary` for `map::meta_binary`. A server from before it ignores the
+    /// parameter and sends JSON, which the app tells apart by its first byte.
+    #[serde(default)]
+    format: Option<String>,
+}
+
+async fn space_points_meta(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Query(query): Query<MetaQuery>,
+    headers: HeaderMap,
+) -> Result<Response, Failure> {
     let derived = state.hub.space().derived().ok_or_else(not_built)?;
-    Ok(prepared(&headers, &derived.meta))
+    let body = match query.format.as_deref() {
+        Some("binary") => &derived.meta_binary,
+        _ => &derived.meta,
+    };
+    Ok(prepared(&headers, body))
 }
 
 /// One of the space's cached bodies as this client can take it: 304 when it
