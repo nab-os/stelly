@@ -21,7 +21,6 @@
 
 use crate::pipeline::{Job, Paths};
 use anyhow::{Context, Result};
-use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Binary, Double, Nullable, Text};
 use std::collections::HashMap;
@@ -231,6 +230,40 @@ pub fn merge(conn: &mut SqliteConnection, from: i64, into: i64, similarity: f32)
     Ok(())
 }
 
+/// How many tracks are marked compared a statement.
+const MARKED_AT_ONCE: i64 = 5_000;
+
+/// Every track with an embedding marked compared, `MARKED_AT_ONCE` at a
+/// time in the order of the index that lists them.
+fn mark_compared(chunks: &mut crate::db::Chunked) -> Result<()> {
+    #[derive(QueryableByName)]
+    struct Last {
+        #[diesel(sql_type = Nullable<BigInt>)]
+        id: Option<i64>,
+    }
+    let mut after = i64::MIN;
+    loop {
+        let conn = chunks.conn()?;
+        let last = diesel::sql_query(
+            "SELECT MAX(track_id) AS id FROM
+             (SELECT track_id FROM features WHERE clap_f32 IS NOT NULL AND track_id > ? ORDER BY track_id LIMIT ?)",
+        )
+        .bind::<BigInt, _>(after)
+        .bind::<BigInt, _>(MARKED_AT_ONCE)
+        .get_result::<Last>(conn)?
+        .id;
+        let Some(last) = last else { return Ok(()) };
+        diesel::sql_query(
+            "INSERT OR IGNORE INTO dedupe_seen (track_id)
+             SELECT track_id FROM features WHERE clap_f32 IS NOT NULL AND track_id > ? AND track_id <= ?",
+        )
+        .bind::<BigInt, _>(after)
+        .bind::<BigInt, _>(last)
+        .execute(conn)?;
+        after = last;
+    }
+}
+
 /// Compare what was analysed since the last run with everything analysed,
 /// and merge what is one recording.
 pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<Stats> {
@@ -267,31 +300,34 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<Stats> {
     let best: HashMap<(usize, usize), f32> = found.iter().map(|&(a, b, s)| ((a, b), s)).collect();
     let mut stats = Stats { compared: new, merged: 0 };
     let all = groups(tracks.len(), &found, |i| (tracks[i].seed_distance, tracks[i].id));
-    if !options.dry_run {
-        conn.batch_execute("BEGIN")?;
-    }
+    // Committed a few groups at a time, so requests' writes go in between;
+    // each group whole in one. Stopped halfway, the groups merged stay
+    // merged, nothing is marked compared yet, and the next run finds the
+    // rest again: the groups left are the ones this run had left.
+    let mut chunks = (!options.dry_run).then(|| crate::db::Chunked::new(conn));
     for group in &all {
         // The first is the one kept: closest to a like, the oldest if they tie.
         let keep = group[0];
+        let mut conn = match &mut chunks {
+            Some(chunks) => Some(chunks.conn()?),
+            None => None,
+        };
         for &i in group.iter().filter(|&&i| i != keep) {
             let similarity = best
                 .get(&(keep.min(i), keep.max(i)))
                 .copied()
                 .unwrap_or_else(|| dot(&tracks[keep].unit, &tracks[i].unit));
             let (from, into) = (tracks[i].id, tracks[keep].id);
-            if options.dry_run {
-                job.log(format!("  would merge {from} into {into} ({similarity:.4})"));
-            } else {
-                merge(conn, from, into, similarity)?;
+            match conn.as_deref_mut() {
+                Some(conn) => merge(conn, from, into, similarity)?,
+                None => job.log(format!("  would merge {from} into {into} ({similarity:.4})")),
             }
             stats.merged += 1;
         }
     }
-    if !options.dry_run {
-        conn.batch_execute(
-            "INSERT OR IGNORE INTO dedupe_seen (track_id) SELECT track_id FROM features WHERE clap_f32 IS NOT NULL;
-             COMMIT;",
-        )?;
+    if let Some(mut chunks) = chunks {
+        mark_compared(&mut chunks)?;
+        chunks.finish()?;
     }
     job.advance("dedupe", 1, 1);
     let verb = if options.dry_run { "would merge" } else { "merged" };
@@ -302,6 +338,7 @@ pub fn run(paths: &Paths, options: &Options, job: &Job) -> Result<Stats> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diesel::connection::SimpleConnection;
 
     fn track(id: i64, seconds: i64, unit: Vec<f32>, new: bool) -> Track {
         Track { id, seconds, seed_distance: 1, isrc: None, unit, new }

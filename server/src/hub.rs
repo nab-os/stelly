@@ -5,7 +5,7 @@
 //! The crawl and the stages publish a status that clients poll, because a
 //! server cannot write a client's signals.
 
-use crate::cache::Cache;
+use crate::cache::{Cache, Revalidating};
 use crate::pipeline::{progress_of, Job, Paths, ProgressSlot};
 use crate::provider::{Capabilities, Provider, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 use crate::schema::{frontier, tracks};
@@ -53,17 +53,18 @@ pub struct Hub {
     paths: Paths,
     env_dir: PathBuf,
     db_path: PathBuf,
+    /// What requests read and write the database through.
+    db: Arc<db::Db>,
     model_dir: PathBuf,
     /// Built on first use. The provider holds the account; without it,
     /// browsing the space still works, and only reaching for it fails.
     client: OnceLock<Provider>,
-    /// Albums, artists, discographies: they change on the scale of weeks.
-    catalogue: Cache,
     /// Short, since the same words find new releases.
     searches: Cache,
     /// Playlists, which the account can change from anywhere else.
-    /// Cleared on our own writes, and short for everyone else's.
-    account: Cache,
+    /// Cleared on our own writes, and fetched again after two minutes for
+    /// everyone else's, behind the one held.
+    account: Revalidating,
     /// Each liked artist's newest releases. Outlives the background check's
     /// interval, which overwrites it, so a client never waits on the provider for an
     /// artist that check has seen.
@@ -175,17 +176,21 @@ impl Hub {
         let log = Arc::new(LogBuffer::default());
         let steerable = TextEncoder::exported(&paths.model_dir);
         let space = Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone()));
+        // Albums, artists, discographies: they change on the scale of weeks,
+        // so one past its six hours is served while it is fetched again.
+        let catalogue = Revalidating::new(Duration::from_secs(6 * 60 * 60), Duration::from_secs(7 * 24 * 60 * 60), 5_000);
+        crate::provider::share_catalogue(&paths.db_path, catalogue);
         Self {
             mix: Arc::new(crate::mix::MixService::new(paths.clone(), space.clone(), log.clone())),
             space,
             env_dir: paths.env_dir.clone(),
             db_path: paths.db_path.clone(),
+            db: db::Db::shared(&paths.db_path),
             model_dir: paths.model_dir.clone(),
             paths,
             client: OnceLock::new(),
-            catalogue: Cache::new(Duration::from_secs(6 * 60 * 60), 5_000),
             searches: Cache::new(Duration::from_secs(5 * 60), 500),
-            account: Cache::new(Duration::from_secs(2 * 60), 200),
+            account: Revalidating::new(Duration::from_secs(2 * 60), Duration::from_secs(60 * 60), 200),
             releases: Cache::new(Duration::from_secs(48 * 60 * 60), 10_000),
             text: tokio::sync::OnceCell::new(),
             steerable: AtomicBool::new(steerable),
@@ -242,11 +247,10 @@ impl Hub {
         });
     }
 
-    /// What the provider is and can do; it does not change while it runs.
+    /// What the providers are and can do, from what each said once. Not
+    /// cached here: one that was down is counted once it has said.
     pub async fn capabilities(&self) -> Result<Capabilities> {
-        self.catalogue
-            .get_or("capabilities".to_string(), async { self.provider().capabilities().await })
-            .await
+        self.provider().capabilities().await
     }
 
     /// `only` names the providers to ask; none is all of them.
@@ -259,15 +263,16 @@ impl Hub {
 
     /// Each provider, most preferred first: what it is called and can do.
     pub async fn providers(&self) -> Result<Vec<Capabilities>> {
-        self.catalogue
-            .get_or("providers".to_string(), async { self.provider().each_capabilities().await })
-            .await
+        self.provider().each_capabilities().await
     }
 
     /// One person's likes, from the database alone. Named favourites on the
     /// wire, which is what they were when they were the account's.
     pub async fn favourite_tracks(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
-        Ok(likes::list(&self.db_path, user_id, "track", cap)?
+        Ok(self
+            .db
+            .read(move |conn| likes::list(conn, user_id, "track", cap))
+            .await?
             .into_iter()
             .map(|(mut track, liked_at): (RemoteTrack, i64)| {
                 track.liked_at = Some(liked_at);
@@ -277,7 +282,10 @@ impl Hub {
     }
 
     pub async fn favourite_albums(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        Ok(likes::list(&self.db_path, user_id, "album", cap)?
+        Ok(self
+            .db
+            .read(move |conn| likes::list(conn, user_id, "album", cap))
+            .await?
             .into_iter()
             .map(|(mut album, liked_at): (RemoteAlbum, i64)| {
                 album.liked_at = Some(liked_at);
@@ -287,7 +295,10 @@ impl Hub {
     }
 
     pub async fn favourite_artists(&self, user_id: i64, cap: usize) -> Result<Vec<RemoteArtist>> {
-        Ok(likes::list(&self.db_path, user_id, "artist", cap)?
+        Ok(self
+            .db
+            .read(move |conn| likes::list(conn, user_id, "artist", cap))
+            .await?
             .into_iter()
             .map(|(mut artist, liked_at): (RemoteArtist, i64)| {
                 artist.liked_at = Some(liked_at);
@@ -298,42 +309,35 @@ impl Hub {
 
     pub async fn playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
         self.account
-            .get_or(format!("playlists:{cap}"), async {
-                self.session().await?.user_playlists(cap).await
+            .get_or(format!("playlists:{cap}"), {
+                let provider = self.provider();
+                async move { provider.user_playlists(cap).await }
             })
             .await
     }
 
     pub async fn playlist_tracks(&self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
         self.account
-            .get_or(format!("playlist_tracks:{playlist_id}:{cap}"), async {
-                self.session().await?.playlist_tracks(playlist_id, cap).await
+            .get_or(format!("playlist_tracks:{playlist_id}:{cap}"), {
+                let provider = self.provider();
+                async move { provider.playlist_tracks(playlist_id, cap).await }
             })
             .await
     }
 
+    // Albums, artists, discographies and similar artists are cached by the
+    // provider, in the catalogue cache it shares with the crawl and stages.
+
     pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>> {
-        self.catalogue
-            .get_or(format!("album_tracks:{album_id}"), async {
-                Ok(self.session().await?.album_tracks(album_id).await?.1)
-            })
-            .await
+        Ok(self.session().await?.album_tracks(album_id).await?.1)
     }
 
     pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
-        self.catalogue
-            .get_or(format!("artist:{artist_id}"), async {
-                self.session().await?.artist(artist_id).await
-            })
-            .await
+        self.session().await?.artist(artist_id).await
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.catalogue
-            .get_or(format!("artist_albums:{artist_id}:{cap}"), async {
-                self.session().await?.artist_albums(artist_id, cap).await
-            })
-            .await
+        self.session().await?.artist_albums(artist_id, cap).await
     }
 
     /// What the artists this user likes have put out in the last `days`,
@@ -350,7 +354,7 @@ impl Hub {
             .into_iter()
             .map(|artist| artist.id)
             .collect();
-        let albums = self.artists_recent(self.unblocked(artists)?, false).await;
+        let albums = self.artists_recent(self.unblocked(artists).await?, false).await;
         Ok(released_within(albums, days))
     }
 
@@ -359,7 +363,7 @@ impl Hub {
     /// unless `add_days` is 0, whatever came out in the last `add_days` and
     /// is not in the space yet is added to it.
     pub async fn check_releases(&self, add_days: u32) -> Result<()> {
-        let liked = likes::family(&mut db::connect(&self.db_path, Duration::from_secs(5))?)?;
+        let liked = self.db.read(|conn| likes::family(conn)).await?;
         let artists = liked
             .into_iter()
             .filter_map(|liked| match liked {
@@ -367,7 +371,7 @@ impl Hub {
                 _ => None,
             })
             .collect();
-        let artists = self.unblocked(artists)?;
+        let artists = self.unblocked(artists).await?;
         let checked = artists.len();
         let albums = self.artists_recent(artists, true).await;
         self.log.push(format!("checked {checked} liked artists for new releases"));
@@ -375,11 +379,21 @@ impl Hub {
             return Ok(());
         }
 
-        let mut conn = db::connect(&self.db_path, Duration::from_secs(5))?;
-        for album in released_within(albums, add_days) {
-            if db::album_known(&mut conn, &album.id)? {
-                continue;
-            }
+        // One trip off the async threads for all of them, not a blocking
+        // query an album on one.
+        let fresh = self
+            .db
+            .read(move |conn| {
+                let mut fresh = Vec::new();
+                for album in released_within(albums, add_days) {
+                    if !db::album_known(conn, &album.id)? {
+                        fresh.push(album);
+                    }
+                }
+                Ok(fresh)
+            })
+            .await?;
+        for album in fresh {
             self.log.push(format!("adding new release {} by {} to the space", album.title, album.artist));
             self.pipeline_add(Target::Album(album.id)).await?;
         }
@@ -399,9 +413,9 @@ impl Hub {
         }
     }
 
-    fn unblocked(&self, artists: Vec<i64>) -> Result<Vec<i64>> {
+    async fn unblocked(&self, artists: Vec<i64>) -> Result<Vec<i64>> {
         let blocked: std::collections::HashSet<i64> =
-            db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+            self.blocked_artists().await?.into_iter().map(|a| a.artist_id).collect();
         Ok(artists.into_iter().filter(|id| !blocked.contains(id)).collect())
     }
 
@@ -446,11 +460,7 @@ impl Hub {
     }
 
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
-        self.catalogue
-            .get_or(format!("similar_artists:{artist_id}:{limit}"), async {
-                self.session().await?.similar_artists(artist_id, limit).await
-            })
-            .await
+        self.session().await?.similar_artists(artist_id, limit).await
     }
 
     // -------------------------------------------------------------- playback
@@ -465,7 +475,7 @@ impl Hub {
     pub async fn export_playlist(&self, user: &str, name: &str, track_ids: &[i64]) -> Result<i64> {
         let name = format!("{user} · {name}");
         let id = self.session().await?.export_playlist(&name, track_ids).await?;
-        self.account.clear();
+        self.account.clear().await;
         Ok(id)
     }
 
@@ -487,11 +497,13 @@ impl Hub {
             }
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };
-        likes::record(&self.db_path, user_id, id, &item, likes::now()).map(|_| ())
+        let id = id.to_string();
+        self.db.write(move |conn| likes::record(conn, user_id, &id, &item, likes::now())).await.map(|_| ())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {
-        likes::forget(&self.db_path, user_id, kind, id)
+        let (kind, id) = (kind.to_string(), id.to_string());
+        self.db.write(move |conn| likes::forget(conn, user_id, &kind, &id)).await
     }
 
     // --------------------------------------------------------- text steering
@@ -593,16 +605,17 @@ impl Hub {
     // ---------------------------------------------------------------- hiding
 
     pub async fn blocked_artists(&self) -> Result<Vec<BlockedArtist>> {
-        db::blocked_artists(&self.db_path)
+        self.db.read(|conn| db::blocked_artists(conn)).await
     }
 
     pub async fn block_artist(&self, artist_id: i64, name: &str) -> Result<()> {
-        db::block_artist(&self.db_path, artist_id, name, None)?;
+        let name = name.to_string();
+        self.db.write(move |conn| db::block_artist(conn, artist_id, &name, None)).await?;
         self.refresh_blocked().await
     }
 
     pub async fn unblock_artist(&self, artist_id: i64) -> Result<()> {
-        db::unblock_artist(&self.db_path, artist_id)?;
+        self.db.write(move |conn| db::unblock_artist(conn, artist_id)).await?;
         self.refresh_blocked().await
     }
 
@@ -610,7 +623,7 @@ impl Hub {
     /// rebuilt.
     async fn refresh_blocked(&self) -> Result<()> {
         self.corpus.clear();
-        let blocked = db::blocked_artists(&self.db_path)?.into_iter().map(|a| a.artist_id).collect();
+        let blocked = self.blocked_artists().await?.into_iter().map(|a| a.artist_id).collect();
         let space = self.space.clone();
         tokio::task::spawn_blocking(move || space.set_blocked(blocked))
             .await
@@ -619,8 +632,7 @@ impl Hub {
 
     // ------------------------------------------- extending the catalogue
 
-    /// The counts as of at most `CORPUS_TTL` ago. Taken on a blocking
-    /// thread: they scan whole tables.
+    /// The counts as of at most `CORPUS_TTL` ago. They scan whole tables.
     pub async fn corpus(&self) -> Result<Corpus> {
         let mut held = self.corpus.held.lock().await;
         let epoch = self.corpus.epoch.load(Ordering::SeqCst);
@@ -629,10 +641,7 @@ impl Hub {
                 return Ok(corpus.clone());
             }
         }
-        let db_path = self.db_path.clone();
-        let corpus = tokio::task::spawn_blocking(move || stages::corpus(&db_path))
-            .await
-            .context("the worker thread panicked")??;
+        let corpus = self.db.read(|conn| stages::corpus(conn)).await?;
         *held = Some((Instant::now(), epoch, corpus.clone()));
         Ok(corpus)
     }

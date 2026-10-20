@@ -14,8 +14,6 @@ use anyhow::{Context, Result};
 use diesel::connection::SimpleConnection;
 use diesel::prelude::*;
 use serde::de::DeserializeOwned;
-use std::path::Path;
-use std::time::Duration;
 
 // Created by `AuthStore::ensure_schema`, with the users it points at.
 diesel::table! {
@@ -101,10 +99,6 @@ impl Liked {
     }
 }
 
-fn open(db_path: &Path) -> Result<SqliteConnection> {
-    crate::db::connect(db_path, Duration::from_secs(5))
-}
-
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -112,7 +106,7 @@ pub fn now() -> i64 {
 }
 
 /// Liking twice keeps the first time. Whether it was new.
-pub fn record(db_path: &Path, user_id: i64, ref_id: &str, item: &Liked, liked_at: i64) -> Result<usize> {
+pub fn record(conn: &mut SqliteConnection, user_id: i64, ref_id: &str, item: &Liked, liked_at: i64) -> Result<usize> {
     Ok(diesel::insert_or_ignore_into(likes::table)
         .values((
             likes::user_id.eq(user_id),
@@ -121,22 +115,22 @@ pub fn record(db_path: &Path, user_id: i64, ref_id: &str, item: &Liked, liked_at
             likes::item_json.eq(item.json()),
             likes::liked_at.eq(liked_at),
         ))
-        .execute(&mut open(db_path)?)?)
+        .execute(conn)?)
 }
 
-pub fn forget(db_path: &Path, user_id: i64, kind: &str, ref_id: &str) -> Result<()> {
+pub fn forget(conn: &mut SqliteConnection, user_id: i64, kind: &str, ref_id: &str) -> Result<()> {
     diesel::delete(
         likes::table
             .filter(likes::user_id.eq(user_id))
             .filter(likes::kind.eq(kind))
             .filter(likes::ref_id.eq(ref_id)),
     )
-    .execute(&mut open(db_path)?)?;
+    .execute(conn)?;
     Ok(())
 }
 
 /// One person's likes of one kind, newest first, with when each was liked.
-pub fn list<T: DeserializeOwned>(db_path: &Path, user_id: i64, kind: &str, cap: usize) -> Result<Vec<(T, i64)>> {
+pub fn list<T: DeserializeOwned>(conn: &mut SqliteConnection, user_id: i64, kind: &str, cap: usize) -> Result<Vec<(T, i64)>> {
     let rows = likes::table
         .filter(likes::user_id.eq(user_id))
         .filter(likes::kind.eq(kind))
@@ -144,7 +138,7 @@ pub fn list<T: DeserializeOwned>(db_path: &Path, user_id: i64, kind: &str, cap: 
         .order(likes::liked_at.desc())
         .limit(cap as i64)
         .select((likes::item_json.assume_not_null(), likes::liked_at))
-        .load::<(String, i64)>(&mut open(db_path)?)?;
+        .load::<(String, i64)>(conn)?;
     Ok(rows
         .into_iter()
         .filter_map(|(json, liked_at)| Some((serde_json::from_str(&json).ok()?, liked_at)))
@@ -169,6 +163,7 @@ pub fn family(conn: &mut SqliteConnection) -> Result<Vec<Liked>> {
 mod tests {
     use super::*;
     use crate::auth::AuthStore;
+    use std::time::Duration;
 
     fn track(id: i64, title: &str) -> Liked {
         Liked::Track(RemoteTrack { id, title: title.into(), ..Default::default() })
@@ -183,23 +178,23 @@ mod tests {
         let store = AuthStore::new(&db_path).unwrap();
         let sasha = store.add_user("sasha").unwrap();
         let sam = store.add_user("sam").unwrap();
+        let conn = &mut crate::db::connect(&db_path, Duration::from_secs(5)).unwrap();
 
         let (one, two) = (track(1, "one"), track(2, "two"));
-        record(&db_path, sasha.id, "1", &one, 10).unwrap();
-        record(&db_path, sasha.id, "1", &one, 20).unwrap();
-        record(&db_path, sasha.id, "2", &two, 30).unwrap();
-        record(&db_path, sam.id, "1", &one, 40).unwrap();
+        record(conn, sasha.id, "1", &one, 10).unwrap();
+        record(conn, sasha.id, "1", &one, 20).unwrap();
+        record(conn, sasha.id, "2", &two, 30).unwrap();
+        record(conn, sam.id, "1", &one, 40).unwrap();
         let album = Liked::Album(RemoteAlbum { id: "a".into(), ..Default::default() });
-        record(&db_path, sam.id, "a", &album, 50).unwrap();
+        record(conn, sam.id, "a", &album, 50).unwrap();
 
         // Newest first, first like kept, nobody else's.
-        let mine: Vec<(RemoteTrack, i64)> = list(&db_path, sasha.id, "track", 10).unwrap();
+        let mine: Vec<(RemoteTrack, i64)> = list(conn, sasha.id, "track", 10).unwrap();
         let mine: Vec<(&str, i64)> = mine.iter().map(|(track, at)| (track.title.as_str(), *at)).collect();
         assert_eq!(mine, vec![("two", 30), ("one", 10)]);
-        assert_eq!(list::<RemoteAlbum>(&db_path, sasha.id, "album", 10).unwrap().len(), 0);
+        assert_eq!(list::<RemoteAlbum>(conn, sasha.id, "album", 10).unwrap().len(), 0);
 
         // The crawl sees each item once, whoever liked it.
-        let conn = &mut open(&db_path).unwrap();
         let mut seeds: Vec<String> = family(conn)
             .unwrap()
             .into_iter()
@@ -212,9 +207,9 @@ mod tests {
         seeds.sort();
         assert_eq!(seeds, vec!["album:a", "track:1", "track:2"]);
 
-        forget(&db_path, sasha.id, "track", "1").unwrap();
-        assert_eq!(list::<RemoteTrack>(&db_path, sasha.id, "track", 10).unwrap().len(), 1);
-        assert_eq!(list::<RemoteTrack>(&db_path, sam.id, "track", 10).unwrap().len(), 1);
+        forget(conn, sasha.id, "track", "1").unwrap();
+        assert_eq!(list::<RemoteTrack>(conn, sasha.id, "track", 10).unwrap().len(), 1);
+        assert_eq!(list::<RemoteTrack>(conn, sam.id, "track", 10).unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -240,7 +235,7 @@ mod tests {
             artist_id: Some(7),
             ..Default::default()
         });
-        record(&db_path, sam.id, "1", &track, 10).unwrap();
+        record(conn, sam.id, "1", &track, 10).unwrap();
 
         let seeded = crate::crawl::seed(conn).unwrap();
         assert_eq!(seeded.tracks_added, 1);

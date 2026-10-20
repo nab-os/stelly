@@ -475,9 +475,15 @@ fn Shell() -> Element {
                 }
             }
             let stamp = space.info.peek().stamp.clone();
-            if !stamp.is_empty() && points_stamp().as_deref() != Some(stamp.as_str()) {
-                let fetched = tokio::try_join!(backend().space_points(false), backend().space_points(true));
-                if let Ok((data, meta)) = fetched {
+            let (held, binary) = held_points().unwrap_or_default();
+            if !stamp.is_empty() && held != stamp {
+                let fetched = tokio::try_join!(
+                    backend().space_points(&held),
+                    backend().space_meta(&held, binary)
+                );
+                // Either body still current means the stamp moved back to
+                // the held points: they stay, as on a failure.
+                if let Ok((Some(data), Some(meta))) = fetched {
                     // Ten megabytes, written off the UI thread, and before
                     // they are held: a second request for a body reads it
                     // back from here.
@@ -771,7 +777,9 @@ fn Shell() -> Element {
         let mut held = POINTS.lock().unwrap_or_else(|e| e.into_inner());
 
         let (content_type, body) = if path.ends_with("/meta") {
-            ("application/json", serve(held.as_mut(), |points| &mut points.meta, POINTS_META_CACHE, EMPTY_META.as_bytes()))
+            let body = serve(held.as_mut(), |points| &mut points.meta, POINTS_META_CACHE, EMPTY_META.as_bytes());
+            let binary = crate::api::is_binary_map_meta(&body);
+            (if binary { "application/octet-stream" } else { "application/json" }, body)
         } else {
             ("application/octet-stream", serve(held.as_mut(), |points| &mut points.data, POINTS_CACHE, &[]))
         };
@@ -1048,6 +1056,7 @@ struct CachedSpace {
 
 const SPACE_CACHE: &str = "space.json";
 const POINTS_CACHE: &str = "points.bin";
+/// `map::meta_binary`'s, or JSON from a server before it. Named for the JSON.
 const POINTS_META_CACHE: &str = "points-meta.json";
 const POINTS_STAMP_CACHE: &str = "points.stamp";
 const ME_CACHE: &str = "me.json";
@@ -1064,11 +1073,15 @@ struct Points {
     stamp: String,
     data: Option<Vec<u8>>,
     meta: Option<Vec<u8>>,
+    /// Whether `meta` is `map::meta_binary`'s rather than JSON, which a
+    /// server from before it sends. Kept for once `meta` is handed over.
+    binary_meta: bool,
 }
 
 impl Points {
     fn new(stamp: String, data: Vec<u8>, meta: Vec<u8>) -> Self {
-        Points { stamp, data: Some(data), meta: Some(meta) }
+        let binary_meta = crate::api::is_binary_map_meta(&meta);
+        Points { stamp, data: Some(data), meta: Some(meta), binary_meta }
     }
 }
 
@@ -1122,11 +1135,16 @@ async fn show_points() {
 }
 
 fn points_stamp() -> Option<String> {
+    held_points().map(|(stamp, _)| stamp)
+}
+
+/// The held points' stamp, and whether their meta is binary.
+fn held_points() -> Option<(String, bool)> {
     POINTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .map(|points| points.stamp.clone())
+        .map(|points| (points.stamp.clone(), points.binary_meta))
 }
 
 /// Ask what the space looks like now, and bring the index down if it moved.
@@ -1142,16 +1160,21 @@ async fn refresh_space(
     let info = backend().space_info().await?;
     let previous = space.info.peek().stamp.clone();
 
-    if info.stamp != space.index.peek().stamp {
+    let held = space.index.peek().stamp.clone();
+    if info.stamp != held {
+        // `None` is the held index still being current, the stamp having
+        // moved back to it since `info` was asked.
         let index = if info.stamp.is_empty() {
-            SpaceIndex::default()
+            Some(SpaceIndex::default())
         } else {
-            backend().space_index().await?
+            backend().space_index(&held).await?
         };
-        if selected.peek().is_some_and(|id| !index.ids.contains(&id)) {
-            selected.set(None);
+        if let Some(index) = index {
+            if selected.peek().is_some_and(|id| !index.ids.contains(&id)) {
+                selected.set(None);
+            }
+            space.index.set(Rc::new(index));
         }
-        space.index.set(Rc::new(index));
     }
 
     if info.stamp != previous {

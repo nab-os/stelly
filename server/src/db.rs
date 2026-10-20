@@ -10,8 +10,10 @@ use diesel::dsl::count;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Nullable, SingleValue};
 use diesel::upsert::excluded;
-use std::path::Path;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use stelly_core::api::BlockedArtist;
 
 /// The schema, embedded at compile time.
@@ -98,14 +100,195 @@ pub fn connect(db_path: &Path, busy: Duration) -> Result<SqliteConnection> {
     Ok(conn)
 }
 
+// ------------------------------------------------------------ for requests
+//
+// A request used to open its own connection, paying for the open, its
+// pragmas and every statement's preparation each time, and many then ran
+// on an async worker, which a write waiting on a stage's lock held for
+// seconds. Requests go through `Db` instead.
+
+/// Readers kept open between requests. More are opened when more are asked
+/// for at once, and closed after.
+const READERS_KEPT: usize = 8;
+
+/// How long a request's read or write waits for a lock before failing. A
+/// reader under WAL waits on nothing but a checkpoint's rare exclusive moment.
+const REQUEST_WAIT: Duration = Duration::from_secs(5);
+
+/// Per connection, on top of `connect`'s: reads straight from the mapped
+/// file rather than copied into SQLite's cache, a larger cache for what is
+/// not mapped, and sorts and temporary tables kept in memory.
+const TUNING: &str = "PRAGMA mmap_size = 268435456; PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;";
+
+/// The database as requests use it: a few readers kept open, and one writer,
+/// so request-side writes queue here rather than on SQLite's lock. Every call
+/// runs off the async workers.
+pub struct Db {
+    path: PathBuf,
+    readers: Mutex<Vec<SqliteConnection>>,
+    /// With how long it waits for the lock as last set.
+    writer: Mutex<Option<(SqliteConnection, Duration)>>,
+}
+
+impl Db {
+    /// The one for `path`, shared by everything in the process: one writer
+    /// per file, and one set of readers whoever asks.
+    pub fn shared(path: &Path) -> Arc<Db> {
+        static ALL: OnceLock<Mutex<HashMap<PathBuf, Arc<Db>>>> = OnceLock::new();
+        let mut all = ALL.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
+        all.entry(path.to_path_buf())
+            .or_insert_with(|| {
+                Arc::new(Db {
+                    path: path.to_path_buf(),
+                    readers: Mutex::default(),
+                    writer: Mutex::default(),
+                })
+            })
+            .clone()
+    }
+
+    /// `f` on a reader, on a blocking thread.
+    pub async fn read<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut SqliteConnection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || db.read_here(f))
+            .await
+            .context("the database thread panicked")?
+    }
+
+    /// `f` on the writer, on a blocking thread, once the writes before it
+    /// are done.
+    pub async fn write<T: Send + 'static>(
+        self: &Arc<Self>,
+        f: impl FnOnce(&mut SqliteConnection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.write_within(REQUEST_WAIT, f).await
+    }
+
+    /// `write`, waiting up to `wait` for another connection's lock.
+    pub async fn write_within<T: Send + 'static>(
+        self: &Arc<Self>,
+        wait: Duration,
+        f: impl FnOnce(&mut SqliteConnection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || db.write_here_within(wait, f))
+            .await
+            .context("the database thread panicked")?
+    }
+
+    /// `read` on this thread, for callers already off the async workers.
+    pub fn read_here<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
+        let kept = self.readers.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let mut conn = match kept {
+            Some(conn) => conn,
+            None => {
+                let mut conn = connect(&self.path, REQUEST_WAIT)?;
+                // Nothing written by mistake through a reader.
+                conn.batch_execute(&format!("{TUNING} PRAGMA query_only = ON;"))?;
+                conn
+            }
+        };
+        let out = f(&mut conn);
+        let mut readers = self.readers.lock().unwrap_or_else(|e| e.into_inner());
+        if readers.len() < READERS_KEPT {
+            readers.push(conn);
+        }
+        out
+    }
+
+    /// `write` on this thread, for callers already off the async workers.
+    pub fn write_here<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
+        self.write_here_within(REQUEST_WAIT, f)
+    }
+
+    /// `write_here`, waiting up to `wait` for another connection's lock.
+    pub fn write_here_within<T>(&self, wait: Duration, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if writer.is_none() {
+            let mut conn = open_for_write_within(&self.path, wait)?;
+            conn.batch_execute(TUNING)?;
+            *writer = Some((conn, wait));
+        }
+        let (conn, waits) = writer.as_mut().expect("opened just above");
+        if *waits != wait {
+            conn.batch_execute(&format!("PRAGMA busy_timeout = {};", wait.as_millis()))?;
+            *waits = wait;
+        }
+        f(conn)
+    }
+}
+
+// ------------------------------------------------------------ for stages
+
+/// How long a stage holds the write lock at a time, at most about.
+const CHUNK: Duration = Duration::from_millis(50);
+
+/// A stage's writes, committed every `CHUNK` rather than all at once: a
+/// request's write waits behind one chunk, not the whole stage. Each piece
+/// of work must leave the database whole on its own, since a stop between
+/// two chunks keeps the first. A chunk not committed is rolled back when
+/// this is dropped.
+pub struct Chunked<'c> {
+    conn: &'c mut SqliteConnection,
+    since: Option<Instant>,
+}
+
+impl<'c> Chunked<'c> {
+    pub fn new(conn: &'c mut SqliteConnection) -> Self {
+        Self { conn, since: None }
+    }
+
+    /// The connection, in a transaction holding the write lock: the one
+    /// open, or a new one once that has had its time.
+    pub fn conn(&mut self) -> Result<&mut SqliteConnection> {
+        if self.since.is_some_and(|since| since.elapsed() >= CHUNK) {
+            self.commit()?;
+        }
+        if self.since.is_none() {
+            self.conn.batch_execute("BEGIN IMMEDIATE")?;
+            self.since = Some(Instant::now());
+        }
+        Ok(self.conn)
+    }
+
+    /// Commit what is open.
+    pub fn finish(mut self) -> Result<()> {
+        self.commit()
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        if self.since.is_some() {
+            self.conn.batch_execute("COMMIT")?;
+            self.since = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Chunked<'_> {
+    fn drop(&mut self) {
+        if self.since.is_some() {
+            let _ = self.conn.batch_execute("ROLLBACK");
+        }
+    }
+}
+
 /// Open the database for writing, with the schema applied.
 pub fn open_for_write(db_path: &Path) -> Result<SqliteConnection> {
+    // A stage may be writing while a request reads, or the other way round.
+    open_for_write_within(db_path, Duration::from_secs(30))
+}
+
+/// `open_for_write`, waiting up to `busy` for a lock.
+fn open_for_write_within(db_path: &Path, busy: Duration) -> Result<SqliteConnection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    // A stage may be writing while a request reads, or the other way round.
-    let mut conn = connect(db_path, Duration::from_secs(30))?;
+    let mut conn = connect(db_path, busy)?;
     ensure_schema(&mut conn)?;
     Ok(conn)
 }
@@ -125,14 +308,7 @@ pub fn not_blocked() -> _ {
 
 /// Hide an artist everywhere, and drop them from the frontier so an in-flight
 /// crawl stops expanding them.
-pub fn block_artist(
-    db_path: &Path,
-    artist_id: i64,
-    name: &str,
-    reason: Option<&str>,
-) -> Result<()> {
-    let conn = &mut connect(db_path, Duration::from_secs(5))?;
-
+pub fn block_artist(conn: &mut SqliteConnection, artist_id: i64, name: &str, reason: Option<&str>) -> Result<()> {
     diesel::insert_into(blocked_artists::table)
         .values((
             blocked_artists::artist_id.eq(artist_id),
@@ -159,8 +335,7 @@ pub fn block_artist(
     Ok(())
 }
 
-pub fn unblock_artist(db_path: &Path, artist_id: i64) -> Result<()> {
-    let conn = &mut connect(db_path, Duration::from_secs(5))?;
+pub fn unblock_artist(conn: &mut SqliteConnection, artist_id: i64) -> Result<()> {
     diesel::delete(blocked_artists::table.find(artist_id)).execute(conn)?;
     Ok(())
 }
@@ -181,8 +356,7 @@ pub fn album_known(conn: &mut SqliteConnection, album_id: &str) -> Result<bool> 
     Ok(analysed || failed)
 }
 
-pub fn blocked_artists(db_path: &Path) -> Result<Vec<BlockedArtist>> {
-    let conn = &mut connect(db_path, Duration::from_secs(5))?;
+pub fn blocked_artists(conn: &mut SqliteConnection) -> Result<Vec<BlockedArtist>> {
     let mut rows: Vec<BlockedArtist> = blocked_artists::table
         .select((blocked_artists::artist_id, blocked_artists::name, blocked_artists::reason))
         .load::<(i64, Option<String>, Option<String>)>(conn)?
@@ -365,15 +539,42 @@ mod tests {
         assert_eq!((legacy.as_deref(), meta, image), (Some("{\"id\":\"a1\"}"), None, None));
         assert!(crate::legacy::pending(conn).unwrap());
         // Not listed until imported, and new likes need no legacy at all.
-        let listed: Vec<(crate::provider::RemoteTrack, i64)> = crate::likes::list(&db_path, 1, "track", 10).unwrap();
+        let listed: Vec<(crate::provider::RemoteTrack, i64)> = crate::likes::list(conn, 1, "track", 10).unwrap();
         assert!(listed.is_empty());
         let track = crate::likes::Liked::Track(RemoteTrack { id: 6, ..Default::default() });
-        crate::likes::record(&db_path, 1, "6", &track, 20).unwrap();
-        assert_eq!(crate::likes::list::<RemoteTrack>(&db_path, 1, "track", 10).unwrap().len(), 1);
+        crate::likes::record(conn, 1, "6", &track, 20).unwrap();
+        assert_eq!(crate::likes::list::<RemoteTrack>(conn, 1, "track", 10).unwrap().len(), 1);
 
         // And all of it again is nothing.
         ensure_schema(conn).unwrap();
         AuthStore::new(&db_path).unwrap();
+    }
+
+    /// A stage stopped halfway keeps the chunks it committed, and only them;
+    /// another connection writes between two.
+    #[test]
+    fn a_stage_commits_as_it_goes() {
+        let dir = scratch("chunked");
+        let db_path = dir.join("stelly.db");
+        let conn = &mut open_for_write(&db_path).unwrap();
+        let other = &mut connect(&db_path, Duration::from_secs(1)).unwrap();
+        let queued = |conn: &mut SqliteConnection| frontier::table.count().get_result::<i64>(conn).unwrap();
+        {
+            let mut chunks = Chunked::new(conn);
+            crawl::enqueue(chunks.conn().unwrap(), "artist", "1", 0).unwrap();
+            std::thread::sleep(CHUNK);
+            crawl::enqueue(chunks.conn().unwrap(), "artist", "2", 0).unwrap();
+            assert_eq!(queued(other), 1);
+            // The lock is held only for the open chunk.
+            assert!(crawl::enqueue(other, "artist", "3", 0).is_err());
+        }
+        assert_eq!(queued(conn), 1);
+        crawl::enqueue(other, "artist", "3", 0).unwrap();
+        let mut chunks = Chunked::new(conn);
+        crawl::enqueue(chunks.conn().unwrap(), "artist", "4", 0).unwrap();
+        chunks.finish().unwrap();
+        assert_eq!(queued(other), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Catalogued is not enough to skip an album: only analysed or given up on.
@@ -483,9 +684,9 @@ mod tests {
         assert_eq!(resolve_artist(conn, "7").unwrap()[0].name, "Seven");
         assert!(resolve_artist(conn, "nobody").unwrap().is_empty());
 
-        block_artist(&db_path, 7, "Seven", Some("too loud")).unwrap();
-        block_artist(&db_path, 7, "Seven", None).unwrap();
-        let blocked = blocked_artists(&db_path).unwrap();
+        block_artist(conn, 7, "Seven", Some("too loud")).unwrap();
+        block_artist(conn, 7, "Seven", None).unwrap();
+        let blocked = blocked_artists(conn).unwrap();
         assert_eq!(blocked.len(), 1);
         assert_eq!(blocked[0].reason.as_deref(), Some("too loud"));
         let queued: i64 = frontier::table.count().get_result(conn).unwrap();
@@ -497,7 +698,7 @@ mod tests {
         analysed(conn, 1);
         analysed(conn, 2);
         assert_eq!(analyse::pending_count(conn).unwrap(), 0);
-        let corpus = stages::corpus(&db_path).unwrap();
+        let corpus = stages::corpus(conn).unwrap();
         assert_eq!((corpus.tracks, corpus.analysed, corpus.buildable), (2, 2, 1));
 
         let purged = purge(conn, 7).unwrap();
@@ -511,8 +712,8 @@ mod tests {
         assert_eq!(loaded.clap_dims, 512);
         assert!(loaded.blocked_artists().contains(&7));
 
-        unblock_artist(&db_path, 7).unwrap();
-        assert!(blocked_artists(&db_path).unwrap().is_empty());
+        unblock_artist(conn, 7).unwrap();
+        assert!(blocked_artists(conn).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -5,10 +5,13 @@
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// The space format this build understands, and the one the server writes.
 ///
@@ -52,7 +55,9 @@ pub struct Manifest {
 pub struct Space {
     pub manifest: Manifest,
     mmap: Mmap,
-    pub index_of: HashMap<i64, usize>,
+    /// Shared with every navigator over this space, rather than copied into
+    /// each.
+    pub index_of: Arc<HashMap<i64, usize>>,
 }
 
 impl Space {
@@ -97,12 +102,14 @@ impl Space {
             manifest.n_dims
         );
 
-        let index_of = manifest
-            .track_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i))
-            .collect();
+        let index_of = Arc::new(
+            manifest
+                .track_ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i))
+                .collect(),
+        );
 
         Ok(Self {
             manifest,
@@ -212,20 +219,176 @@ impl WeightedSpace {
     /// The same, into a caller-owned buffer, the kNN build runs this once
     /// per track and a fresh vector each time is pure churn. The arithmetic is
     /// deliberately identical to `similarities`: a different summation order
-    /// can reorder near-ties between the two.
+    /// can reorder near-ties between the two. Every product in the space goes
+    /// through `dot` or `dots` for the same reason, and splitting a scan
+    /// changes no sum, only which thread works it out.
     pub fn similarities_into(&self, query: &[f32], out: &mut [f32]) {
-        let norm = query
-            .iter()
-            .map(|v| v * v)
-            .sum::<f32>()
-            .sqrt()
-            .max(1e-9);
-
-        for (i, slot) in out.iter_mut().enumerate().take(self.n_tracks) {
-            let row = self.row(i);
-            *slot = row.iter().zip(query).map(|(a, b)| a * b).sum::<f32>() / norm;
+        let norm = dot(query, query).sqrt().max(1e-9);
+        let n = self.n_tracks.min(out.len());
+        let out = &mut out[..n];
+        par_dots(query, out, |i| self.row(i));
+        for slot in out {
+            *slot /= norm;
         }
     }
+}
+
+/// How many running sums a dot product keeps. One sum is a chain of adds,
+/// each waiting on the last; eight independent ones fill a vector register
+/// and let the adds overlap.
+const LANES: usize = 8;
+
+/// `a · b`, summed in `LANES` lanes, the lanes folded in a fixed order, then
+/// whatever is left over one at a time.
+///
+/// No fused multiply-add, on purpose: every product is rounded before it is
+/// added, whatever the processor, so a server on an older CPU, or an ARM one,
+/// ranks exactly as this one does.
+#[inline(always)]
+fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    let (a, rest_a) = a[..n].as_chunks::<LANES>();
+    let (b, rest_b) = b[..n].as_chunks::<LANES>();
+    let mut acc = [0.0f32; LANES];
+    for (x, y) in a.iter().zip(b) {
+        for k in 0..LANES {
+            acc[k] += x[k] * y[k];
+        }
+    }
+    let mut sum = ((acc[0] + acc[4]) + (acc[2] + acc[6])) + ((acc[1] + acc[5]) + (acc[3] + acc[7]));
+    for (x, y) in rest_a.iter().zip(rest_b) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// `out[i] = query · row(i)` for every slot of `out`.
+#[inline(always)]
+fn dots_lanes<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]) {
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = dot_lanes(row(i), query);
+    }
+}
+
+/// The same loop built for AVX2, picked at run time: the server's CPU is not
+/// known when it is compiled.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn dots_avx2<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]) {
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = dot_avx2(row(i), query);
+    }
+}
+
+/// `dot_lanes` in one AVX register: the same lanes, folded in the same order,
+/// so the same sums to the last bit. Written out by hand, as left to itself
+/// the compiler splits the lanes over four half-empty registers.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = a.len().min(b.len());
+    let (a, rest_a) = a[..n].as_chunks::<LANES>();
+    let (b, rest_b) = b[..n].as_chunks::<LANES>();
+    let mut acc = _mm256_setzero_ps();
+    for (x, y) in a.iter().zip(b) {
+        // SAFETY: each chunk is LANES = 8 floats, one unaligned load.
+        let (x, y) = unsafe { (_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr())) };
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(x, y));
+    }
+    // Lane k with lane k + 4, then k with k + 2, then the two left.
+    let half = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps::<1>(acc));
+    let quarter = _mm_add_ps(half, _mm_movehl_ps(half, half));
+    let mut sum = _mm_cvtss_f32(_mm_add_ss(quarter, _mm_movehdup_ps(quarter)));
+    for (x, y) in rest_a.iter().zip(rest_b) {
+        sum += x * y;
+    }
+    sum
+}
+
+/// One dot product. For a scan over many rows, `dots` checks the CPU once
+/// rather than per row.
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has just been seen to support AVX2.
+        return unsafe { dot_avx2(a, b) };
+    }
+    dot_lanes(a, b)
+}
+
+/// `out[i] = query · row(i)` for every slot of `out`, summed as `dot` sums.
+pub fn dots<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has just been seen to support AVX2.
+        return unsafe { dots_avx2(query, out, row) };
+    }
+    dots_lanes(query, out, row)
+}
+
+/// The same, shared out over `pool` when the scan is big enough to be
+/// worth waking it for, a space past about fifty thousand tracks, and no
+/// other request is running. Otherwise on the caller's thread.
+///
+/// Requests running together already keep the cores busy between them, and
+/// splitting their scans as well only crowds the cores: with sixteen
+/// running, splitting a scan whenever no other was mid-scan still made
+/// them slower. Alone, a split scan has every core.
+pub fn par_dots<'a>(query: &[f32], out: &mut [f32], row: impl Fn(usize) -> &'a [f32] + Sync) {
+    if out.len() * query.len() < PARALLEL_FROM || REQUESTS.load(Ordering::Relaxed) > 1 {
+        return dots(query, out, row);
+    }
+    let rows = (CHUNK / query.len().max(1)).max(1);
+    pool().install(|| {
+        out.par_chunks_mut(rows)
+            .enumerate()
+            .for_each(|(chunk, out)| dots(query, out, |i| row(chunk * rows + i)));
+    });
+}
+
+/// Requests working through the space right now.
+static REQUESTS: AtomicUsize = AtomicUsize::new(0);
+
+/// One request working through the space, counted in `REQUESTS` while it
+/// lasts, so that `par_dots` can tell whether it is alone.
+pub struct Request(());
+
+impl Request {
+    pub fn start() -> Self {
+        REQUESTS.fetch_add(1, Ordering::Relaxed);
+        Self(())
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        REQUESTS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Floats a scan reads before it is worth splitting: below this, waking
+/// the pool costs about what it saves.
+const PARALLEL_FROM: usize = 4 << 20;
+
+/// Floats each piece of a split scan reads, 2 MB.
+const CHUNK: usize = 1 << 19;
+
+/// The threads every request's scans share, started once. Every core but
+/// one, as the pipeline's stages take, so the server's runtime always has
+/// one to answer on; however many requests run at once, they divide these
+/// rather than each starting its own.
+pub fn pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(1).max(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("scan-{i}"))
+            .build()
+            .expect("starting the scan threads")
+    })
 }
 
 /// Indices of the `k` highest scores, ordered as `argsort_desc` would.
@@ -329,6 +492,24 @@ impl Iterator for Ranked<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AVX2 build and the portable one sum the same lanes in the same
+    /// order: the same bits, at every length, remainders included.
+    #[test]
+    fn dot_is_the_same_on_every_processor() {
+        let mut x = 0x2545f491u32;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as f32 / u32::MAX as f32 - 0.5
+        };
+        for n in (0..100).chain([512, 517]) {
+            let a: Vec<f32> = (0..n).map(|_| next()).collect();
+            let b: Vec<f32> = (0..n).map(|_| next()).collect();
+            assert_eq!(dot(&a, &b).to_bits(), dot_lanes(&a, &b).to_bits(), "length {n}");
+        }
+    }
 
     /// Read to the end from one row, across several widenings, it is the full
     /// sort: ties in index order, minus infinity last.

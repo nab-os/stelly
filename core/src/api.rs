@@ -303,6 +303,22 @@ pub struct SpaceIndex {
     pub artists: Vec<i64>,
 }
 
+/// The `ETag` of one of the space's cached bodies (`index`, `points`, `meta`,
+/// `meta-binary`) at a stamp. A client holding that body sends it back as
+/// `If-None-Match` and is told 304 rather than sent it again.
+pub fn space_tag(stamp: &str, body: &str) -> String {
+    format!("\"{stamp}/{body}\"")
+}
+
+/// What starts the map's meta in binary, `map::meta_binary`. JSON cannot
+/// start with a zero byte, so a client holding either can tell which it holds.
+pub const MAP_META_MAGIC: [u8; 4] = *b"\0mm1";
+
+/// Whether the map's meta is `map::meta_binary`'s rather than JSON.
+pub fn is_binary_map_meta(bytes: &[u8]) -> bool {
+    bytes.starts_with(&MAP_META_MAGIC)
+}
+
 /// The space's own tracks matching a phrase, and the albums and artists
 /// behind them, for a search narrowed to the space.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

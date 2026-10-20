@@ -2,9 +2,11 @@
 
 pub use crate::api::Step;
 use crate::db::Catalog;
-use crate::space::{ranked, Space, WeightedSpace};
+use crate::space::{dot, dots, pool, ranked, Request, WeightedSpace};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -40,21 +42,16 @@ const CORRIDOR_WIDTH: usize = 384;
 /// first one taken is almost always in here. More are sorted when it is not.
 const RANKED_FIRST: usize = 64;
 
+/// One request's view of the space: its weighting, and the catalogue as it
+/// stood when the request came in. Every part is shared, so making one costs
+/// three reference counts, and nothing in it changes under a walk.
 pub struct Navigator {
-    pub space: WeightedSpace,
-    pub catalog: Catalog,
-    pub index_of: HashMap<i64, usize>,
+    pub space: Arc<WeightedSpace>,
+    pub catalog: Arc<Catalog>,
+    pub index_of: Arc<HashMap<i64, usize>>,
 }
 
 impl Navigator {
-    pub fn new(space: &Space, weights: &HashMap<String, f32>, catalog: Catalog) -> Self {
-        Self {
-            space: space.weighted(weights),
-            catalog,
-            index_of: space.index_of.clone(),
-        }
-    }
-
     /// Push blocked rows out of reach of any argsort over similarities.
     /// Cheaper than filtering afterwards, and matches `exclude_same_artist`.
     fn mask_blocked(&self, sims: &mut [f32]) {
@@ -85,6 +82,7 @@ impl Navigator {
     // ------------------------------------------------------------ primitives
 
     pub fn neighbours(&self, track_id: i64, k: usize, exclude_same_artist: bool) -> Vec<Step> {
+        let _request = Request::start();
         let Some(&i) = self.index_of.get(&track_id) else {
             return Vec::new();
         };
@@ -135,6 +133,7 @@ impl Navigator {
         artist_penalty: f32,
         c: &Constraints,
     ) -> Vec<Step> {
+        let _request = Request::start();
         let Some(&start) = self.index_of.get(&from_id) else {
             return Vec::new();
         };
@@ -253,6 +252,7 @@ impl Navigator {
         steps: usize,
         c: &Constraints,
     ) -> Vec<Step> {
+        let _request = Request::start();
         let (Some(&a), Some(&b)) = (self.index_of.get(&from_id), self.index_of.get(&to_id)) else {
             return Vec::new();
         };
@@ -296,18 +296,27 @@ impl Navigator {
         let d = self.space.n_dims;
         let (start, end) = (self.space.row(a), self.space.row(b));
         let mut rows: HashSet<usize> = HashSet::from([a, b]);
-        let mut sims = vec![0.0f32; self.space.n_tracks];
-        for step in 0..=CORRIDOR_WAYPOINTS {
-            let t = step as f32 / CORRIDOR_WAYPOINTS as f32;
-            let waypoint: Vec<f32> = (0..d).map(|k| (1.0 - t) * start[k] + t * end[k]).collect();
-            self.space.similarities_into(&waypoint, &mut sims);
-            self.mask_blocked(&mut sims);
-            rows.extend(
-                crate::space::top_k(&sims, width)
-                    .into_iter()
-                    .filter(|&j| sims[j].is_finite()),
-            );
-        }
+        // The waypoints are independent, so they are looked around at once.
+        // The rows come out the same in any order: they are sorted below.
+        let around: Vec<Vec<usize>> = pool().install(|| {
+            (0..=CORRIDOR_WAYPOINTS)
+                .into_par_iter()
+                .map_init(
+                    || vec![0.0f32; self.space.n_tracks],
+                    |sims, step| {
+                        let t = step as f32 / CORRIDOR_WAYPOINTS as f32;
+                        let waypoint: Vec<f32> = (0..d).map(|k| (1.0 - t) * start[k] + t * end[k]).collect();
+                        self.space.similarities_into(&waypoint, sims);
+                        self.mask_blocked(sims);
+                        crate::space::top_k(sims, width)
+                            .into_iter()
+                            .filter(|&j| sims[j].is_finite())
+                            .collect()
+                    },
+                )
+                .collect()
+        });
+        rows.extend(around.into_iter().flatten());
         let twins: Vec<usize> = rows.iter().flat_map(|&i| self.catalog.twins(i).iter().copied()).collect();
         rows.extend(twins.into_iter().filter(|&j| !self.catalog.is_blocked(j)));
         let mut rows: Vec<usize> = rows.into_iter().collect();
@@ -316,34 +325,25 @@ impl Navigator {
     }
 
     /// kNN graph over `rows` alone, keyed by space row, edges weighted by
-    /// cosine distance. Rows split across cores, one buffer per worker.
+    /// cosine distance. Rows shared out over the scan threads, one buffer per
+    /// worker.
     fn knn_among(&self, rows: &[usize], k: usize) -> HashMap<usize, Vec<(usize, f32)>> {
         let m = rows.len();
         let mut graph: Vec<Vec<(usize, f32)>> = vec![Vec::new(); m];
-        let threads = std::thread::available_parallelism()
-            .map_or(1, |v| v.get())
-            .min(m.max(1));
-        let chunk = m.div_ceil(threads.max(1)).max(1);
-
-        std::thread::scope(|scope| {
-            for (index, slice) in graph.chunks_mut(chunk).enumerate() {
-                scope.spawn(move || {
-                    let mut sims = vec![0.0f32; m];
-                    for (offset, edges) in slice.iter_mut().enumerate() {
-                        let i = index * chunk + offset;
-                        let row = self.space.row(rows[i]);
-                        for (s, &j) in sims.iter_mut().zip(rows) {
-                            *s = dot(row, self.space.row(j));
-                        }
-                        sims[i] = f32::NEG_INFINITY;
-                        *edges = crate::space::top_k(&sims, k)
-                            .into_iter()
-                            .filter(|&j| sims[j].is_finite())
-                            .map(|j| (rows[j], 1.0 - sims[j]))
-                            .collect();
-                    }
-                });
-            }
+        pool().install(|| {
+            graph.par_iter_mut().enumerate().for_each_init(
+                || vec![0.0f32; m],
+                |sims, (i, edges)| {
+                    let row = self.space.row(rows[i]);
+                    dots(row, sims, |j| self.space.row(rows[j]));
+                    sims[i] = f32::NEG_INFINITY;
+                    *edges = crate::space::top_k(sims, k)
+                        .into_iter()
+                        .filter(|&j| sims[j].is_finite())
+                        .map(|j| (rows[j], 1.0 - sims[j]))
+                        .collect();
+                },
+            );
         });
 
         rows.iter().copied().zip(graph).collect()
@@ -391,7 +391,7 @@ impl Navigator {
         for a in 0..n {
             for b in (a + 1)..n {
                 let (x, y) = (self.space.row(rows[a]), self.space.row(rows[b]));
-                let d = 1.0 - x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+                let d = 1.0 - dot(x, y);
                 dist[a * n + b] = d;
                 dist[b * n + a] = d;
             }
@@ -458,6 +458,7 @@ impl Navigator {
     /// looks through twice the rows, and would overrun it. The even path of
     /// `steps` stands in then, rather than nothing.
     pub fn graph_path(&self, from_id: i64, to_id: i64, k: usize, steps: usize, budget: Duration) -> Vec<Step> {
+        let _request = Request::start();
         let (Some(&start), Some(&goal)) = (self.index_of.get(&from_id), self.index_of.get(&to_id))
         else {
             return Vec::new();
@@ -558,15 +559,11 @@ impl Navigator {
             return None;
         }
 
-        let mut sims: Vec<f32> = (0..self.catalog.len())
-            .map(|i| {
-                matrix[i * dims..(i + 1) * dims]
-                    .iter()
-                    .zip(clap)
-                    .map(|(a, b)| a * b)
-                    .sum()
-            })
-            .collect();
+        // On this thread even when it is alone: the scan is bound by memory,
+        // not the cores, so splitting it gains little, and sixteen moods at
+        // once took twice as long split.
+        let mut sims = vec![0.0f32; self.catalog.len()];
+        dots(clap, &mut sims, |i| &matrix[i * dims..(i + 1) * dims]);
         self.mask_blocked(&mut sims);
         Some(sims)
     }
@@ -614,6 +611,7 @@ impl Navigator {
         k: usize,
         c: &Constraints,
     ) -> Vec<Step> {
+        let _request = Request::start();
         let Some(&start_index) = self.index_of.get(&from_id) else {
             return Vec::new();
         };
@@ -664,6 +662,7 @@ impl Navigator {
         artist_penalty: f32,
         c: &Constraints,
     ) -> Vec<Step> {
+        let _request = Request::start();
         let Some(sims) = self.text_similarities(clap) else {
             return Vec::new();
         };
@@ -758,16 +757,13 @@ pub fn text_baseline(clap: &[f32], dims: usize, phrases: &[Vec<f32>]) -> Vec<(f3
             if rows.is_empty() || phrase.len() != dims {
                 return (0.0, 1.0);
             }
-            let sims: Vec<f32> = rows.iter().map(|row| dot(row, phrase)).collect();
+            let mut sims = vec![0.0f32; rows.len()];
+            dots(phrase, &mut sims, |i| rows[i]);
             let mean = sims.iter().sum::<f32>() / sims.len() as f32;
             let variance = sims.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / sims.len() as f32;
             (mean, variance.sqrt().max(1e-6))
         })
         .collect()
-}
-
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Min-heap entry for Dijkstra. BinaryHeap is a max-heap, so the ordering is
@@ -826,15 +822,20 @@ mod tests {
         }
 
         Navigator {
-            space: WeightedSpace {
+            space: Arc::new(WeightedSpace {
                 unit,
                 n_tracks: angles_deg.len(),
                 n_dims: 2,
                 scale: vec![1.0, 1.0],
-            },
-            catalog: Catalog::new(tracks, None, 0, HashSet::new()),
-            index_of,
+            }),
+            catalog: Arc::new(Catalog::new(tracks, None, 0, HashSet::new())),
+            index_of: Arc::new(index_of),
         }
+    }
+
+    /// The fixture's catalogue, which nothing else holds yet.
+    fn catalog(nav: &mut Navigator) -> &mut Catalog {
+        Arc::get_mut(&mut nav.catalog).expect("a fixture's catalogue is its own")
     }
 
     /// The fixture with a one-dimensional CLAP score and an artist per
@@ -842,12 +843,12 @@ mod tests {
     fn scored(rows: &[(i64, f32, f32, i64)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        let mut tracks = nav.catalog.tracks.to_vec();
         for (track, &(_, _, _, artist)) in tracks.iter_mut().zip(rows) {
             track.artist_id = artist;
         }
-        let clap = std::sync::Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect());
-        nav.catalog = Catalog::new(tracks, Some(clap), 1, HashSet::new());
+        let clap = Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect());
+        nav.catalog = Arc::new(Catalog::new(tracks, Some(clap), 1, HashSet::new()));
         nav
     }
 
@@ -929,8 +930,8 @@ mod tests {
     #[test]
     fn describe_favours_what_sets_a_track_apart() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0), (12, 20.0)]);
-        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1].into());
-        nav.catalog.clap_dims = 2;
+        catalog(&mut nav).clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1].into());
+        catalog(&mut nav).clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let baseline = nav.text_baseline(&phrases);
         let scores = nav.describe(11, &phrases, &baseline).unwrap();
@@ -941,8 +942,8 @@ mod tests {
     #[test]
     fn describe_needs_a_clap_vector() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0)]);
-        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0].into());
-        nav.catalog.clap_dims = 2;
+        catalog(&mut nav).clap = Some(vec![0.5, 0.5, 0.0, 0.0].into());
+        catalog(&mut nav).clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0]];
         let baseline = nav.text_baseline(&phrases);
         assert!(nav.describe(11, &phrases, &baseline).is_none());
@@ -991,12 +992,12 @@ mod tests {
     fn with_twins(rows: &[(i64, f32, &str)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        let mut tracks = nav.catalog.tracks.to_vec();
         for (track, &(_, _, title)) in tracks.iter_mut().zip(rows) {
             track.title = title.into();
             track.artist_id = 1;
         }
-        nav.catalog = Catalog::new(tracks, None, 0, HashSet::new());
+        nav.catalog = Arc::new(Catalog::new(tracks, None, 0, HashSet::new()));
         nav
     }
 
@@ -1066,8 +1067,8 @@ mod tests {
     fn mood_never_takes_a_song_twice() {
         let mut nav = with_twins(&TWINS);
         // The twins score highest, both of each pair.
-        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1].into());
-        nav.catalog.clap_dims = 1;
+        catalog(&mut nav).clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1].into());
+        catalog(&mut nav).clap_dims = 1;
         let picked = nav.mood(&[1.0], 3, 0.0, &loose());
         assert_no_song_twice(&nav, &picked);
         assert_eq!(picked.len(), 3);

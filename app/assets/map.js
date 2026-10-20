@@ -87,11 +87,45 @@
 
   async function loadPoints() {
     const began = performance.now();
-    const read = await (await fetch("/points/meta")).json();
+    const read = readMeta(await (await fetch("/points/meta")).arrayBuffer());
     const buffer = await (await fetch("/points/data")).arrayBuffer();
     bindPoints(read, buffer);
     loaded = true;
     timing("map-points", `${n} points, ${(performance.now() - began).toFixed(1)}ms to read`);
+  }
+
+  const decoder = new TextDecoder();
+
+  // The meta either way it comes: binary from a server that has it, its
+  // labels found and decoded only when one is first shown, or JSON from one
+  // before, parsed whole before anything draws.
+  function readMeta(buffer) {
+    const bytes = new Uint8Array(buffer);
+    if (bytes[0] !== 0) {
+      const read = JSON.parse(decoder.decode(bytes));
+      read.label = (i) => read.labels[i] || "";
+      return read;
+    }
+    // Laid out as map::meta_binary documents: a JSON head, then a line per
+    // label.
+    const h = new DataView(buffer).getUint32(4, true);
+    const read = JSON.parse(decoder.decode(bytes.subarray(8, 8 + h)));
+    const text = bytes.subarray(8 + h);
+    // Where each line starts, the one after the last included.
+    let starts = null;
+    read.label = (i) => {
+      if (!(i >= 0 && i < read.n)) return "";
+      if (!starts) {
+        starts = new Uint32Array(read.n + 1);
+        let line = 1;
+        for (let at = 0; at < text.length && line < read.n; at++) {
+          if (text[at] === 10) starts[line++] = at + 1;
+        }
+        starts[read.n] = text.length + 1;
+      }
+      return decoder.decode(text.subarray(starts[i], starts[i + 1] - 1));
+    };
+    return read;
   }
 
   function bindPoints(read, buffer) {
@@ -172,7 +206,7 @@
 
   // Nothing to draw until the map is opened and the points are read.
   bindPoints(
-    { n: 0, genres: [], labels: [], bounds: { min_x: 0, max_x: 0, min_y: 0, max_y: 0 }, has_layout: false },
+    { n: 0, genres: [], label: () => "", bounds: { min_x: 0, max_x: 0, min_y: 0, max_y: 0 }, has_layout: false },
     new ArrayBuffer(0),
   );
 
@@ -881,7 +915,7 @@
     }
 
     // The selected point has its card instead.
-    const text = (meta.labels && meta.labels[index]) || "";
+    const text = meta.label(index);
     if (text && !persistent) label(text, x, y, colour);
   }
 

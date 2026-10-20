@@ -17,62 +17,105 @@
 //! the next if it fails. Browsing queues as interactive, the crawl and
 //! analyse as bulk, so a search never waits behind them.
 
+use crate::cache::Revalidating;
 use crate::refs::{self, Item, Kind as RefKind};
 use anyhow::{bail, Context, Result};
 use diesel::SqliteConnection;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use stelly_provider::{api, AlbumTracks, Client, Config, FileUrl, Kind, Priority, ProviderError};
-use tokio::sync::OnceCell;
+use tokio::sync::watch;
 
 pub use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
 pub use stelly_provider::Account;
 
 /// How long a search waits for any one provider: one slow or down is left
 /// out rather than holding every search up.
-const SEARCH_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+const SEARCH_WAIT: Duration = Duration::from_secs(6);
+
+/// How long someone browsing waits on any one provider before the next one
+/// that has the item is asked, or the request fails. The provider's client
+/// sets no deadline of its own, so a gateway's queue or a 429's backoff
+/// could hold a page for minutes. A healthy answer, a listing paged through
+/// a gateway's budget included, comes well inside this, and the app gives
+/// up on a request after a minute.
+const BROWSE_WAIT: Duration = Duration::from_secs(15);
+
+/// How long a play waits on any one provider for a stream's URL: shorter,
+/// since the listener hears silence meanwhile. A cold yt-dlp takes a few
+/// seconds; past this, the next provider is the better bet, and asking
+/// again joins the run still going.
+const FILE_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a provider has to say what it is, and how long one that did
-/// not is left alone before it is asked again: one down holds nothing up.
-const ASK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-const DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+/// not, or missed a deadline, is left alone or asked last: one down holds
+/// nothing up.
+const ASK_WAIT: Duration = Duration::from_secs(5);
+const DOWN_FOR: Duration = Duration::from_secs(30);
+
+/// How long new ids wait for a stage's write lock before the answer fails:
+/// someone is waiting on a browse, while the crawl and analyse can wait.
+const INTERACTIVE_WAIT: Duration = Duration::from_secs(2);
+const BULK_WAIT: Duration = Duration::from_secs(30);
 
 /// One configured provider, and what it said it is.
 struct Source {
     client: Client,
-    capabilities: OnceCell<Capabilities>,
-    /// When it last failed to say, if it has not said since.
-    down_since: Mutex<Option<std::time::Instant>>,
+    /// Set once it has said, by the background asking.
+    capabilities: OnceLock<Capabilities>,
+    /// When it last failed to say and why, if it has not said since.
+    down: Mutex<Option<(Instant, String)>>,
+    /// When it last missed a deadline, if it has not answered in time since.
+    late_since: Mutex<Option<Instant>>,
 }
 
 impl Source {
-    async fn capabilities(&self) -> Result<&Capabilities> {
-        if let Some(known) = self.capabilities.get() {
-            return Ok(known);
-        }
-        let url = self.client.url();
-        if let Some(at) = *self.down_since.lock().unwrap_or_else(|e| e.into_inner()) {
-            if at.elapsed() < DOWN_FOR {
-                bail!("the music provider at {url} did not answer {}s ago", at.elapsed().as_secs());
-            }
-        }
-        let ask = self.capabilities.get_or_try_init(|| async {
-            self.client.send(api::capabilities()).await.with_context(|| format!("asking the music provider at {url} what it is"))
-        });
-        let answer = match tokio::time::timeout(ASK_WAIT, ask).await {
-            Ok(answer) => answer,
-            Err(_) => Err(anyhow::anyhow!("the music provider at {url} did not answer in {}s", ASK_WAIT.as_secs())),
-        };
-        *self.down_since.lock().unwrap_or_else(|e| e.into_inner()) = answer.is_err().then(std::time::Instant::now);
-        answer
+    fn known(&self) -> Option<&Capabilities> {
+        self.capabilities.get()
     }
 
-    async fn name(&self) -> Result<&str> {
-        Ok(&self.capabilities().await?.name)
+    /// Not said yet, and not failed to lately: the next asking asks it.
+    fn due(&self) -> bool {
+        self.known().is_none() && self.down.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|(at, _)| at.elapsed() >= DOWN_FOR)
+    }
+
+    /// Why it has not said what it is.
+    fn silent(&self) -> anyhow::Error {
+        let url = self.client.url();
+        match &*self.down.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((at, why)) => anyhow::anyhow!("{why} ({}s ago)", at.elapsed().as_secs()),
+            None => anyhow::anyhow!("the music provider at {url} has not said what it is yet"),
+        }
+    }
+
+    fn late(&self) -> bool {
+        self.late_since.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|at| at.elapsed() < DOWN_FOR)
+    }
+}
+
+/// The asking of what the providers are, which runs in the background.
+struct Probe {
+    /// Whether an asking is out.
+    running: AtomicBool,
+    /// Moved as each provider answers and when an asking ends, for whoever
+    /// waits on the first answer.
+    answered: watch::Sender<u64>,
+}
+
+/// Ends an asking however its task ends, a runtime shut down under it
+/// included: otherwise no provider would be asked again.
+struct Asking<'p>(&'p Probe);
+
+impl Drop for Asking<'_> {
+    fn drop(&mut self) {
+        self.0.running.store(false, Ordering::SeqCst);
+        self.0.answered.send_modify(|n| *n += 1);
     }
 }
 
@@ -82,9 +125,51 @@ impl Source {
 pub struct Provider {
     sources: Arc<Vec<Source>>,
     priority: Priority,
-    db_path: PathBuf,
-    conn: Arc<Mutex<Option<SqliteConnection>>>,
-    ready: Arc<OnceCell<()>>,
+    /// Where Stelly's ids are kept.
+    db: Arc<crate::db::Db>,
+    probe: Arc<Probe>,
+    /// The server's catalogue cache, when this runs inside it.
+    catalogue: Option<Revalidating>,
+}
+
+/// The catalogue caches of the servers running on each database. The
+/// crawl, the stages and mixing build their own clients, on runtimes of
+/// their own, and read albums, artists, discographies and similar artists
+/// through the same cache as browsing: neither fetches what the other just
+/// did. A command line run has no server, and no cache.
+fn catalogues() -> &'static Mutex<HashMap<PathBuf, Revalidating>> {
+    static ALL: OnceLock<Mutex<HashMap<PathBuf, Revalidating>>> = OnceLock::new();
+    ALL.get_or_init(Mutex::default)
+}
+
+/// Every client built on `db_path` from now on reads the catalogue through
+/// `cache`.
+pub fn share_catalogue(db_path: &Path, cache: Revalidating) {
+    catalogues().lock().unwrap_or_else(|e| e.into_inner()).insert(db_path.to_path_buf(), cache);
+}
+
+/// A listing fetched for up to `held` items answers an ask for up to `cap`
+/// when it was for as many, or came back short of both: then neither left
+/// anything out.
+fn fits<T>(cap: usize) -> impl Fn(&(usize, Vec<T>)) -> bool {
+    move |(held, items)| *held == cap || (items.len() < *held && items.len() < cap)
+}
+
+/// How an item is given Stelly's ids: by reading alone, or writing what is
+/// new.
+enum Ids<'c> {
+    Read(&'c mut SqliteConnection),
+    Write(&'c mut SqliteConnection),
+}
+
+impl Ids<'_> {
+    /// `None` when reading alone cannot give it.
+    fn of(&mut self, provider: &str, kind: RefKind, item: &Item) -> Result<Option<String>> {
+        match self {
+            Ids::Read(conn) => refs::known(conn, provider, kind, item),
+            Ids::Write(conn) => refs::resolve(conn, provider, kind, item).map(Some),
+        }
+    }
 }
 
 /// `STELLY_PROVIDERS`, or the one `STELLY_PROVIDER_URL`, from the
@@ -116,14 +201,19 @@ impl Provider {
     pub fn from_env(env_dir: &Path, db_path: &Path) -> Self {
         let sources = configured(env_dir)
             .into_iter()
-            .map(|config| Source { client: Client::new(config), capabilities: OnceCell::new(), down_since: Mutex::new(None) })
+            .map(|config| Source {
+                client: Client::new(config),
+                capabilities: OnceLock::new(),
+                down: Mutex::new(None),
+                late_since: Mutex::new(None),
+            })
             .collect();
         Self {
             sources: Arc::new(sources),
             priority: Priority::Interactive,
-            db_path: db_path.to_path_buf(),
-            conn: Arc::new(Mutex::new(None)),
-            ready: Arc::new(OnceCell::new()),
+            db: crate::db::Db::shared(db_path),
+            probe: Arc::new(Probe { running: AtomicBool::new(false), answered: watch::channel(0).0 }),
+            catalogue: catalogues().lock().unwrap_or_else(|e| e.into_inner()).get(db_path).cloned(),
         }
     }
 
@@ -137,95 +227,207 @@ impl Provider {
         self.sources[source].client.at(self.priority)
     }
 
-    /// `f` with the ids' database, opened on first use, as is: for what
-    /// runs its own transactions. Never held across an await.
-    fn with_conn<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        if conn.is_none() {
-            *conn = Some(crate::db::open_for_write(&self.db_path)?);
+    fn wait(&self) -> Duration {
+        match self.priority {
+            Priority::Interactive => INTERACTIVE_WAIT,
+            Priority::Bulk => BULK_WAIT,
         }
-        f(conn.as_mut().expect("opened just above"))
     }
 
-    /// `f` with the ids' database, in one transaction: a search's or an
-    /// album's worth of new ids is written and synced to disk once, not once
-    /// an item. Never held across an await.
-    fn with_refs<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
-        use diesel::Connection;
-        self.with_conn(|conn| conn.transaction(f))
+    /// `fetch`, through the server's catalogue cache when there is one.
+    /// Browsing is served what is held, fetched again behind it once old;
+    /// bulk reads take what is held however old, and keep what they fetch,
+    /// in their own lane.
+    async fn cached<T, F>(&self, key: String, fits: impl Fn(&T) -> bool, fetch: F) -> Result<T>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: Future<Output = Result<T>> + Send + 'static,
+    {
+        match (&self.catalogue, self.priority) {
+            (None, _) => fetch.await,
+            (Some(cache), Priority::Interactive) => cache.get_or_fitting(key, fits, fetch).await,
+            (Some(cache), Priority::Bulk) => cache.held_or(key, fits, fetch).await,
+        }
+    }
+
+    /// `ask` of one provider, given up on after `wait` when someone is
+    /// waiting on it. Bulk reads wait as long as the provider's queue takes:
+    /// the crawl and analyse can, and giving up would only ask again. A
+    /// provider that misses a deadline is asked last for a while.
+    async fn within<T>(&self, source: usize, wait: Duration, ask: impl Future<Output = Result<T>>) -> Result<T> {
+        if self.priority == Priority::Bulk {
+            return ask.await;
+        }
+        let late = &self.sources[source].late_since;
+        match tokio::time::timeout(wait, ask).await {
+            Ok(answer) => {
+                if answer.is_ok() {
+                    *late.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                }
+                answer
+            }
+            Err(_) => {
+                *late.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                bail!("the music provider at {} did not answer in {}s", self.sources[source].client.url(), wait.as_secs())
+            }
+        }
+    }
+
+    /// One answer's `items` in Stelly's ids, `own` giving one item its ids.
+    ///
+    /// Read first, on a reader and outside any transaction: an item seen
+    /// before waits on no writer and no other answer. Only what that cannot
+    /// give, a new item or a stub that learns its name, goes to the writer,
+    /// in one transaction that takes the write lock before it reads: one
+    /// that read first would fail at once had a stage written meanwhile, and
+    /// two answers could take the same new id. Off the async workers.
+    async fn own<T: Clone + Send + 'static>(
+        &self,
+        provider: &str,
+        mut items: Vec<T>,
+        own: fn(&mut Ids, &str, &mut T) -> Result<bool>,
+    ) -> Result<Vec<T>> {
+        let (db, provider, wait) = (self.db.clone(), provider.to_string(), self.wait());
+        tokio::task::spawn_blocking(move || {
+            let new = db.read_here(|conn| {
+                let mut new = Vec::new();
+                for (i, item) in items.iter_mut().enumerate() {
+                    let mut read = item.clone();
+                    if own(&mut Ids::Read(conn), &provider, &mut read)? {
+                        *item = read;
+                    } else {
+                        new.push(i);
+                    }
+                }
+                Ok(new)
+            })?;
+            if !new.is_empty() {
+                db.write_here_within(wait, |conn| {
+                    conn.immediate_transaction(|conn| {
+                        for i in new {
+                            own(&mut Ids::Write(conn), &provider, &mut items[i])?;
+                        }
+                        Ok(())
+                    })
+                })?;
+            }
+            Ok(items)
+        })
+        .await
+        .context("the database thread panicked")?
+    }
+
+    /// The providers' items Stelly's `id` stands for.
+    async fn refs_of(&self, kind: RefKind, id: &str) -> Result<Vec<(String, String)>> {
+        let id = id.to_string();
+        self.db.read(move |conn| refs::routes(conn, kind, &id)).await
     }
 
     /// The provider a catalogue from before several providers came from:
     /// the one that can convert what it stored. None when it is not among
-    /// them: until it is, that catalogue is nobody's.
+    /// those answering: until it is, that catalogue is nobody's.
     async fn legacy(&self) -> Result<Option<usize>> {
-        for (source, s) in self.sources.iter().enumerate() {
-            if s.capabilities().await.is_ok_and(|c| c.import) {
-                return Ok(Some(source));
-            }
-        }
+        self.ready().await?;
         anyhow::ensure!(!self.sources.is_empty(), "no music provider is configured");
-        Ok(None)
+        Ok(self.sources.iter().position(|s| s.known().is_some_and(|c| c.import)))
     }
 
-    /// The providers have said what they are, and a catalogue from before
-    /// several providers has its ids taken for its provider's, if that
-    /// provider is one of them. Those that did not answer are asked again
-    /// next time, and the rest carry on without them.
-    async fn ready(&self) -> Result<()> {
-        if self.ready.initialized() {
-            return Ok(());
+    /// Ask the providers that have not said what they are, and have not
+    /// failed to lately, in the background and all at once. Whether an
+    /// asking is out.
+    fn probe(&self) -> bool {
+        if !self.sources.iter().any(Source::due) {
+            return self.probe.running.load(Ordering::SeqCst);
         }
-        let mut names = HashSet::new();
-        let mut all = true;
-        for source in self.sources.iter() {
-            match source.name().await {
-                Ok(name) => {
-                    if !names.insert(name.to_string()) {
-                        bail!("two music providers are both called {name:?}");
-                    }
+        if !self.probe.running.swap(true, Ordering::SeqCst) {
+            let provider = self.clone();
+            tokio::spawn(async move { provider.asking().await });
+        }
+        true
+    }
+
+    /// Each provider's answer kept as it comes. The first to say it can
+    /// convert a catalogue from before several providers has that
+    /// catalogue's ids taken for its own first, before anything is routed
+    /// to it.
+    async fn asking(&self) {
+        use futures_util::StreamExt;
+
+        let _end = Asking(&self.probe);
+        let asks = self.sources.iter().filter(|s| s.due()).map(|s| async move {
+            let url = s.client.url();
+            let answer = match tokio::time::timeout(ASK_WAIT, s.client.send(api::capabilities())).await {
+                Ok(answer) => answer.with_context(|| format!("asking the music provider at {url} what it is")),
+                Err(_) => Err(anyhow::anyhow!("the music provider at {url} did not answer in {}s", ASK_WAIT.as_secs())),
+            };
+            (s, answer)
+        });
+        let mut answers: futures_util::stream::FuturesUnordered<_> = asks.collect();
+        while let Some((source, answer)) = answers.next().await {
+            let answer = match answer {
+                Ok(capabilities) if capabilities.import => self.bootstrap(&capabilities.name).await.map(|()| capabilities),
+                answer => answer,
+            };
+            match answer {
+                Ok(capabilities) => {
+                    let _ = source.capabilities.set(capabilities);
+                    *source.down.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    self.probe.answered.send_modify(|n| *n += 1);
                 }
                 Err(err) => {
                     eprintln!("{err:#}");
-                    all = false;
+                    *source.down.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), format!("{err:#}")));
                 }
             }
         }
-        if let Some(source) = self.legacy().await? {
-            let legacy = self.name(source).await?;
-            let taken = self.with_conn(|conn| refs::bootstrap(conn, &legacy))?;
-            if taken > 0 {
-                eprintln!("took {taken} catalogue ids for {legacy}'s");
-            }
+    }
+
+    /// A catalogue from before several providers has its ids taken for
+    /// `name`'s, once.
+    async fn bootstrap(&self, name: &str) -> Result<()> {
+        let legacy = name.to_string();
+        let taken = self.db.write_within(self.wait(), move |conn| refs::bootstrap(conn, &legacy)).await?;
+        if taken > 0 {
+            eprintln!("took {taken} catalogue ids for {name}'s");
         }
-        if all {
-            let _ = self.ready.set(());
+        Ok(())
+    }
+
+    /// The providers that have said what they are. Those that have not are
+    /// asked in the background; a request waits for that only while no
+    /// provider at all has answered, and then only for the first to.
+    async fn ready(&self) -> Result<()> {
+        let mut answered = self.probe.answered.subscribe();
+        while self.probe() && self.sources.iter().all(|s| s.known().is_none()) {
+            let _ = answered.changed().await;
+        }
+        let mut names = HashSet::new();
+        for capabilities in self.sources.iter().filter_map(Source::known) {
+            if !names.insert(capabilities.name.as_str()) {
+                bail!("two music providers are both called {:?}", capabilities.name);
+            }
         }
         Ok(())
     }
 
     /// The providers that have said what they are, by name.
-    async fn answering(&self) -> Vec<(usize, String)> {
-        let mut out = Vec::new();
-        for source in 0..self.sources.len() {
-            if let Ok(name) = self.name(source).await {
-                out.push((source, name));
-            }
-        }
-        out
+    fn answering(&self) -> Vec<(usize, String)> {
+        let known = self.sources.iter().enumerate();
+        known.filter_map(|(source, s)| Some((source, s.known()?.name.clone()))).collect()
     }
 
-    async fn name(&self, source: usize) -> Result<String> {
-        Ok(self.sources[source].name().await?.to_string())
+    fn name(&self, source: usize) -> Result<String> {
+        let s = &self.sources[source];
+        Ok(s.known().ok_or_else(|| s.silent())?.name.clone())
     }
 
     /// The providers that have Stelly's `id`, most preferred first, with
     /// their own id for it.
     async fn routes(&self, kind: RefKind, id: &str) -> Result<Vec<(usize, String)>> {
         self.ready().await?;
-        let known = self.with_refs(|conn| refs::routes(conn, kind, id))?;
+        let known = self.refs_of(kind, id).await?;
         let mut out = Vec::new();
-        for (source, name) in self.answering().await {
+        for (source, name) in self.answering() {
             if let Some((_, external)) = known.iter().find(|(provider, _)| *provider == name) {
                 out.push((source, external.clone()));
             }
@@ -233,18 +435,22 @@ impl Provider {
         if out.is_empty() {
             bail!("no music provider that is answering has {} {id}", kind.as_str());
         }
+        // One that missed a deadline lately goes last, so it does not hold
+        // every request up by as much again.
+        out.sort_by_key(|(source, _)| self.sources[*source].late());
         Ok(out)
     }
 
-    /// The first provider that has `id` and answers `call`, and its answer.
-    async fn first<T, F, Fut>(&self, kind: RefKind, id: &str, call: F) -> Result<(usize, T)>
+    /// The first provider that has `id` and answers `call` within `wait`,
+    /// and its answer.
+    async fn first<T, F, Fut>(&self, kind: RefKind, id: &str, wait: Duration, call: F) -> Result<(usize, T)>
     where
         F: Fn(Client, String) -> Fut,
         Fut: Future<Output = Result<T>>,
     {
         let mut last = None;
         for (source, external) in self.routes(kind, id).await? {
-            match call(self.client(source), external).await {
+            match self.within(source, wait, call(self.client(source), external)).await {
                 Ok(answer) => return Ok((source, answer)),
                 Err(err) => last = Some(err),
             }
@@ -252,16 +458,10 @@ impl Provider {
         Err(last.expect("routes is never empty"))
     }
 
-    /// Every provider in turn whose capabilities `can` says yes to.
+    /// Every answering provider whose capabilities `can` says yes to.
     async fn able(&self, can: impl Fn(&Capabilities) -> bool) -> Result<Vec<usize>> {
         self.ready().await?;
-        let mut out = Vec::new();
-        for (source, s) in self.sources.iter().enumerate() {
-            if s.capabilities().await.is_ok_and(&can) {
-                out.push(source);
-            }
-        }
-        Ok(out)
+        Ok((0..self.sources.len()).filter(|&source| self.sources[source].known().is_some_and(&can)).collect())
     }
 
     // ------------------------------------------------------------ ids
@@ -270,86 +470,84 @@ impl Provider {
         id.parse().with_context(|| format!("{id:?} is not a number"))
     }
 
-    fn own_artist(conn: &mut SqliteConnection, provider: &str, id: Option<i64>, name: &str) -> Result<Option<i64>> {
-        let Some(id) = id else { return Ok(None) };
+    // Each of these gives one item Stelly's ids, or says it could not: a
+    // read that found the item new, or a stub that would learn its name.
+
+    fn own_artist(ids: &mut Ids, provider: &str, id: &mut Option<i64>, name: &str) -> Result<bool> {
+        let Some(theirs) = *id else { return Ok(true) };
         let key = Some(refs::key(&[name])).filter(|_| !name.is_empty());
-        let item = Item { external: id.to_string(), key, ..Default::default() };
-        Ok(Some(Self::number(refs::resolve(conn, provider, RefKind::Artist, &item)?)?))
+        let item = Item { external: theirs.to_string(), key, ..Default::default() };
+        let Some(own) = ids.of(provider, RefKind::Artist, &item)? else { return Ok(false) };
+        *id = Some(Self::number(own)?);
+        Ok(true)
     }
 
-    fn own_track(conn: &mut SqliteConnection, provider: &str, track: &mut RemoteTrack) -> Result<()> {
+    fn own_track(ids: &mut Ids, provider: &str, track: &mut RemoteTrack) -> Result<bool> {
         let item = Item {
             external: track.id.to_string(),
             isrc: track.isrc.as_deref(),
             key: Some(refs::credit_key(&track.artist, &track.title)),
             seconds: track.duration,
         };
-        track.id = Self::number(refs::resolve(conn, provider, RefKind::Track, &item)?)?;
-        track.artist_id = Self::own_artist(conn, provider, track.artist_id, &track.artist)?;
+        let Some(id) = ids.of(provider, RefKind::Track, &item)? else { return Ok(false) };
+        track.id = Self::number(id)?;
+        if !Self::own_artist(ids, provider, &mut track.artist_id, &track.artist)? {
+            return Ok(false);
+        }
         if let Some(album) = track.album_id.take() {
             // The album's artist is not always the track's: no name to match
             // on until the album itself is seen.
             let item = Item { external: album, ..Default::default() };
-            track.album_id = Some(refs::resolve(conn, provider, RefKind::Album, &item)?);
+            let Some(id) = ids.of(provider, RefKind::Album, &item)? else { return Ok(false) };
+            track.album_id = Some(id);
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn own_album(conn: &mut SqliteConnection, provider: &str, album: &mut RemoteAlbum) -> Result<()> {
+    fn own_album(ids: &mut Ids, provider: &str, album: &mut RemoteAlbum) -> Result<bool> {
         let key = Some(refs::credit_key(&album.artist, &album.title));
         let item = Item { external: album.id.clone(), key, ..Default::default() };
-        album.id = refs::resolve(conn, provider, RefKind::Album, &item)?;
-        album.artist_id = Self::own_artist(conn, provider, album.artist_id, &album.artist)?;
-        Ok(())
+        let Some(id) = ids.of(provider, RefKind::Album, &item)? else { return Ok(false) };
+        album.id = id;
+        Self::own_artist(ids, provider, &mut album.artist_id, &album.artist)
     }
 
-    fn own_playlist(conn: &mut SqliteConnection, provider: &str, playlist: &mut RemotePlaylist) -> Result<()> {
+    fn own_one_artist(ids: &mut Ids, provider: &str, artist: &mut RemoteArtist) -> Result<bool> {
+        let mut id = Some(artist.id);
+        if !Self::own_artist(ids, provider, &mut id, &artist.name)? {
+            return Ok(false);
+        }
+        artist.id = id.expect("an id was given");
+        Ok(true)
+    }
+
+    fn own_playlist(ids: &mut Ids, provider: &str, playlist: &mut RemotePlaylist) -> Result<bool> {
         let item = Item { external: playlist.id.to_string(), ..Default::default() };
-        playlist.id = Self::number(refs::resolve(conn, provider, RefKind::Playlist, &item)?)?;
-        Ok(())
+        let Some(id) = ids.of(provider, RefKind::Playlist, &item)? else { return Ok(false) };
+        playlist.id = Self::number(id)?;
+        Ok(true)
     }
 
-    fn own_tracks(&self, provider: &str, mut tracks: Vec<RemoteTrack>) -> Result<Vec<RemoteTrack>> {
-        self.with_refs(|conn| {
-            for track in &mut tracks {
-                Self::own_track(conn, provider, track)?;
-            }
-            Ok(tracks)
-        })
+    async fn own_tracks(&self, provider: &str, tracks: Vec<RemoteTrack>) -> Result<Vec<RemoteTrack>> {
+        self.own(provider, tracks, Self::own_track).await
     }
 
-    fn own_albums(&self, provider: &str, mut albums: Vec<RemoteAlbum>) -> Result<Vec<RemoteAlbum>> {
-        self.with_refs(|conn| {
-            for album in &mut albums {
-                Self::own_album(conn, provider, album)?;
-            }
-            Ok(albums)
-        })
+    async fn own_albums(&self, provider: &str, albums: Vec<RemoteAlbum>) -> Result<Vec<RemoteAlbum>> {
+        self.own(provider, albums, Self::own_album).await
     }
 
-    fn own_artists(&self, provider: &str, mut artists: Vec<RemoteArtist>) -> Result<Vec<RemoteArtist>> {
-        self.with_refs(|conn| {
-            for artist in &mut artists {
-                artist.id = Self::own_artist(conn, provider, Some(artist.id), &artist.name)?.expect("an id was given");
-            }
-            Ok(artists)
-        })
+    async fn own_artists(&self, provider: &str, artists: Vec<RemoteArtist>) -> Result<Vec<RemoteArtist>> {
+        self.own(provider, artists, Self::own_one_artist).await
     }
 
     // ------------------------------------------------------------ what they are
 
     /// Every answering provider's capabilities, in order.
     pub async fn each_capabilities(&self) -> Result<Vec<Capabilities>> {
-        let mut out = Vec::new();
-        let mut last = None;
-        for source in self.sources.iter() {
-            match source.capabilities().await {
-                Ok(capabilities) => out.push(capabilities.clone()),
-                Err(err) => last = Some(err),
-            }
-        }
-        match (out.is_empty(), last) {
-            (true, Some(err)) => Err(err),
+        self.ready().await?;
+        let out: Vec<Capabilities> = self.sources.iter().filter_map(Source::known).cloned().collect();
+        match self.sources.iter().find(|s| s.known().is_none()) {
+            Some(silent) if out.is_empty() => Err(silent.silent()),
             _ => Ok(out),
         }
     }
@@ -375,21 +573,24 @@ impl Provider {
 
     /// Who each provider is signed in as: what it is, where, and the account.
     pub async fn accounts(&self) -> Vec<(String, String, Result<Account>)> {
-        let mut out = Vec::new();
-        for (source, s) in self.sources.iter().enumerate() {
-            let what = match s.capabilities().await {
-                Ok(c) => format!("{} ({})", c.title, c.name),
-                Err(err) => format!("unreachable: {err:#}"),
-            };
-            out.push((what, s.client.url().to_string(), self.client(source).send(api::account()).await));
+        if let Err(err) = self.ready().await {
+            eprintln!("{err:#}");
         }
-        out
+        let asks = self.sources.iter().enumerate().map(|(source, s)| async move {
+            let what = match s.known() {
+                Some(c) => format!("{} ({})", c.title, c.name),
+                None => format!("unreachable: {:#}", s.silent()),
+            };
+            let account = self.within(source, BROWSE_WAIT, self.client(source).send(api::account())).await;
+            (what, s.client.url().to_string(), account)
+        });
+        futures_util::future::join_all(asks).await
     }
 
     /// The provider called `name`.
     async fn named(&self, name: &str) -> Result<usize> {
         self.ready().await?;
-        let answering = self.answering().await;
+        let answering = self.answering();
         if let Some((source, _)) = answering.iter().find(|(_, theirs)| theirs == name) {
             return Ok(*source);
         }
@@ -408,7 +609,7 @@ impl Provider {
             asked.push(self.named(name).await?);
         }
         if asked.is_empty() {
-            asked = self.answering().await.into_iter().map(|(source, _)| source).collect();
+            asked = self.answering().into_iter().map(|(source, _)| source).collect();
         }
         let asks = asked.into_iter().map(|source| async move {
             let client = self.client(source);
@@ -431,10 +632,10 @@ impl Provider {
                     continue;
                 }
             };
-            let name = self.name(source).await?;
-            out.tracks.extend(self.own_tracks(&name, found.tracks)?.into_iter().filter(|t| tracks.insert(t.id)));
-            out.albums.extend(self.own_albums(&name, found.albums)?.into_iter().filter(|a| albums.insert(a.id.clone())));
-            out.artists.extend(self.own_artists(&name, found.artists)?.into_iter().filter(|a| artists.insert(a.id)));
+            let name = self.name(source)?;
+            out.tracks.extend(self.own_tracks(&name, found.tracks).await?.into_iter().filter(|t| tracks.insert(t.id)));
+            out.albums.extend(self.own_albums(&name, found.albums).await?.into_iter().filter(|a| albums.insert(a.id.clone())));
+            out.artists.extend(self.own_artists(&name, found.artists).await?.into_iter().filter(|a| artists.insert(a.id)));
         }
         match failed {
             // Nobody answered: say why rather than that nothing was found.
@@ -445,19 +646,24 @@ impl Provider {
 
     pub async fn track(&self, track_id: i64) -> Result<RemoteTrack> {
         let ask = |client: Client, id: String| async move { client.send(api::track(Self::number(id)?)).await };
-        let (source, track) = self.first(RefKind::Track, &track_id.to_string(), ask).await?;
-        let name = self.name(source).await?;
-        Ok(self.own_tracks(&name, vec![track])?.remove(0))
+        let (source, track) = self.first(RefKind::Track, &track_id.to_string(), BROWSE_WAIT, ask).await?;
+        let name = self.name(source)?;
+        Ok(self.own_tracks(&name, vec![track]).await?.remove(0))
     }
 
     /// An album and its tracklist, in one request.
     pub async fn album(&self, album_id: &str) -> Result<AlbumTracks> {
+        let (this, id) = (self.clone(), album_id.to_string());
+        self.cached(format!("album:{album_id}"), |_| true, async move { this.fetch_album(&id).await }).await
+    }
+
+    async fn fetch_album(&self, album_id: &str) -> Result<AlbumTracks> {
         let ask = |client: Client, id: String| async move { client.send(api::album(&id)).await };
-        let (source, AlbumTracks { mut album, tracks }) = self.first(RefKind::Album, album_id, ask).await?;
-        let name = self.name(source).await?;
-        self.with_refs(|conn| Self::own_album(conn, &name, &mut album))?;
+        let (source, AlbumTracks { album, tracks }) = self.first(RefKind::Album, album_id, BROWSE_WAIT, ask).await?;
+        let name = self.name(source)?;
+        let album = self.own_albums(&name, vec![album]).await?.remove(0);
         // A tracklist names the album it is on: this one.
-        let mut tracks = self.own_tracks(&name, tracks)?;
+        let mut tracks = self.own_tracks(&name, tracks).await?;
         for track in &mut tracks {
             track.album_id = Some(album.id.clone());
         }
@@ -471,10 +677,15 @@ impl Provider {
 
     /// One artist on their own: name, portrait and biography, no discography.
     pub async fn artist(&self, artist_id: i64) -> Result<RemoteArtist> {
+        let this = self.clone();
+        self.cached(format!("artist:{artist_id}"), |_| true, async move { this.fetch_artist(artist_id).await }).await
+    }
+
+    async fn fetch_artist(&self, artist_id: i64) -> Result<RemoteArtist> {
         let ask = |client: Client, id: String| async move { client.send(api::artist(Self::number(id)?)).await };
-        let (source, artist) = self.first(RefKind::Artist, &artist_id.to_string(), ask).await?;
-        let name = self.name(source).await?;
-        Ok(self.own_artists(&name, vec![artist])?.remove(0))
+        let (source, artist) = self.first(RefKind::Artist, &artist_id.to_string(), BROWSE_WAIT, ask).await?;
+        let name = self.name(source)?;
+        Ok(self.own_artists(&name, vec![artist]).await?.remove(0))
     }
 
     /// An artist's discography from every provider that has them, newest
@@ -483,11 +694,16 @@ impl Provider {
         let mut out: Vec<RemoteAlbum> = Vec::new();
         let mut seen = HashSet::new();
         let mut last = None;
-        for (source, external) in self.routes(RefKind::Artist, &artist_id.to_string()).await? {
-            match self.client(source).send(api::artist_releases(Self::number(external)?, own, cap)).await {
+        // All at once: one slow provider costs its own wait, not the sum.
+        let asks = self.routes(RefKind::Artist, &artist_id.to_string()).await?.into_iter().map(|(source, external)| async move {
+            let ask = async { self.client(source).send(api::artist_releases(Self::number(external)?, own, cap)).await };
+            (source, self.within(source, BROWSE_WAIT, ask).await)
+        });
+        for (source, answer) in futures_util::future::join_all(asks).await {
+            match answer {
                 Ok(page) => {
-                    let name = self.name(source).await?;
-                    out.extend(self.own_albums(&name, page.items)?.into_iter().filter(|a| seen.insert(a.id.clone())));
+                    let name = self.name(source)?;
+                    out.extend(self.own_albums(&name, page.items).await?.into_iter().filter(|a| seen.insert(a.id.clone())));
                 }
                 Err(err) => last = Some(err),
             }
@@ -500,7 +716,9 @@ impl Provider {
     }
 
     pub async fn artist_albums(&self, artist_id: i64, cap: usize) -> Result<Vec<RemoteAlbum>> {
-        self.releases(artist_id, false, cap).await
+        let this = self.clone();
+        let fetch = async move { Ok((cap, this.releases(artist_id, false, cap).await?)) };
+        Ok(self.cached(format!("artist_albums:{artist_id}"), fits(cap), fetch).await?.1)
     }
 
     /// An artist's own latest releases, newest first: albums, EPs, singles
@@ -512,17 +730,25 @@ impl Provider {
     /// Artists the providers consider close to this one, from every one that
     /// can say. The same call the crawler expands the frontier with.
     pub async fn similar_artists(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
+        let this = self.clone();
+        let fetch = async move { Ok((limit, this.fetch_similar(artist_id, limit).await?)) };
+        Ok(self.cached(format!("similar_artists:{artist_id}"), fits(limit), fetch).await?.1)
+    }
+
+    async fn fetch_similar(&self, artist_id: i64, limit: usize) -> Result<Vec<RemoteArtist>> {
         let able = self.able(|c| c.similar_artists).await?;
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        for (source, external) in self.routes(RefKind::Artist, &artist_id.to_string()).await? {
-            if !able.contains(&source) {
-                continue;
-            }
-            match self.client(source).send(api::similar_artists(Self::number(external)?, limit)).await {
+        let routes = self.routes(RefKind::Artist, &artist_id.to_string()).await?;
+        let asks = routes.into_iter().filter(|(source, _)| able.contains(source)).map(|(source, external)| async move {
+            let ask = async { self.client(source).send(api::similar_artists(Self::number(external)?, limit)).await };
+            (source, self.within(source, BROWSE_WAIT, ask).await)
+        });
+        for (source, answer) in futures_util::future::join_all(asks).await {
+            match answer {
                 Ok(similar) => {
-                    let name = self.name(source).await?;
-                    out.extend(self.own_artists(&name, similar)?.into_iter().filter(|a| seen.insert(a.id)));
+                    let name = self.name(source)?;
+                    out.extend(self.own_artists(&name, similar).await?.into_iter().filter(|a| seen.insert(a.id)));
                 }
                 Err(err) if err.downcast_ref::<ProviderError>().is_some_and(|e| e.status == 404) => {}
                 Err(err) => return Err(err),
@@ -536,7 +762,7 @@ impl Provider {
     /// The provider called `name`, if it keeps an account's likes.
     async fn liking(&self, name: &str) -> Result<usize> {
         let source = self.named(name).await?;
-        let capabilities = self.sources[source].capabilities().await?;
+        let capabilities = self.sources[source].known().ok_or_else(|| self.sources[source].silent())?;
         anyhow::ensure!(capabilities.favourites, "{} keeps no likes of its own", capabilities.title);
         Ok(source)
     }
@@ -544,44 +770,38 @@ impl Provider {
     /// The likes of the account behind the provider called `name`.
     pub async fn favourite_tracks(&self, name: &str, cap: usize) -> Result<Vec<RemoteTrack>> {
         let source = self.liking(name).await?;
-        let found = self.client(source).send(api::favourite_tracks(cap)).await?.items;
-        self.own_tracks(name, found)
+        let found = self.within(source, BROWSE_WAIT, self.client(source).send(api::favourite_tracks(cap))).await?.items;
+        self.own_tracks(name, found).await
     }
 
     pub async fn favourite_albums(&self, name: &str, cap: usize) -> Result<Vec<RemoteAlbum>> {
         let source = self.liking(name).await?;
-        let found = self.client(source).send(api::favourite_albums(cap)).await?.items;
-        self.own_albums(name, found)
+        let found = self.within(source, BROWSE_WAIT, self.client(source).send(api::favourite_albums(cap))).await?.items;
+        self.own_albums(name, found).await
     }
 
     pub async fn favourite_artists(&self, name: &str, cap: usize) -> Result<Vec<RemoteArtist>> {
         let source = self.liking(name).await?;
-        let found = self.client(source).send(api::favourite_artists(cap)).await?.items;
-        self.own_artists(name, found)
+        let found = self.within(source, BROWSE_WAIT, self.client(source).send(api::favourite_artists(cap))).await?.items;
+        self.own_artists(name, found).await
     }
 
     /// The playlists of every provider that keeps any.
     pub async fn user_playlists(&self, cap: usize) -> Result<Vec<RemotePlaylist>> {
         let mut out = Vec::new();
         for source in self.able(|c| c.playlists).await? {
-            let name = self.name(source).await?;
-            let mut found = self.client(source).send(api::playlists(cap)).await?.items;
-            self.with_refs(|conn| {
-                for playlist in &mut found {
-                    Self::own_playlist(conn, &name, playlist)?;
-                }
-                Ok(())
-            })?;
-            out.extend(found);
+            let name = self.name(source)?;
+            let found = self.within(source, BROWSE_WAIT, self.client(source).send(api::playlists(cap))).await?.items;
+            out.extend(self.own(&name, found, Self::own_playlist).await?);
         }
         Ok(out)
     }
 
     pub async fn playlist_tracks(&self, playlist_id: i64, cap: usize) -> Result<Vec<RemoteTrack>> {
         let ask = |client: Client, id: String| async move { client.send(api::playlist_tracks(Self::number(id)?, cap)).await };
-        let (source, page) = self.first(RefKind::Playlist, &playlist_id.to_string(), ask).await?;
-        let name = self.name(source).await?;
-        self.own_tracks(&name, page.items)
+        let (source, page) = self.first(RefKind::Playlist, &playlist_id.to_string(), BROWSE_WAIT, ask).await?;
+        let name = self.name(source)?;
+        self.own_tracks(&name, page.items).await
     }
 
     // ------------------------------------------------------------ audio
@@ -590,7 +810,7 @@ impl Provider {
     /// that has it and answers.
     pub async fn file(&self, track_id: i64, quality: Quality) -> Result<FileUrl> {
         let ask = |client: Client, id: String| async move { client.send(api::file_url(Self::number(id)?, quality)).await };
-        Ok(self.first(RefKind::Track, &track_id.to_string(), ask).await?.1)
+        Ok(self.first(RefKind::Track, &track_id.to_string(), FILE_WAIT, ask).await?.1)
     }
 
     pub async fn file_url(&self, track_id: i64, quality: Quality) -> Result<String> {
@@ -601,10 +821,10 @@ impl Provider {
     /// those of its tracks that provider has. Returns its id.
     pub async fn export_playlist(&self, name: &str, track_ids: &[i64]) -> Result<i64> {
         let source = *self.able(|c| c.export).await?.first().context("no music provider can write playlists")?;
-        let provider = self.name(source).await?;
+        let provider = self.name(source)?;
         let mut theirs = Vec::new();
         for id in track_ids {
-            let routes = self.with_refs(|conn| refs::routes(conn, RefKind::Track, &id.to_string()))?;
+            let routes = self.refs_of(RefKind::Track, &id.to_string()).await?;
             if let Some((_, external)) = routes.into_iter().find(|(p, _)| *p == provider) {
                 theirs.push(Self::number(external)?);
             }
@@ -612,10 +832,11 @@ impl Provider {
         if theirs.is_empty() {
             bail!("{provider} has none of these tracks");
         }
+        // No deadline: a playlist written after one would still be written,
+        // and the retry it prompted would write it twice.
         let created = self.client(source).send(api::create_playlist(name, &theirs)).await?.id;
-        let mut playlist = RemotePlaylist { id: created, ..Default::default() };
-        self.with_refs(|conn| Self::own_playlist(conn, &provider, &mut playlist))?;
-        Ok(playlist.id)
+        let playlist = RemotePlaylist { id: created, ..Default::default() };
+        Ok(self.own(&provider, vec![playlist], Self::own_playlist).await?.remove(0).id)
     }
 
     /// Items in the shapes of the provider an older catalogue came from, as
@@ -629,7 +850,7 @@ impl Provider {
     /// What that provider is, if it is one of them.
     pub async fn legacy_capabilities(&self) -> Result<Option<Capabilities>> {
         match self.legacy().await? {
-            Some(source) => Ok(Some(self.sources[source].capabilities().await?.clone())),
+            Some(source) => Ok(self.sources[source].known().cloned()),
             None => Ok(None),
         }
     }
@@ -659,5 +880,81 @@ mod tests {
         let configs = configured(&dir);
         let pairs: Vec<(&str, Option<&str>)> = configs.iter().map(|c| (c.url.as_str(), c.token.as_deref())).collect();
         assert_eq!(pairs, [("http://127.0.0.1:7711", Some("shared")), ("https://music.example", Some("secret"))]);
+    }
+
+    /// One provider that never answers holds up neither the first request,
+    /// which waits for the one that does, nor any after; and a call past its
+    /// deadline fails and sends that provider to the back.
+    #[tokio::test]
+    async fn a_provider_that_hangs_holds_nothing_up() {
+        let hung = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (hung_at, up_at) = (hung.local_addr().unwrap(), up.local_addr().unwrap());
+        let capabilities = Capabilities { name: "up".into(), title: "Up".into(), ..Default::default() };
+        let app = axum::Router::new().route("/v1/capabilities", axum::routing::get(move || async move { axum::Json(capabilities) }));
+        tokio::spawn(async move { axum::serve(up, app).await });
+
+        let dir = std::env::temp_dir().join(format!("stelly-provider-hangs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), format!("STELLY_PROVIDERS=http://{hung_at},http://{up_at}\n")).unwrap();
+        let provider = Provider::from_env(&dir, &dir.join("stelly.db"));
+
+        let asked = Instant::now();
+        let first = futures_util::future::join_all((0..8).map(|_| provider.each_capabilities())).await;
+        assert!(asked.elapsed() < Duration::from_secs(1), "waited {:?}", asked.elapsed());
+        for answer in first {
+            assert_eq!(answer.unwrap().len(), 1);
+        }
+
+        let late = provider.within(0, Duration::from_millis(50), std::future::pending::<Result<()>>()).await;
+        assert!(late.unwrap_err().to_string().contains("did not answer"));
+        assert!(provider.sources[0].late());
+        let bulk = provider.bulk();
+        let unbounded = tokio::time::timeout(Duration::from_millis(200), bulk.within(0, Duration::from_millis(50), std::future::pending::<Result<()>>()));
+        assert!(unbounded.await.is_err(), "bulk calls have no deadline");
+        drop(hung);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Items seen before are given their ids while a stage holds the write
+    /// lock; new ones wait for it, and two answers at once with the same new
+    /// item give it one id.
+    #[tokio::test]
+    async fn ids_already_known_wait_on_no_writer() {
+        use diesel::connection::SimpleConnection;
+
+        let dir = std::env::temp_dir().join(format!("stelly-provider-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("stelly.db");
+        crate::db::open_for_write(&db_path).unwrap();
+        let provider = Provider::from_env(&dir, &db_path);
+        let track = |id: i64| RemoteTrack {
+            id,
+            title: format!("T{id}"),
+            artist: "A".into(),
+            artist_id: Some(7),
+            album_id: Some("b".into()),
+            ..Default::default()
+        };
+
+        let (one, two) = tokio::join!(
+            provider.own_tracks("p", vec![track(1), track(2)]),
+            provider.own_tracks("p", vec![track(2), track(3)]),
+        );
+        let (one, two) = (one.unwrap(), two.unwrap());
+        assert_eq!(one[1], two[0], "the same new item, one id");
+        assert_ne!(one[0].id, one[1].id);
+
+        let stage = &mut crate::db::connect(&db_path, std::time::Duration::from_secs(1)).unwrap();
+        stage.batch_execute("BEGIN IMMEDIATE;").unwrap();
+        let asked = std::time::Instant::now();
+        assert_eq!(provider.own_tracks("p", vec![track(1)]).await.unwrap()[0], one[0]);
+        assert!(asked.elapsed() < std::time::Duration::from_millis(500), "waited {:?}", asked.elapsed());
+        // A new one waits for the lock, briefly, then says so.
+        assert!(provider.own_tracks("p", vec![track(4)]).await.is_err());
+        stage.batch_execute("COMMIT;").unwrap();
+        assert!(provider.own_tracks("p", vec![track(4)]).await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

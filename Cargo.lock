@@ -6026,6 +6026,7 @@ dependencies = [
  "diesel",
  "libsqlite3-sys",
  "memmap2",
+ "rayon",
  "serde",
  "serde_json",
  "stelly-provider",
@@ -6091,6 +6092,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower-http",
+ "zstd",
 ]
 
 [[package]]

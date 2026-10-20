@@ -38,6 +38,8 @@ sha2 = "0.10"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs"] }
 tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["compression-zstd"] }
+# The space's cached bodies, compressed once per change rather than per request.
+zstd = "0.14"
 
 # CLAP's two towers, for text steering and the whole of `analyse`. Exact, and
 # the same as stelly-audio's, where the pin lives: only one ort can link into

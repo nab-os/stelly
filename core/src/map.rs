@@ -4,6 +4,7 @@
 //! binary over the asset protocol, rendering and pan/zoom happen in JS, and
 //! only selections come back. 50k points through `eval` would freeze it.
 
+use crate::api;
 use crate::db::Catalog;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -90,6 +91,48 @@ pub fn meta(catalog: &Catalog) -> MapMeta {
     }
 }
 
+/// `meta` with its labels as plain text rather than a JSON array: no parse
+/// before the map draws, and a label decoded only when one is shown.
+///
+///   offset 0 : `api::MAP_META_MAGIC`
+///   offset 4 : u32 h, the head's length, little-endian
+///   offset 8 : the head, `meta` without its labels, as JSON
+///   8 + h    : the labels, UTF-8, one per line
+///
+/// Lines rather than a table of offsets: the offsets cost more compressed
+/// than the labels gain over JSON, and the client finds the line breaks in a
+/// few milliseconds once a label is first wanted.
+pub fn meta_binary(meta: &MapMeta) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Head<'a> {
+        n: usize,
+        genres: &'a [String],
+        bounds: &'a Bounds,
+        has_layout: bool,
+    }
+    let head = serde_json::to_vec(&Head {
+        n: meta.n,
+        genres: &meta.genres,
+        bounds: &meta.bounds,
+        has_layout: meta.has_layout,
+    })
+    .unwrap_or_default();
+
+    let text: usize = meta.labels.iter().map(|label| label.len() + 1).sum();
+    let mut bytes = Vec::with_capacity(8 + head.len() + text);
+    bytes.extend_from_slice(&api::MAP_META_MAGIC);
+    bytes.extend_from_slice(&(head.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&head);
+    for (i, label) in meta.labels.iter().enumerate() {
+        if i > 0 {
+            bytes.push(b'\n');
+        }
+        // A title with a line break in it would take the next label's place.
+        bytes.extend(label.bytes().map(|byte| if byte == b'\n' { b' ' } else { byte }));
+    }
+    bytes
+}
+
 /// One binary blob, laid out so JS can make typed-array views with no copying.
 ///
 ///   offset 0      : Float64Array(n)  track ids   (f64 keeps JS numbers exact)
@@ -127,4 +170,34 @@ pub fn payload(catalog: &Catalog) -> Vec<u8> {
     }
 
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_meta_reads_back() {
+        let meta = MapMeta {
+            n: 4,
+            genres: vec!["jazz".into()],
+            labels: vec!["Ab - Cd".into(), String::new(), "Björk - Jóga".into(), "E - F\nG".into()],
+            bounds: Bounds { min_x: -1.0, max_x: 2.0, min_y: 0.5, max_y: 3.0 },
+            has_layout: true,
+        };
+        let bytes = meta_binary(&meta);
+        assert!(api::is_binary_map_meta(&bytes));
+        assert!(!api::is_binary_map_meta(&serde_json::to_vec(&meta).unwrap()));
+
+        let h = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let head: serde_json::Value = serde_json::from_slice(&bytes[8..8 + h]).unwrap();
+        assert_eq!(head["n"], 4);
+        assert_eq!(head["genres"][0], "jazz");
+        assert_eq!(head["bounds"]["max_y"], 3.0);
+        assert!(head.get("labels").is_none());
+
+        let text = std::str::from_utf8(&bytes[8 + h..]).unwrap();
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines, ["Ab - Cd", "", "Björk - Jóga", "E - F G"]);
+    }
 }

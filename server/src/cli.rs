@@ -416,9 +416,10 @@ async fn import_likes(args: Import, paths: &Paths) -> Result<()> {
             println!("{}: {} {kind} to import for {}", args.provider, found.len(), user.name);
             continue;
         }
+        let conn = &mut db::open_for_write(&paths.db_path)?;
         let mut added = 0;
         for (id, liked, at) in &found {
-            added += likes::record(&paths.db_path, user.id, id, liked, at.unwrap_or(now))?;
+            added += likes::record(conn, user.id, id, liked, at.unwrap_or(now))?;
         }
         println!("{}: {added} new liked {kind} for {}, of {}", args.provider, user.name, found.len());
     }
@@ -566,7 +567,7 @@ fn layout_command(args: Layout, paths: &Paths) -> Result<()> {
 
 fn status(paths: &Paths) -> Result<()> {
     let conn = &mut db::open_for_write(&paths.db_path)?;
-    let corpus = stages::corpus(&paths.db_path)?;
+    let corpus = stages::corpus(conn)?;
     for (label, n) in [
         ("artists", artists::table.count().get_result(conn).unwrap_or(0)),
         ("albums", albums::table.count().get_result(conn).unwrap_or(0)),
@@ -670,7 +671,7 @@ fn block_command(args: Block, paths: &Paths) -> Result<()> {
     }
 
     for m in &matches {
-        db::block_artist(&paths.db_path, m.id, &m.name, args.reason.as_deref())?;
+        db::block_artist(conn, m.id, &m.name, args.reason.as_deref())?;
         println!("blocked {} ({})", m.name, m.id);
         if args.purge {
             let purged = db::purge(conn, m.id)?;
@@ -690,7 +691,8 @@ fn block_command(args: Block, paths: &Paths) -> Result<()> {
 
 fn unblock_command(args: Unblock, paths: &Paths) -> Result<()> {
     let needle = &args.artist;
-    let blocked = db::blocked_artists(&paths.db_path)?;
+    let conn = &mut db::open_for_write(&paths.db_path)?;
+    let blocked = db::blocked_artists(conn)?;
     let lifted: Vec<_> = blocked
         .iter()
         .filter(|b| {
@@ -702,7 +704,7 @@ fn unblock_command(args: Unblock, paths: &Paths) -> Result<()> {
         bail!("no block found for {needle:?}");
     }
     for b in lifted {
-        db::unblock_artist(&paths.db_path, b.artist_id)?;
+        db::unblock_artist(conn, b.artist_id)?;
         println!("unblocked {} ({})", b.name, b.artist_id);
     }
     println!("Purged data does not come back; re-crawl to restore it.");
@@ -710,7 +712,7 @@ fn unblock_command(args: Unblock, paths: &Paths) -> Result<()> {
 }
 
 fn blocked(paths: &Paths) -> Result<()> {
-    let rows = db::blocked_artists(&paths.db_path)?;
+    let rows = db::blocked_artists(&mut db::open_for_write(&paths.db_path)?)?;
     if rows.is_empty() {
         println!("no artists blocked");
     }

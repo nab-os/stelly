@@ -125,18 +125,18 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 5.1 | No `Mutex<Engine>`: immutable catalogue, haystacks and manifest behind `Arc`, weighted spaces in a small LRU keyed by the weights | `server/src/space.rs:31`, `core/src/engine.rs` | M–L | |
-| 5.2 | SIMD-friendly dot: rows padded to 88, 8 accumulators, AVX2/FMA by multiversioning | `core/src/space.rs:206`, `paths.rs:534, 736` | S–M | |
-| 5.3 | One persistent pool (rayon) for corridor, kNN and CLAP scans | `core/src/paths.rs:284–339` | M | |
-| 5.4 | A DB layer: `on_db` over `spawn_blocking`, a read pool with mmap, cache_size and temp_store, one writer | `server/src/db.rs` and callers | M | |
-| 5.5 | Refs: a read pass without a transaction, `immediate_transaction` only for new items, short busy timeout | `server/src/provider.rs:142, 280`, `refs.rs` | M | |
-| 5.6 | Dedupe and layout commit in chunks | `server/src/dedupe.rs:269`, `pipeline/layout.rs:69` | S–M | |
-| 5.7 | Provider calls under a 10–15 s timeout; capabilities probed in the background, concurrently | `server/src/provider.rs:53–265`, provider | M | |
-| 5.8 | Stale-while-revalidate on the catalogue and account caches | `server/src/hub.rs:154`, `cache.rs` | M | |
-| 5.9 | Index, points and meta serialised and compressed once in `derive`; `ETag` = stamp, 304 | `server/src/space.rs:299`, `routes.rs:620` | S–M | |
-| 5.10 | Map labels binary instead of 6.3 MB of JSON | `core/src/map.rs:345`, `app/assets/map.js` | M | |
+| 5.1 | No `Mutex<Engine>`: immutable catalogue, haystacks and manifest behind `Arc`, weighted spaces in a small LRU keyed by the weights | `server/src/space.rs:31`, `core/src/engine.rs` | M–L | #138 |
+| 5.2 | SIMD-friendly dot: rows padded to 88, 8 accumulators, AVX2/FMA by multiversioning | `core/src/space.rs:206`, `paths.rs:534, 736` | S–M | #139 |
+| 5.3 | One persistent pool (rayon) for corridor, kNN and CLAP scans | `core/src/paths.rs:284–339` | M | #140 |
+| 5.4 | A DB layer: `on_db` over `spawn_blocking`, a read pool with mmap, cache_size and temp_store, one writer | `server/src/db.rs` and callers | M | #141 |
+| 5.5 | Refs: a read pass without a transaction, `immediate_transaction` only for new items, short busy timeout | `server/src/provider.rs:142, 280`, `refs.rs` | M | #142 |
+| 5.6 | Dedupe and layout commit in chunks | `server/src/dedupe.rs:269`, `pipeline/layout.rs:69` | S–M | #143 |
+| 5.7 | Provider calls under a 10–15 s timeout; capabilities probed in the background, concurrently | `server/src/provider.rs:53–265`, provider | M | #144 |
+| 5.8 | Stale-while-revalidate on the catalogue and account caches | `server/src/hub.rs:154`, `cache.rs` | M | #145 |
+| 5.9 | Index, points and meta serialised and compressed once in `derive`; `ETag` = stamp, 304 | `server/src/space.rs:299`, `routes.rs:620` | S–M | #147 |
+| 5.10 | Map labels binary instead of 6.3 MB of JSON | `core/src/map.rs:345`, `app/assets/map.js` | M | #148 |
 | 5.11 | SSE: a session serialised once per version; queue diffs | `server/src/routes.rs:328`, `playback.rs:434`, `core/src/session.rs` | M | |
-| 5.12 | Crawl, analyse and mix through a shared cache too | `server/src/cli.rs`, `pipeline/analyse.rs`, `mix.rs` | M | |
+| 5.12 | Crawl, analyse and mix through a shared cache too | `server/src/cli.rs`, `pipeline/analyse.rs`, `mix.rs` | M | #146 |
 
 ## Phase 6: app structure
 
