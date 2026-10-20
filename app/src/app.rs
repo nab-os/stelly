@@ -348,16 +348,14 @@ fn Shell() -> Element {
     let pipeline = use_context_provider(Pipeline::new);
     use_context_provider(Family::new);
 
-    // What is known of the space: what the disk had at once, then whatever
-    // the server says behind the window. Nothing waits on the network to open.
-    let space = use_context_provider(|| {
-        let cached = crate::cache::read::<CachedSpace>(SPACE_CACHE).unwrap_or_default();
-        Space {
-            info: Signal::new(cached.info),
-            index: Signal::new(Rc::new(cached.index)),
-            offline: Signal::new(None),
-            seen: Signal::new(0),
-        }
+    // What is known of the space: nothing for the first frame, then what the
+    // disk had, then whatever the server says behind the window. Nothing
+    // waits on the network to open, nor on two megabytes of JSON to paint.
+    let space = use_context_provider(|| Space {
+        info: Signal::new(SpaceInfo::default()),
+        index: Signal::new(Rc::new(SpaceIndex::default())),
+        offline: Signal::new(None),
+        seen: Signal::new(0),
     });
 
     // The blocks decide the sliders, and the server whether steering is on.
@@ -413,6 +411,12 @@ fn Shell() -> Element {
     let mut phase = use_context::<Signal<Phase>>();
     use_future(move || async move {
         let mut space = space;
+        // The disk's copy, read and parsed off the UI thread, before the
+        // server is asked so its answer is never overwritten by an older one.
+        if let Ok(Some(cached)) = tokio::task::spawn_blocking(|| crate::cache::read::<CachedSpace>(SPACE_CACHE)).await {
+            space.index.set(Rc::new(cached.index));
+            space.info.set(cached.info);
+        }
         let mut done: Option<(u64, u64)> = None;
         let mut wait = std::time::Duration::from_secs(2);
         loop {
@@ -473,10 +477,20 @@ fn Shell() -> Element {
             if !stamp.is_empty() && points_stamp().as_deref() != Some(stamp.as_str()) {
                 let fetched = tokio::try_join!(backend().space_points(false), backend().space_points(true));
                 if let Ok((data, meta)) = fetched {
-                    crate::cache::write_bytes(POINTS_CACHE, &data);
-                    crate::cache::write_bytes(POINTS_META_CACHE, &meta);
-                    crate::cache::write_bytes(POINTS_STAMP_CACHE, stamp.as_bytes());
-                    *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Points::new(stamp, data, meta));
+                    // Ten megabytes, written off the UI thread, and before
+                    // they are held: a second request for a body reads it
+                    // back from here.
+                    let points = Points::new(stamp, data, meta);
+                    let points = tokio::task::spawn_blocking(move || {
+                        write_points(&points);
+                        points
+                    })
+                    .await;
+                    let Ok(points) = points else {
+                        fetching_points.set(false);
+                        return;
+                    };
+                    *POINTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(points);
                     show_points().await;
                     points_shown.set(true);
                 }
@@ -1057,6 +1071,16 @@ fn read_cached_points() -> Option<Points> {
     ))
 }
 
+fn write_points(points: &Points) {
+    let bodies = [(POINTS_CACHE, &points.data), (POINTS_META_CACHE, &points.meta)];
+    for (name, body) in bodies {
+        if let Some(body) = body {
+            crate::cache::write_bytes(name, body);
+        }
+    }
+    crate::cache::write_bytes(POINTS_STAMP_CACHE, points.stamp.as_bytes());
+}
+
 /// One of the held bodies, moved out for the webview. Asked for a second
 /// time, which map.js does not do, it is read back from the disk the points
 /// were written to; with no points at all, `empty`.
@@ -1120,17 +1144,16 @@ async fn refresh_space(
             generator.invalidate();
         }
     }
-    if *space.info.peek() != info {
-        space.info.set(info);
+    if *space.info.peek() == info {
+        return Ok(());
     }
+    space.info.set(info.clone());
 
-    crate::cache::write(
-        SPACE_CACHE,
-        &CachedSpace {
-            info: space.info.peek().clone(),
-            index: (**space.index.peek()).clone(),
-        },
-    );
+    // Only when something moved, which is what the stamp is for; most
+    // refreshes are the same answer again. Two megabytes, so serialised and
+    // written off the UI thread, and waited on so two never cross.
+    let cached = CachedSpace { info, index: (**space.index.peek()).clone() };
+    let _ = tokio::task::spawn_blocking(move || crate::cache::write(SPACE_CACHE, &cached)).await;
     Ok(())
 }
 
