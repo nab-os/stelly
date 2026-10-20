@@ -331,22 +331,36 @@ impl Remote {
         let token = self.token.clone();
 
         tokio::spawn(async move {
+            // Reopened at once after a connection that worked: a stream
+            // drops most often for a server restarting or a phone changing
+            // networks, both over in a moment. Then less often while the
+            // tries keep failing. Every connection opens with the whole
+            // session, so nothing missed meanwhile is lost.
+            let mut wait = std::time::Duration::ZERO;
             loop {
-                tokio::select! {
+                let heard = tokio::select! {
                     _ = sender.closed() => return,
+                    // Whatever this connection went out on may be gone
+                    // without a word, and the silence would take a while to
+                    // say so.
+                    _ = NETWORK.notified() => true,
                     finished = read_session(&http, &url, &token, &sender) => match finished {
                         Followed::Unsupported => {
                             let _ = sender.send(SessionFeed::Unsupported);
                             return;
                         }
-                        Followed::Dropped => {
-                            if sender.send(SessionFeed::Lost).is_err() {
-                                return;
-                            }
-                        }
+                        Followed::Dropped { heard } => heard,
                     },
+                };
+                if sender.send(SessionFeed::Lost).is_err() {
+                    return;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                wait = if heard { std::time::Duration::ZERO } else { backoff(wait) };
+                tokio::select! {
+                    _ = sender.closed() => return,
+                    _ = NETWORK.notified() => {}
+                    _ = tokio::time::sleep(wait) => {}
+                }
             }
         });
 
@@ -697,14 +711,42 @@ pub enum SessionFeed {
 }
 
 enum Followed {
-    Dropped,
+    /// Whether the server was heard from first: a connection that worked
+    /// and then dropped, rather than one that never opened.
+    Dropped { heard: bool },
     Unsupported,
 }
 
 /// The server sends a keep-alive every 15s, so this long without a byte means
 /// the connection died without saying so, as a phone's does when it changes
-/// networks.
-const SILENCE: std::time::Duration = std::time::Duration::from_secs(45);
+/// networks. One keep-alive missed and a margin, not two.
+const SILENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The longest wait between tries at reopening the session stream. A try
+/// costs a refused connection, and the server is back on average half this
+/// long before it is noticed.
+const RECONNECT_CAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The wait before the next try at reopening the session stream, after one
+/// that failed following `last`: half a second, then doubling up to the cap.
+fn backoff(last: std::time::Duration) -> std::time::Duration {
+    if last.is_zero() {
+        std::time::Duration::from_millis(500)
+    } else {
+        (last * 2).min(RECONNECT_CAP)
+    }
+}
+
+/// Rung when the device moves to another network.
+static NETWORK: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// The device is on another network now: reopen the session stream at once
+/// rather than wait for its silence. Android says so, see
+/// `ui::now_playing::watch_network`; elsewhere a desktop's address rarely
+/// moves under it.
+pub fn network_changed() {
+    NETWORK.notify_waiters();
+}
 
 /// Read one connection's worth of the session stream.
 async fn read_session(
@@ -721,7 +763,7 @@ async fn read_session(
         Ok(response) => response,
         Err(err) => {
             eprintln!("session stream: {err}");
-            return Followed::Dropped;
+            return Followed::Dropped { heard: false };
         }
     };
     if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -729,11 +771,12 @@ async fn read_session(
     }
     if !response.status().is_success() {
         eprintln!("session stream refused: {}", response.status());
-        return Followed::Dropped;
+        return Followed::Dropped { heard: false };
     }
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut heard = false;
     while let Ok(Some(Ok(chunk))) = tokio::time::timeout(SILENCE, stream.next()).await {
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -750,15 +793,16 @@ async fn read_session(
             }
             match serde_json::from_str::<Update>(&data) {
                 Ok(update) => {
+                    heard = true;
                     if sender.send(SessionFeed::Update(update)).is_err() {
-                        return Followed::Dropped;
+                        return Followed::Dropped { heard };
                     }
                 }
                 Err(err) => eprintln!("session update unreadable: {err}"),
             }
         }
     }
-    Followed::Dropped
+    Followed::Dropped { heard }
 }
 
 /// The tag a copy of one of the space's bodies at `stamp` was sent with;
@@ -1005,5 +1049,17 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         settled(&remote, &["one", "two"]).await;
         remote.unfollow_pipeline_log();
+    }
+
+    #[test]
+    fn a_failing_session_stream_is_tried_less_and_less_often() {
+        let mut wait = Duration::ZERO;
+        let waits: Vec<u64> = (0..6)
+            .map(|_| {
+                wait = backoff(wait);
+                wait.as_millis() as u64
+            })
+            .collect();
+        assert_eq!(waits, [500, 1000, 2000, 2000, 2000, 2000]);
     }
 }

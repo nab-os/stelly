@@ -20,6 +20,8 @@ import android.media.MediaMetadata
 import android.media.VolumeProvider
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -78,6 +80,7 @@ object Playback {
     private var running = false
     private var remote: VolumeProvider? = null
     private var watching = false
+    private var watchingNetwork = false
     private var level = -1.0
 
     private class Track(
@@ -217,6 +220,30 @@ object Playback {
                 context.registerReceiver(receiver, filter)
             }
             reportVolume()
+        }
+    }
+
+    // The default network changing, Wi-Fi to mobile data say, leaves the
+    // session stream on a connection nothing answers any more. Reported so
+    // Rust reopens it at once rather than waiting out its silence. Not in an
+    // object of its own: `transport` is the one way back into Rust.
+    @JvmStatic
+    fun watchNetwork() {
+        main.post {
+            if (watchingNetwork) return@post
+            watchingNetwork = true
+            val connectivity = context.getSystemService(ConnectivityManager::class.java)
+            // Registering announces the network there already is, which is
+            // no change.
+            var current: Network? = connectivity.activeNetwork
+            connectivity.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (network != current) {
+                        current = network
+                        transport("network", 0.0)
+                    }
+                }
+            })
         }
     }
 
