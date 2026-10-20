@@ -109,17 +109,17 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 4.1 | Relay forwards each piece as it arrives; 403 renewal before any byte | ytmusic `routes.rs:257` | S–M | |
-| 4.2 | A missing size read from `clen=` or a 1-byte range, never by re-running yt-dlp | ytmusic `routes.rs:231` | S | |
-| 4.3 | yt-dlp single-flight, 2–3 at a time, 20 s timeout, `x-priority` honoured on `/file` | ytmusic `streams.rs` | S–M | |
-| 4.4 | ids.db in WAL with `synchronous=NORMAL`; one transaction per answer; known ids in memory | ytmusic `ids.rs` | S | |
-| 4.5 | Artist "more" shelves fetched together | ytmusic `routes.rs:327` | S | |
-| 4.6 | The working app secret probed at start and remembered | qobuz `qobuz.rs:377`, `main.rs:134` | S | |
-| 4.7 | Pages after the first fetched together once the total is known | qobuz `qobuz.rs:206, 268, 304` | S–M | |
-| 4.8 | gzip/brotli from Qobuz | qobuz `Cargo.toml` | S | |
-| 4.9 | Warm connections: pool idle, TCP and HTTP/2 keepalive, connect timeout | qobuz, ytmusic | S | |
-| 4.10 | `getReleasesList` falls back only on 404 or a parse error | qobuz `routes.rs:264` | S | |
-| 4.11 | `find` stops at the first match | ytmusic `parse.rs:78` | S | |
+| 4.1 | Relay forwards each piece as it arrives; 403 renewal before any byte | ytmusic `routes.rs:257` | S–M | ytmusic#4 |
+| 4.2 | A missing size read from `clen=` or a 1-byte range, never by re-running yt-dlp | ytmusic `routes.rs:231` | S | ytmusic#5 |
+| 4.3 | yt-dlp single-flight, 2–3 at a time, 20 s timeout, `x-priority` honoured on `/file` | ytmusic `streams.rs` | S–M | ytmusic#6 |
+| 4.4 | ids.db in WAL with `synchronous=NORMAL`; one transaction per answer; known ids in memory | ytmusic `ids.rs` | S | ytmusic#7 |
+| 4.5 | Artist "more" shelves fetched together | ytmusic `routes.rs:327` | S | ytmusic#8 |
+| 4.6 | The working app secret probed at start and remembered: first stream URL after a start 0.3–0.6 s → 0.1 s | qobuz `qobuz.rs:377`, `main.rs:134` | S | qobuz#1 |
+| 4.7 | Pages after the first fetched together once the total is known | qobuz `qobuz.rs:206, 268, 304` | S–M | qobuz#2 |
+| 4.8 | gzip from Qobuz (it sends no brotli): a 379-track album 456 → 22 KB | qobuz `Cargo.toml` | S | qobuz#3 |
+| 4.9 | Warm connections: pool idle, TCP and HTTP/2 keepalive, connect timeout | qobuz, ytmusic | S | qobuz#4, ytmusic#9 |
+| 4.10 | `getReleasesList` falls back only on 404 or a parse error | qobuz `routes.rs:264` | S | qobuz#5 |
+| 4.11 | `find` stops at the first match | ytmusic `parse.rs:78` | S | ytmusic#10 |
 
 ## Phase 5: server structure
 
