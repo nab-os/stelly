@@ -134,7 +134,7 @@ On production (2026-10-19, 142,292 tracks, behind nginx), one request at a time:
 | 5.7 | Provider calls under a 10–15 s timeout; capabilities probed in the background, concurrently | `server/src/provider.rs:53–265`, provider | M | #144 |
 | 5.8 | Stale-while-revalidate on the catalogue and account caches | `server/src/hub.rs:154`, `cache.rs` | M | #145 |
 | 5.9 | Index, points and meta serialised and compressed once in `derive`; `ETag` = stamp, 304 | `server/src/space.rs:299`, `routes.rs:620` | S–M | #147 |
-| 5.10 | Map labels binary instead of 6.3 MB of JSON | `core/src/map.rs:345`, `app/assets/map.js` | M | |
+| 5.10 | Map labels binary instead of 6.3 MB of JSON | `core/src/map.rs:345`, `app/assets/map.js` | M | #148 |
 | 5.11 | SSE: a session serialised once per version; queue diffs | `server/src/routes.rs:328`, `playback.rs:434`, `core/src/session.rs` | M | |
 | 5.12 | Crawl, analyse and mix through a shared cache too | `server/src/cli.rs`, `pipeline/analyse.rs`, `mix.rs` | M | #146 |
 
