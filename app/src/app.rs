@@ -3,7 +3,7 @@
 //! In the library rather than `main.rs` because an Android build has no
 //! `main`: the APK loads the .so and calls `start_app`.
 
-use crate::api::{Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
+use crate::api::{BlockedArtist, Device, Scope, SpaceIndex, SpaceInfo, SpaceSort};
 use crate::backend::{self, backend};
 use crate::ui::{
     icons, Blocklist, ContextMenu, ContextMenuView, Cover, Crawler, Family, GeneratePanel, Generator,
@@ -507,24 +507,32 @@ fn Shell() -> Element {
 
     // Write, then ask the space again: hiding moves its stamp, which brings
     // down the index and the map without the hidden artist.
-    let blocked = use_signal(Vec::new);
+    //
+    // From the disk first, a few entries, so a hidden artist does not flash
+    // into the favourites while the server is asked again.
+    let blocked = use_signal(|| crate::cache::read::<Vec<BlockedArtist>>(BLOCKED_CACHE).unwrap_or_default());
+    let heard_blocked = move |found: Vec<BlockedArtist>| {
+        let mut blocked = blocked;
+        crate::cache::write(BLOCKED_CACHE, &found);
+        if *blocked.peek() != found {
+            blocked.set(found);
+        }
+    };
 
     use_future(move || async move {
-        let mut blocked = blocked;
         if let Ok(found) = backend().blocked_artists().await {
-            blocked.set(found);
+            heard_blocked(found);
         }
     });
 
     let apply_block = use_callback(move |(artist_id, name): (i64, String)| {
         spawn(async move {
-            let mut blocked = blocked;
             if let Err(err) = backend().block_artist(artist_id, &name).await {
                 eprintln!("could not hide artist {artist_id}: {err:#}");
                 return;
             }
             if let Ok(found) = backend().blocked_artists().await {
-                blocked.set(found);
+                heard_blocked(found);
             }
             *nudge.write() += 1;
         });
@@ -532,13 +540,12 @@ fn Shell() -> Element {
 
     let lift_block = use_callback(move |artist_id: i64| {
         spawn(async move {
-            let mut blocked = blocked;
             if let Err(err) = backend().unblock_artist(artist_id).await {
                 eprintln!("could not unhide artist {artist_id}: {err:#}");
                 return;
             }
             if let Ok(found) = backend().blocked_artists().await {
-                blocked.set(found);
+                heard_blocked(found);
             }
             *nudge.write() += 1;
         });
@@ -1036,6 +1043,7 @@ const POINTS_CACHE: &str = "points.bin";
 const POINTS_META_CACHE: &str = "points-meta.json";
 const POINTS_STAMP_CACHE: &str = "points.stamp";
 const ME_CACHE: &str = "me.json";
+const BLOCKED_CACHE: &str = "blocked.json";
 const PROVIDER_CACHE: &str = "provider.json";
 const PROVIDERS_CACHE: &str = "providers.json";
 
