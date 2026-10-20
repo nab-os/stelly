@@ -121,6 +121,7 @@ fn add_or_badge(
             onclick: move |_| {
                 let target = target.clone();
                 status.set(None);
+                super::pace::kick();
                 spawn(async move {
                     match backend().pipeline_add(&target).await {
                         // Ahead of the next poll, so the button does not

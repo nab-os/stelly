@@ -6,14 +6,14 @@
 //! the point. **Stop** is the only way one ends early.
 
 use super::crawler::Crawler;
-use super::{icons, Me, Space, POLL};
+use super::{icons, pace, Me, Space};
 use dioxus::prelude::*;
 use crate::api::{Corpus, PipelineStatus, Progress, Scope, Stage};
 use crate::backend::backend;
 
 /// How many status polls pass between corpus recounts. Six SQL aggregates
 /// over the whole catalogue would be the most expensive idle thing the app
-/// does at 200ms.
+/// does at 200ms. Only the pipeline view shows them, so only while it is open.
 const CORPUS_EVERY: u32 = 10;
 
 #[derive(Clone, Copy)]
@@ -77,6 +77,7 @@ impl Pipeline {
             return;
         }
         self.error.set(None);
+        pace::kick();
         spawn(async move {
             let mut pipeline = self;
             if let Err(err) = backend().pipeline_start(stage).await {
@@ -91,6 +92,7 @@ impl Pipeline {
             return;
         }
         self.error.set(None);
+        pace::kick();
         spawn(async move {
             let mut pipeline = self;
             if let Err(err) = backend().pipeline_start_full().await {
@@ -102,6 +104,7 @@ impl Pipeline {
     pub fn stop(mut self, crawler: Crawler) {
         self.error.set(None);
         crawler.request_stop();
+        pace::kick();
         spawn(async move {
             let mut pipeline = self;
             if let Err(err) = backend().pipeline_stop().await {
@@ -124,7 +127,8 @@ impl Default for Pipeline {
 /// Also the app's pulse: the space is only asked for when it moves, so this
 /// is what notices a server going away mid-session, and coming back, for the
 /// notice over the main area. Only a server that does not answer counts; one
-/// refusing a play device the pipeline is still there.
+/// refusing a play device the pipeline is still there. Between jobs it asks
+/// every `pace::IDLE`, enough for that.
 pub fn use_pipeline_watch(pipeline: Pipeline, space: Space) {
     use_future(move || async move {
         let mut pipeline = pipeline;
@@ -160,12 +164,21 @@ pub fn use_pipeline_watch(pipeline: Pipeline, space: Space) {
                 }
             }
 
-            if ticks % CORPUS_EVERY == 0 {
-                pipeline.refresh();
+            // Counted from the view opening, so it opens on fresh counts.
+            if pace::watched() {
+                if ticks % CORPUS_EVERY == 0 {
+                    pipeline.refresh();
+                }
+                ticks = ticks.wrapping_add(1);
+            } else {
+                ticks = 0;
             }
-            ticks = ticks.wrapping_add(1);
 
-            tokio::time::sleep(POLL).await;
+            let busy = {
+                let status = pipeline.status.peek();
+                status.running.is_some() || !status.adding.is_empty()
+            };
+            pace::wait(busy, Some(pace::IDLE)).await;
         }
     });
 }
@@ -224,6 +237,7 @@ pub fn PipelineControls() -> Element {
     let me = use_context::<Me>().0;
     // A server older than users answers no `me`, and let any device run it.
     let admin = me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin);
+    pace::use_watch();
 
     // The counts are the last the server sent, zeros if it never answered:
     // nothing to judge a step done or due by.

@@ -1179,7 +1179,9 @@ pub fn use_session(player: Player) {
         while let Some(event) = feed.recv().await {
             match event {
                 SessionFeed::Update(update) => receive(player, update),
-                SessionFeed::Lost => {}
+                // Maybe the server is gone: the pipeline poll is what says
+                // so, and between jobs it might not ask for seconds.
+                SessionFeed::Lost => super::pace::wake(),
                 SessionFeed::Unsupported => break,
             }
         }

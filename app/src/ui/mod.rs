@@ -12,6 +12,7 @@ pub mod library;
 pub mod menu;
 #[cfg(target_os = "android")]
 mod now_playing;
+pub(crate) mod pace;
 pub mod pipeline;
 pub mod player;
 pub mod prefs;
@@ -62,7 +63,7 @@ pub(crate) const SEARCH_LIMIT: usize = 50;
 
 /// How often views watching a background job re-read it. A server can't push,
 /// so the crawl and pipeline publish status and the views poll. 200ms is below
-/// where a counter starts to look stuck.
+/// where a counter starts to look stuck. Only while one is watched, see `pace`.
 pub(crate) const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 // ------------------------------------------------------------------ context
