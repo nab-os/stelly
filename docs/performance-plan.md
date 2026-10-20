@@ -184,7 +184,7 @@ stelly-ytmusic 0.3.0, same production server), one request at a time:
 | 7.13 | Each provider's search results resolved to ids as soon as it answers, providers in parallel, merged in provider order | `server/src/provider.rs` | S | |
 | 7.14 | An artist's first albums shown in about a second, the rest filled in behind, rows looked at kept in place; Server-Timing on artist, discography, similar and album answers | `app/src/ui/library.rs`, `server/src/routes.rs` | S–M | #166, #167 |
 | 7.15 | The gateway caches `getReleasesList` by page, so a first page and the full list share their pages | qobuz `qobuz.rs` | S–M | |
-| 7.16 | The relay retries its first piece once after a connection error, and its connect timeout outlasts a slow lookup: 1 in 4 fresh first plays were a 502 behind slow DNS | ytmusic `routes.rs`, `main.rs` | S | |
+| 7.16 | The relay retries its first piece once after a connection error, and its connect timeout outlasts a slow lookup: 1 in 4 fresh first plays were a 502 behind slow DNS | ytmusic `routes.rs`, `main.rs` | S | ytmusic#19 |
 
 ## Phase 8: scale, before the space passes ~150k
 
