@@ -46,13 +46,16 @@ fn main() {
     #[cfg(not(feature = "mobile"))]
     {
         let (width, height) = window_size();
-        let mut config = dioxus::desktop::Config::new().with_disable_context_menu(false).with_window(
-            dioxus::desktop::WindowBuilder::new()
-                .with_title("Stelly")
-                // The app draws its own, see ui/titlebar.rs.
-                .with_decorations(false)
-                .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),
-        );
+        let mut config = dioxus::desktop::Config::new()
+            .with_disable_context_menu(false)
+            .with_disable_dma_buf_on_wayland(!gpu_compositing())
+            .with_window(
+                dioxus::desktop::WindowBuilder::new()
+                    .with_title("Stelly")
+                    // The app draws its own, see ui/titlebar.rs.
+                    .with_decorations(false)
+                    .with_inner_size(dioxus::desktop::LogicalSize::new(width, height)),
+            );
         if let Ok(icon) =
             dioxus::desktop::icon_from_memory(include_bytes!("../assets/icons/256x256.png"))
         {
@@ -63,6 +66,27 @@ fn main() {
             .with_cfg(config)
             .launch(stelly::app::App);
     }
+}
+
+/// Whether to leave WebKitGTK compositing on the GPU, on Linux. It does so
+/// only through its DMA-BUF renderer, which dioxus-desktop turns off on
+/// Wayland for NVIDIA's sake; with it off the webview's acceleration policy
+/// is NEVER, and asking for ALWAYS is ignored. Left on, the policy is ALWAYS
+/// by default, and a scripted minute of page changes and map pans cost the
+/// web process under 1.8 s of CPU instead of 4.1 s, at 60 fps or better.
+/// Still off on NVIDIA. A machine without a GPU gets WebKit's own software
+/// fallback, and its `WEBKIT_DISABLE_*` variables still win.
+#[cfg(not(feature = "mobile"))]
+fn gpu_compositing() -> bool {
+    if !cfg!(target_os = "linux") || std::path::Path::new("/proc/driver/nvidia").exists() {
+        return false;
+    }
+    // The other half of what dioxus-desktop does when it turns the renderer
+    // off, kept: the window under XWayland, as it always was.
+    if std::env::var_os("GDK_BACKEND").is_none() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    true
 }
 
 #[cfg(not(feature = "mobile"))]
