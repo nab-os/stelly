@@ -544,6 +544,7 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                         li {
                             key: "{key}",
                             class: if now_playing == Some(track.id) { "row playing" } else { "row" },
+                            "data-track": "{track.id}",
                             onclick: {
                                 let track = track.clone();
                                 move |_| open_remote_track(library, selection, &local, track.clone())

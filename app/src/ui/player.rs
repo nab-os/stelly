@@ -48,6 +48,9 @@ pub struct Player {
 }
 
 impl Player {
+    /// What is playing, peeked: a list reading it is not drawn again on
+    /// every change of track. Its rows' highlight is moved instead, see
+    /// `use_playing_highlight`.
     pub fn current(&self) -> Option<RemoteTrack> {
         let index = *self.index.peek();
         self.queue.peek().get(index).cloned()
@@ -934,6 +937,34 @@ fn Clock(seeking: Signal<Option<f64>>, listed: f64) -> Element {
     }
 }
 
+/// Keep the "playing" highlight on the rows of the track playing. Lists
+/// read `Player::current` without subscribing, as a change of track redrawing
+/// every list on screen, up to hundreds of rows each, is a lot for one class
+/// on two rows. So this moves the class itself, on whatever rows carry the
+/// track's `data-track`. A list drawn later reads the track as it is then.
+fn use_playing_highlight(player: Player) {
+    let playing = use_memo(move || {
+        let index = *player.index.read();
+        player.queue.read().get(index).map(|track| track.id)
+    });
+    use_effect(move || {
+        let id = playing().map(|id| id.to_string()).unwrap_or_default();
+        document::eval(&format!(
+            r#"(() => {{
+                const id = "{id}";
+                for (const row of document.querySelectorAll("[data-track].playing")) {{
+                    if (row.dataset.track !== id) row.classList.remove("playing");
+                }}
+                if (id) {{
+                    for (const row of document.querySelectorAll(`[data-track="${{id}}"]`)) {{
+                        row.classList.add("playing");
+                    }}
+                }}
+            }})();"#
+        ));
+    });
+}
+
 /// The bar along the bottom of the window, the full width of it, under the
 /// main area and the generate panel alike.
 ///
@@ -947,6 +978,8 @@ pub fn PlayerBar() -> Element {
     let library = use_context::<Library>();
     let selection = use_context::<Selection>().0;
     let local = use_context::<LocalIds>();
+
+    use_playing_highlight(player);
 
     let current = player.current();
     let queue_length = player.queue.read().len();

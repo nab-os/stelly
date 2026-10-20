@@ -1928,6 +1928,9 @@ fn MixedRows() -> Element {
             Item::Track(index, track) => rsx! {
                 li {
                     class: if now_playing == Some(track.id) { "{tile} playing" } else { "{tile}" },
+                    // The highlight follows the track from here, see
+                    // `use_playing_highlight`.
+                    "data-track": "{track.id}",
                     onclick: {
                         let track = track.clone();
                         move |_| open_remote_track(library, selection, &local, track.clone())
@@ -2351,6 +2354,7 @@ fn TrackRows() -> Element {
                             base.to_string()
                         }
                     },
+                    "data-track": "{track.id}",
                     // Opens the track's page, as an album or artist tile opens
                     // theirs. Playing is the page's button, the menu's, or
                     // "play all" above.
