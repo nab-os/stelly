@@ -118,8 +118,17 @@ struct Count {
     n: i64,
 }
 
-/// Stelly's id for `provider`'s `item`, made if it has none yet.
-pub fn resolve(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item) -> Result<String> {
+/// Stelly's id for `provider`'s `item` when it has one and `item` tells it
+/// nothing new: a read alone, which waits on no writer. `None` when only
+/// `resolve` can give it.
+pub fn known(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item) -> Result<Option<String>> {
+    Ok(stored(conn, provider, kind, item)?.and_then(|(id, learns)| (!learns).then_some(id)))
+}
+
+/// The id stored for `item`, and whether `item` fills in what it lacks: a
+/// stub, an artist named in a track say, learns what it is called when the
+/// item itself arrives.
+fn stored(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item) -> Result<Option<(String, bool)>> {
     let known = diesel::sql_query(
         "SELECT id, isrc IS NULL AS no_isrc, match_key IS NULL AS no_key, seconds IS NULL AS no_seconds
          FROM refs WHERE provider = ? AND kind = ? AND ref = ?",
@@ -128,15 +137,22 @@ pub fn resolve(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &I
     .bind::<Text, _>(kind.as_str())
     .bind::<Text, _>(&item.external)
     .load::<Known>(conn)?;
-    if let Some(found) = known.into_iter().next() {
-        // A stub, an artist named in a track say, learns what it is called
-        // when the item itself arrives. Only then is it written to: an item
-        // seen again is read alone, and waits on no writer.
+    Ok(known.into_iter().next().map(|found| {
         let learns = (found.no_isrc != 0 && item.isrc.is_some())
             || (found.no_key != 0 && item.key.is_some())
             || (found.no_seconds != 0 && item.seconds.is_some());
+        (found.id, learns)
+    }))
+}
+
+/// Stelly's id for `provider`'s `item`, made if it has none yet. Writes, so
+/// in a transaction that took the write lock first: a read that turned into
+/// a write would fail at once had another connection written meanwhile, and
+/// two could take the same new id.
+pub fn resolve(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &Item) -> Result<String> {
+    if let Some((id, learns)) = stored(conn, provider, kind, item)? {
         if !learns {
-            return Ok(found.id);
+            return Ok(id);
         }
         diesel::sql_query(
             "UPDATE refs SET isrc = COALESCE(isrc, ?), match_key = COALESCE(match_key, ?), seconds = COALESCE(seconds, ?)
@@ -149,7 +165,7 @@ pub fn resolve(conn: &mut SqliteConnection, provider: &str, kind: Kind, item: &I
         .bind::<Text, _>(kind.as_str())
         .bind::<Text, _>(&item.external)
         .execute(conn)?;
-        return Ok(found.id);
+        return Ok(id);
     }
 
     let id = match same_as(conn, provider, kind, item)? {
@@ -319,7 +335,9 @@ pub fn bootstrap(conn: &mut SqliteConnection, provider: &str) -> Result<usize> {
         ),
     ];
 
-    conn.batch_execute("BEGIN").context("bootstrapping refs")?;
+    // The write lock first: a read that turns into a write fails at once
+    // if anyone wrote in between.
+    conn.batch_execute("BEGIN IMMEDIATE").context("bootstrapping refs")?;
     // Given away by an earlier build: an item whose id is the provider's own
     // id is the catalogue's, and the catalogue is `provider`'s.
     let mut written = diesel::sql_query(
@@ -422,6 +440,21 @@ mod tests {
         let mut routes = routes(conn, Kind::Track, &qobuz).unwrap();
         routes.sort();
         assert_eq!(routes, [("local".into(), "9".into()), ("qobuz".into(), "111".into())]);
+    }
+
+    /// Read alone only what needs no write: an item never seen, or a stub
+    /// that would learn what it is called, is left for `resolve`.
+    #[test]
+    fn known_is_only_what_needs_no_write() {
+        let conn = &mut scratch();
+        let stub = Item { external: "7".into(), ..Default::default() };
+        let named = Item { key: Some(key(&["Lun"])), ..stub.clone() };
+        assert_eq!(known(conn, "qobuz", Kind::Artist, &stub).unwrap(), None);
+        let id = resolve(conn, "qobuz", Kind::Artist, &stub).unwrap();
+        assert_eq!(known(conn, "qobuz", Kind::Artist, &stub).unwrap(), Some(id.clone()));
+        assert_eq!(known(conn, "qobuz", Kind::Artist, &named).unwrap(), None);
+        assert_eq!(resolve(conn, "qobuz", Kind::Artist, &named).unwrap(), id);
+        assert_eq!(known(conn, "qobuz", Kind::Artist, &named).unwrap(), Some(id));
     }
 
     #[test]

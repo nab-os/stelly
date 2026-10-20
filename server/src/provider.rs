@@ -41,6 +41,11 @@ const SEARCH_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
 const ASK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long new ids wait for a stage's write lock before the answer fails:
+/// someone is waiting on a browse, while the crawl and analyse can wait.
+const INTERACTIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const BULK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// One configured provider, and what it said it is.
 struct Source {
     client: Client,
@@ -82,9 +87,26 @@ impl Source {
 pub struct Provider {
     sources: Arc<Vec<Source>>,
     priority: Priority,
-    db_path: PathBuf,
-    conn: Arc<Mutex<Option<SqliteConnection>>>,
+    /// Where Stelly's ids are kept.
+    db: Arc<crate::db::Db>,
     ready: Arc<OnceCell<()>>,
+}
+
+/// How an item is given Stelly's ids: by reading alone, or writing what is
+/// new.
+enum Ids<'c> {
+    Read(&'c mut SqliteConnection),
+    Write(&'c mut SqliteConnection),
+}
+
+impl Ids<'_> {
+    /// `None` when reading alone cannot give it.
+    fn of(&mut self, provider: &str, kind: RefKind, item: &Item) -> Result<Option<String>> {
+        match self {
+            Ids::Read(conn) => refs::known(conn, provider, kind, item),
+            Ids::Write(conn) => refs::resolve(conn, provider, kind, item).map(Some),
+        }
+    }
 }
 
 /// `STELLY_PROVIDERS`, or the one `STELLY_PROVIDER_URL`, from the
@@ -121,8 +143,7 @@ impl Provider {
         Self {
             sources: Arc::new(sources),
             priority: Priority::Interactive,
-            db_path: db_path.to_path_buf(),
-            conn: Arc::new(Mutex::new(None)),
+            db: crate::db::Db::shared(db_path),
             ready: Arc::new(OnceCell::new()),
         }
     }
@@ -137,22 +158,61 @@ impl Provider {
         self.sources[source].client.at(self.priority)
     }
 
-    /// `f` with the ids' database, opened on first use, as is: for what
-    /// runs its own transactions. Never held across an await.
-    fn with_conn<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        if conn.is_none() {
-            *conn = Some(crate::db::open_for_write(&self.db_path)?);
+    fn wait(&self) -> std::time::Duration {
+        match self.priority {
+            Priority::Interactive => INTERACTIVE_WAIT,
+            Priority::Bulk => BULK_WAIT,
         }
-        f(conn.as_mut().expect("opened just above"))
     }
 
-    /// `f` with the ids' database, in one transaction: a search's or an
-    /// album's worth of new ids is written and synced to disk once, not once
-    /// an item. Never held across an await.
-    fn with_refs<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
-        use diesel::Connection;
-        self.with_conn(|conn| conn.transaction(f))
+    /// One answer's `items` in Stelly's ids, `own` giving one item its ids.
+    ///
+    /// Read first, on a reader and outside any transaction: an item seen
+    /// before waits on no writer and no other answer. Only what that cannot
+    /// give, a new item or a stub that learns its name, goes to the writer,
+    /// in one transaction that takes the write lock before it reads: one
+    /// that read first would fail at once had a stage written meanwhile, and
+    /// two answers could take the same new id. Off the async workers.
+    async fn own<T: Clone + Send + 'static>(
+        &self,
+        provider: &str,
+        mut items: Vec<T>,
+        own: fn(&mut Ids, &str, &mut T) -> Result<bool>,
+    ) -> Result<Vec<T>> {
+        let (db, provider, wait) = (self.db.clone(), provider.to_string(), self.wait());
+        tokio::task::spawn_blocking(move || {
+            let new = db.read_here(|conn| {
+                let mut new = Vec::new();
+                for (i, item) in items.iter_mut().enumerate() {
+                    let mut read = item.clone();
+                    if own(&mut Ids::Read(conn), &provider, &mut read)? {
+                        *item = read;
+                    } else {
+                        new.push(i);
+                    }
+                }
+                Ok(new)
+            })?;
+            if !new.is_empty() {
+                db.write_here_within(wait, |conn| {
+                    conn.immediate_transaction(|conn| {
+                        for i in new {
+                            own(&mut Ids::Write(conn), &provider, &mut items[i])?;
+                        }
+                        Ok(())
+                    })
+                })?;
+            }
+            Ok(items)
+        })
+        .await
+        .context("the database thread panicked")?
+    }
+
+    /// The providers' items Stelly's `id` stands for.
+    async fn refs_of(&self, kind: RefKind, id: &str) -> Result<Vec<(String, String)>> {
+        let id = id.to_string();
+        self.db.read(move |conn| refs::routes(conn, kind, &id)).await
     }
 
     /// The provider a catalogue from before several providers came from:
@@ -193,7 +253,8 @@ impl Provider {
         }
         if let Some(source) = self.legacy().await? {
             let legacy = self.name(source).await?;
-            let taken = self.with_conn(|conn| refs::bootstrap(conn, &legacy))?;
+            let name = legacy.clone();
+            let taken = self.db.write_within(self.wait(), move |conn| refs::bootstrap(conn, &name)).await?;
             if taken > 0 {
                 eprintln!("took {taken} catalogue ids for {legacy}'s");
             }
@@ -223,7 +284,7 @@ impl Provider {
     /// their own id for it.
     async fn routes(&self, kind: RefKind, id: &str) -> Result<Vec<(usize, String)>> {
         self.ready().await?;
-        let known = self.with_refs(|conn| refs::routes(conn, kind, id))?;
+        let known = self.refs_of(kind, id).await?;
         let mut out = Vec::new();
         for (source, name) in self.answering().await {
             if let Some((_, external)) = known.iter().find(|(provider, _)| *provider == name) {
@@ -270,70 +331,74 @@ impl Provider {
         id.parse().with_context(|| format!("{id:?} is not a number"))
     }
 
-    fn own_artist(conn: &mut SqliteConnection, provider: &str, id: Option<i64>, name: &str) -> Result<Option<i64>> {
-        let Some(id) = id else { return Ok(None) };
+    // Each of these gives one item Stelly's ids, or says it could not: a
+    // read that found the item new, or a stub that would learn its name.
+
+    fn own_artist(ids: &mut Ids, provider: &str, id: &mut Option<i64>, name: &str) -> Result<bool> {
+        let Some(theirs) = *id else { return Ok(true) };
         let key = Some(refs::key(&[name])).filter(|_| !name.is_empty());
-        let item = Item { external: id.to_string(), key, ..Default::default() };
-        Ok(Some(Self::number(refs::resolve(conn, provider, RefKind::Artist, &item)?)?))
+        let item = Item { external: theirs.to_string(), key, ..Default::default() };
+        let Some(own) = ids.of(provider, RefKind::Artist, &item)? else { return Ok(false) };
+        *id = Some(Self::number(own)?);
+        Ok(true)
     }
 
-    fn own_track(conn: &mut SqliteConnection, provider: &str, track: &mut RemoteTrack) -> Result<()> {
+    fn own_track(ids: &mut Ids, provider: &str, track: &mut RemoteTrack) -> Result<bool> {
         let item = Item {
             external: track.id.to_string(),
             isrc: track.isrc.as_deref(),
             key: Some(refs::credit_key(&track.artist, &track.title)),
             seconds: track.duration,
         };
-        track.id = Self::number(refs::resolve(conn, provider, RefKind::Track, &item)?)?;
-        track.artist_id = Self::own_artist(conn, provider, track.artist_id, &track.artist)?;
+        let Some(id) = ids.of(provider, RefKind::Track, &item)? else { return Ok(false) };
+        track.id = Self::number(id)?;
+        if !Self::own_artist(ids, provider, &mut track.artist_id, &track.artist)? {
+            return Ok(false);
+        }
         if let Some(album) = track.album_id.take() {
             // The album's artist is not always the track's: no name to match
             // on until the album itself is seen.
             let item = Item { external: album, ..Default::default() };
-            track.album_id = Some(refs::resolve(conn, provider, RefKind::Album, &item)?);
+            let Some(id) = ids.of(provider, RefKind::Album, &item)? else { return Ok(false) };
+            track.album_id = Some(id);
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn own_album(conn: &mut SqliteConnection, provider: &str, album: &mut RemoteAlbum) -> Result<()> {
+    fn own_album(ids: &mut Ids, provider: &str, album: &mut RemoteAlbum) -> Result<bool> {
         let key = Some(refs::credit_key(&album.artist, &album.title));
         let item = Item { external: album.id.clone(), key, ..Default::default() };
-        album.id = refs::resolve(conn, provider, RefKind::Album, &item)?;
-        album.artist_id = Self::own_artist(conn, provider, album.artist_id, &album.artist)?;
-        Ok(())
+        let Some(id) = ids.of(provider, RefKind::Album, &item)? else { return Ok(false) };
+        album.id = id;
+        Self::own_artist(ids, provider, &mut album.artist_id, &album.artist)
     }
 
-    fn own_playlist(conn: &mut SqliteConnection, provider: &str, playlist: &mut RemotePlaylist) -> Result<()> {
+    fn own_one_artist(ids: &mut Ids, provider: &str, artist: &mut RemoteArtist) -> Result<bool> {
+        let mut id = Some(artist.id);
+        if !Self::own_artist(ids, provider, &mut id, &artist.name)? {
+            return Ok(false);
+        }
+        artist.id = id.expect("an id was given");
+        Ok(true)
+    }
+
+    fn own_playlist(ids: &mut Ids, provider: &str, playlist: &mut RemotePlaylist) -> Result<bool> {
         let item = Item { external: playlist.id.to_string(), ..Default::default() };
-        playlist.id = Self::number(refs::resolve(conn, provider, RefKind::Playlist, &item)?)?;
-        Ok(())
+        let Some(id) = ids.of(provider, RefKind::Playlist, &item)? else { return Ok(false) };
+        playlist.id = Self::number(id)?;
+        Ok(true)
     }
 
-    fn own_tracks(&self, provider: &str, mut tracks: Vec<RemoteTrack>) -> Result<Vec<RemoteTrack>> {
-        self.with_refs(|conn| {
-            for track in &mut tracks {
-                Self::own_track(conn, provider, track)?;
-            }
-            Ok(tracks)
-        })
+    async fn own_tracks(&self, provider: &str, tracks: Vec<RemoteTrack>) -> Result<Vec<RemoteTrack>> {
+        self.own(provider, tracks, Self::own_track).await
     }
 
-    fn own_albums(&self, provider: &str, mut albums: Vec<RemoteAlbum>) -> Result<Vec<RemoteAlbum>> {
-        self.with_refs(|conn| {
-            for album in &mut albums {
-                Self::own_album(conn, provider, album)?;
-            }
-            Ok(albums)
-        })
+    async fn own_albums(&self, provider: &str, albums: Vec<RemoteAlbum>) -> Result<Vec<RemoteAlbum>> {
+        self.own(provider, albums, Self::own_album).await
     }
 
-    fn own_artists(&self, provider: &str, mut artists: Vec<RemoteArtist>) -> Result<Vec<RemoteArtist>> {
-        self.with_refs(|conn| {
-            for artist in &mut artists {
-                artist.id = Self::own_artist(conn, provider, Some(artist.id), &artist.name)?.expect("an id was given");
-            }
-            Ok(artists)
-        })
+    async fn own_artists(&self, provider: &str, artists: Vec<RemoteArtist>) -> Result<Vec<RemoteArtist>> {
+        self.own(provider, artists, Self::own_one_artist).await
     }
 
     // ------------------------------------------------------------ what they are
@@ -432,9 +497,9 @@ impl Provider {
                 }
             };
             let name = self.name(source).await?;
-            out.tracks.extend(self.own_tracks(&name, found.tracks)?.into_iter().filter(|t| tracks.insert(t.id)));
-            out.albums.extend(self.own_albums(&name, found.albums)?.into_iter().filter(|a| albums.insert(a.id.clone())));
-            out.artists.extend(self.own_artists(&name, found.artists)?.into_iter().filter(|a| artists.insert(a.id)));
+            out.tracks.extend(self.own_tracks(&name, found.tracks).await?.into_iter().filter(|t| tracks.insert(t.id)));
+            out.albums.extend(self.own_albums(&name, found.albums).await?.into_iter().filter(|a| albums.insert(a.id.clone())));
+            out.artists.extend(self.own_artists(&name, found.artists).await?.into_iter().filter(|a| artists.insert(a.id)));
         }
         match failed {
             // Nobody answered: say why rather than that nothing was found.
@@ -447,17 +512,17 @@ impl Provider {
         let ask = |client: Client, id: String| async move { client.send(api::track(Self::number(id)?)).await };
         let (source, track) = self.first(RefKind::Track, &track_id.to_string(), ask).await?;
         let name = self.name(source).await?;
-        Ok(self.own_tracks(&name, vec![track])?.remove(0))
+        Ok(self.own_tracks(&name, vec![track]).await?.remove(0))
     }
 
     /// An album and its tracklist, in one request.
     pub async fn album(&self, album_id: &str) -> Result<AlbumTracks> {
         let ask = |client: Client, id: String| async move { client.send(api::album(&id)).await };
-        let (source, AlbumTracks { mut album, tracks }) = self.first(RefKind::Album, album_id, ask).await?;
+        let (source, AlbumTracks { album, tracks }) = self.first(RefKind::Album, album_id, ask).await?;
         let name = self.name(source).await?;
-        self.with_refs(|conn| Self::own_album(conn, &name, &mut album))?;
+        let album = self.own_albums(&name, vec![album]).await?.remove(0);
         // A tracklist names the album it is on: this one.
-        let mut tracks = self.own_tracks(&name, tracks)?;
+        let mut tracks = self.own_tracks(&name, tracks).await?;
         for track in &mut tracks {
             track.album_id = Some(album.id.clone());
         }
@@ -474,7 +539,7 @@ impl Provider {
         let ask = |client: Client, id: String| async move { client.send(api::artist(Self::number(id)?)).await };
         let (source, artist) = self.first(RefKind::Artist, &artist_id.to_string(), ask).await?;
         let name = self.name(source).await?;
-        Ok(self.own_artists(&name, vec![artist])?.remove(0))
+        Ok(self.own_artists(&name, vec![artist]).await?.remove(0))
     }
 
     /// An artist's discography from every provider that has them, newest
@@ -487,7 +552,7 @@ impl Provider {
             match self.client(source).send(api::artist_releases(Self::number(external)?, own, cap)).await {
                 Ok(page) => {
                     let name = self.name(source).await?;
-                    out.extend(self.own_albums(&name, page.items)?.into_iter().filter(|a| seen.insert(a.id.clone())));
+                    out.extend(self.own_albums(&name, page.items).await?.into_iter().filter(|a| seen.insert(a.id.clone())));
                 }
                 Err(err) => last = Some(err),
             }
@@ -522,7 +587,7 @@ impl Provider {
             match self.client(source).send(api::similar_artists(Self::number(external)?, limit)).await {
                 Ok(similar) => {
                     let name = self.name(source).await?;
-                    out.extend(self.own_artists(&name, similar)?.into_iter().filter(|a| seen.insert(a.id)));
+                    out.extend(self.own_artists(&name, similar).await?.into_iter().filter(|a| seen.insert(a.id)));
                 }
                 Err(err) if err.downcast_ref::<ProviderError>().is_some_and(|e| e.status == 404) => {}
                 Err(err) => return Err(err),
@@ -545,19 +610,19 @@ impl Provider {
     pub async fn favourite_tracks(&self, name: &str, cap: usize) -> Result<Vec<RemoteTrack>> {
         let source = self.liking(name).await?;
         let found = self.client(source).send(api::favourite_tracks(cap)).await?.items;
-        self.own_tracks(name, found)
+        self.own_tracks(name, found).await
     }
 
     pub async fn favourite_albums(&self, name: &str, cap: usize) -> Result<Vec<RemoteAlbum>> {
         let source = self.liking(name).await?;
         let found = self.client(source).send(api::favourite_albums(cap)).await?.items;
-        self.own_albums(name, found)
+        self.own_albums(name, found).await
     }
 
     pub async fn favourite_artists(&self, name: &str, cap: usize) -> Result<Vec<RemoteArtist>> {
         let source = self.liking(name).await?;
         let found = self.client(source).send(api::favourite_artists(cap)).await?.items;
-        self.own_artists(name, found)
+        self.own_artists(name, found).await
     }
 
     /// The playlists of every provider that keeps any.
@@ -565,14 +630,8 @@ impl Provider {
         let mut out = Vec::new();
         for source in self.able(|c| c.playlists).await? {
             let name = self.name(source).await?;
-            let mut found = self.client(source).send(api::playlists(cap)).await?.items;
-            self.with_refs(|conn| {
-                for playlist in &mut found {
-                    Self::own_playlist(conn, &name, playlist)?;
-                }
-                Ok(())
-            })?;
-            out.extend(found);
+            let found = self.client(source).send(api::playlists(cap)).await?.items;
+            out.extend(self.own(&name, found, Self::own_playlist).await?);
         }
         Ok(out)
     }
@@ -581,7 +640,7 @@ impl Provider {
         let ask = |client: Client, id: String| async move { client.send(api::playlist_tracks(Self::number(id)?, cap)).await };
         let (source, page) = self.first(RefKind::Playlist, &playlist_id.to_string(), ask).await?;
         let name = self.name(source).await?;
-        self.own_tracks(&name, page.items)
+        self.own_tracks(&name, page.items).await
     }
 
     // ------------------------------------------------------------ audio
@@ -604,7 +663,7 @@ impl Provider {
         let provider = self.name(source).await?;
         let mut theirs = Vec::new();
         for id in track_ids {
-            let routes = self.with_refs(|conn| refs::routes(conn, RefKind::Track, &id.to_string()))?;
+            let routes = self.refs_of(RefKind::Track, &id.to_string()).await?;
             if let Some((_, external)) = routes.into_iter().find(|(p, _)| *p == provider) {
                 theirs.push(Self::number(external)?);
             }
@@ -613,9 +672,8 @@ impl Provider {
             bail!("{provider} has none of these tracks");
         }
         let created = self.client(source).send(api::create_playlist(name, &theirs)).await?.id;
-        let mut playlist = RemotePlaylist { id: created, ..Default::default() };
-        self.with_refs(|conn| Self::own_playlist(conn, &provider, &mut playlist))?;
-        Ok(playlist.id)
+        let playlist = RemotePlaylist { id: created, ..Default::default() };
+        Ok(self.own(&provider, vec![playlist], Self::own_playlist).await?.remove(0).id)
     }
 
     /// Items in the shapes of the provider an older catalogue came from, as
@@ -659,5 +717,47 @@ mod tests {
         let configs = configured(&dir);
         let pairs: Vec<(&str, Option<&str>)> = configs.iter().map(|c| (c.url.as_str(), c.token.as_deref())).collect();
         assert_eq!(pairs, [("http://127.0.0.1:7711", Some("shared")), ("https://music.example", Some("secret"))]);
+    }
+
+    /// Items seen before are given their ids while a stage holds the write
+    /// lock; new ones wait for it, and two answers at once with the same new
+    /// item give it one id.
+    #[tokio::test]
+    async fn ids_already_known_wait_on_no_writer() {
+        use diesel::connection::SimpleConnection;
+
+        let dir = std::env::temp_dir().join(format!("stelly-provider-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("stelly.db");
+        crate::db::open_for_write(&db_path).unwrap();
+        let provider = Provider::from_env(&dir, &db_path);
+        let track = |id: i64| RemoteTrack {
+            id,
+            title: format!("T{id}"),
+            artist: "A".into(),
+            artist_id: Some(7),
+            album_id: Some("b".into()),
+            ..Default::default()
+        };
+
+        let (one, two) = tokio::join!(
+            provider.own_tracks("p", vec![track(1), track(2)]),
+            provider.own_tracks("p", vec![track(2), track(3)]),
+        );
+        let (one, two) = (one.unwrap(), two.unwrap());
+        assert_eq!(one[1], two[0], "the same new item, one id");
+        assert_ne!(one[0].id, one[1].id);
+
+        let stage = &mut crate::db::connect(&db_path, std::time::Duration::from_secs(1)).unwrap();
+        stage.batch_execute("BEGIN IMMEDIATE;").unwrap();
+        let asked = std::time::Instant::now();
+        assert_eq!(provider.own_tracks("p", vec![track(1)]).await.unwrap()[0], one[0]);
+        assert!(asked.elapsed() < std::time::Duration::from_millis(500), "waited {:?}", asked.elapsed());
+        // A new one waits for the lock, briefly, then says so.
+        assert!(provider.own_tracks("p", vec![track(4)]).await.is_err());
+        stage.batch_execute("COMMIT;").unwrap();
+        assert!(provider.own_tracks("p", vec![track(4)]).await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

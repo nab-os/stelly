@@ -126,7 +126,8 @@ const TUNING: &str = "PRAGMA mmap_size = 268435456; PRAGMA cache_size = -65536; 
 pub struct Db {
     path: PathBuf,
     readers: Mutex<Vec<SqliteConnection>>,
-    writer: Mutex<Option<SqliteConnection>>,
+    /// With how long it waits for the lock as last set.
+    writer: Mutex<Option<(SqliteConnection, Duration)>>,
 }
 
 impl Db {
@@ -163,8 +164,17 @@ impl Db {
         self: &Arc<Self>,
         f: impl FnOnce(&mut SqliteConnection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        self.write_within(REQUEST_WAIT, f).await
+    }
+
+    /// `write`, waiting up to `wait` for another connection's lock.
+    pub async fn write_within<T: Send + 'static>(
+        self: &Arc<Self>,
+        wait: Duration,
+        f: impl FnOnce(&mut SqliteConnection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         let db = self.clone();
-        tokio::task::spawn_blocking(move || db.write_here(f))
+        tokio::task::spawn_blocking(move || db.write_here_within(wait, f))
             .await
             .context("the database thread panicked")?
     }
@@ -191,13 +201,23 @@ impl Db {
 
     /// `write` on this thread, for callers already off the async workers.
     pub fn write_here<T>(&self, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
+        self.write_here_within(REQUEST_WAIT, f)
+    }
+
+    /// `write_here`, waiting up to `wait` for another connection's lock.
+    pub fn write_here_within<T>(&self, wait: Duration, f: impl FnOnce(&mut SqliteConnection) -> Result<T>) -> Result<T> {
         let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         if writer.is_none() {
-            let mut conn = open_for_write_within(&self.path, REQUEST_WAIT)?;
+            let mut conn = open_for_write_within(&self.path, wait)?;
             conn.batch_execute(TUNING)?;
-            *writer = Some(conn);
+            *writer = Some((conn, wait));
         }
-        f(writer.as_mut().expect("opened just above"))
+        let (conn, waits) = writer.as_mut().expect("opened just above");
+        if *waits != wait {
+            conn.batch_execute(&format!("PRAGMA busy_timeout = {};", wait.as_millis()))?;
+            *waits = wait;
+        }
+        f(conn)
     }
 }
 
