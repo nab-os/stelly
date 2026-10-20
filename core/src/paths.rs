@@ -2,9 +2,10 @@
 
 pub use crate::api::Step;
 use crate::db::Catalog;
-use crate::space::{ranked, Space, WeightedSpace};
+use crate::space::{ranked, WeightedSpace};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -40,21 +41,16 @@ const CORRIDOR_WIDTH: usize = 384;
 /// first one taken is almost always in here. More are sorted when it is not.
 const RANKED_FIRST: usize = 64;
 
+/// One request's view of the space: its weighting, and the catalogue as it
+/// stood when the request came in. Every part is shared, so making one costs
+/// three reference counts, and nothing in it changes under a walk.
 pub struct Navigator {
-    pub space: WeightedSpace,
-    pub catalog: Catalog,
-    pub index_of: HashMap<i64, usize>,
+    pub space: Arc<WeightedSpace>,
+    pub catalog: Arc<Catalog>,
+    pub index_of: Arc<HashMap<i64, usize>>,
 }
 
 impl Navigator {
-    pub fn new(space: &Space, weights: &HashMap<String, f32>, catalog: Catalog) -> Self {
-        Self {
-            space: space.weighted(weights),
-            catalog,
-            index_of: space.index_of.clone(),
-        }
-    }
-
     /// Push blocked rows out of reach of any argsort over similarities.
     /// Cheaper than filtering afterwards, and matches `exclude_same_artist`.
     fn mask_blocked(&self, sims: &mut [f32]) {
@@ -826,15 +822,20 @@ mod tests {
         }
 
         Navigator {
-            space: WeightedSpace {
+            space: Arc::new(WeightedSpace {
                 unit,
                 n_tracks: angles_deg.len(),
                 n_dims: 2,
                 scale: vec![1.0, 1.0],
-            },
-            catalog: Catalog::new(tracks, None, 0, HashSet::new()),
-            index_of,
+            }),
+            catalog: Arc::new(Catalog::new(tracks, None, 0, HashSet::new())),
+            index_of: Arc::new(index_of),
         }
+    }
+
+    /// The fixture's catalogue, which nothing else holds yet.
+    fn catalog(nav: &mut Navigator) -> &mut Catalog {
+        Arc::get_mut(&mut nav.catalog).expect("a fixture's catalogue is its own")
     }
 
     /// The fixture with a one-dimensional CLAP score and an artist per
@@ -842,12 +843,12 @@ mod tests {
     fn scored(rows: &[(i64, f32, f32, i64)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        let mut tracks = nav.catalog.tracks.to_vec();
         for (track, &(_, _, _, artist)) in tracks.iter_mut().zip(rows) {
             track.artist_id = artist;
         }
-        let clap = std::sync::Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect());
-        nav.catalog = Catalog::new(tracks, Some(clap), 1, HashSet::new());
+        let clap = Arc::new(rows.iter().map(|&(_, _, score, _)| score).collect());
+        nav.catalog = Arc::new(Catalog::new(tracks, Some(clap), 1, HashSet::new()));
         nav
     }
 
@@ -929,8 +930,8 @@ mod tests {
     #[test]
     fn describe_favours_what_sets_a_track_apart() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0), (12, 20.0)]);
-        nav.catalog.clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1].into());
-        nav.catalog.clap_dims = 2;
+        catalog(&mut nav).clap = Some(vec![0.9, 0.1, 0.9, 0.6, 0.9, 0.1].into());
+        catalog(&mut nav).clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         let baseline = nav.text_baseline(&phrases);
         let scores = nav.describe(11, &phrases, &baseline).unwrap();
@@ -941,8 +942,8 @@ mod tests {
     #[test]
     fn describe_needs_a_clap_vector() {
         let mut nav = navigator(&[(10, 0.0), (11, 10.0)]);
-        nav.catalog.clap = Some(vec![0.5, 0.5, 0.0, 0.0].into());
-        nav.catalog.clap_dims = 2;
+        catalog(&mut nav).clap = Some(vec![0.5, 0.5, 0.0, 0.0].into());
+        catalog(&mut nav).clap_dims = 2;
         let phrases = vec![vec![1.0, 0.0]];
         let baseline = nav.text_baseline(&phrases);
         assert!(nav.describe(11, &phrases, &baseline).is_none());
@@ -991,12 +992,12 @@ mod tests {
     fn with_twins(rows: &[(i64, f32, &str)]) -> Navigator {
         let angles: Vec<(i64, f32)> = rows.iter().map(|&(id, angle, _)| (id, angle)).collect();
         let mut nav = navigator(&angles);
-        let mut tracks = std::mem::take(&mut nav.catalog.tracks);
+        let mut tracks = nav.catalog.tracks.to_vec();
         for (track, &(_, _, title)) in tracks.iter_mut().zip(rows) {
             track.title = title.into();
             track.artist_id = 1;
         }
-        nav.catalog = Catalog::new(tracks, None, 0, HashSet::new());
+        nav.catalog = Arc::new(Catalog::new(tracks, None, 0, HashSet::new()));
         nav
     }
 
@@ -1066,8 +1067,8 @@ mod tests {
     fn mood_never_takes_a_song_twice() {
         let mut nav = with_twins(&TWINS);
         // The twins score highest, both of each pair.
-        nav.catalog.clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1].into());
-        nav.catalog.clap_dims = 1;
+        catalog(&mut nav).clap = Some(vec![0.9, 0.9, 0.8, 0.8, 0.7, 0.7, 0.1, 0.1].into());
+        catalog(&mut nav).clap_dims = 1;
         let picked = nav.mood(&[1.0], 3, 0.0, &loose());
         assert_no_song_twice(&nav, &picked);
         assert_eq!(picked.len(), 3);

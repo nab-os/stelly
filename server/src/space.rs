@@ -3,7 +3,9 @@
 //! nothing to download before it can generate.
 //!
 //! Loaded at startup and again whenever a rebuild settles. Requests hold an
-//! `Arc` to the copy they started on, so a swap never pulls it from under one.
+//! `Arc` to the copy they started on, so a swap never pulls it from under one,
+//! and share it without a lock: one person's long walk holds up no one's
+//! search.
 
 use anyhow::Result;
 use std::collections::hash_map::DefaultHasher;
@@ -16,13 +18,14 @@ use stelly_core::api::{
     BlockWeight, GenerateRequest, OrderRequest, Recipe, SpaceAlbum, SpaceArtist, SpaceIndex,
     SpaceInfo, SpaceSearch, SpaceSort, Step, TrackMeta, Word,
 };
+use stelly_core::db::Catalog;
 use stelly_core::engine::Engine;
 use stelly_core::map;
 use stelly_core::paths::Constraints;
 
-/// How long a graph path may hold the engine before the wider corridor is
-/// given up on for the even path. Most get through the first corridor in tens
-/// of milliseconds, and never come near it.
+/// How long a graph path may take before the wider corridor is given up on
+/// for the even path. Most get through the first corridor in tens of
+/// milliseconds, and never come near it.
 const PATH_BUDGET: Duration = Duration::from_millis(500);
 
 pub struct SpaceService {
@@ -35,16 +38,17 @@ pub struct SpaceService {
 }
 
 struct Loaded {
-    /// Behind a mutex rather than shared: a request's weights reweight it, and
-    /// the kNN graph is built on first use.
-    engine: Mutex<Engine>,
+    engine: Engine,
     built_at: String,
     /// Each track's searchable text, lowercased once per load rather than per
     /// query. Indexed by catalogue row, blocked rows included.
     haystacks: Vec<Haystack>,
     /// What follows from which artists are hidden, rebuilt when that changes.
-    /// Its own lock, so a long radio walk does not hold up the map.
     derived: RwLock<Arc<Derived>>,
+    /// Held while a block list is applied and derived from, so two changes
+    /// close together land in the order they came, the last one's derived
+    /// last. Requests never take it.
+    blocking: Mutex<()>,
     /// Where each describing word sits across this corpus, worked out in the
     /// background after the load. The words never change while the server
     /// runs, so the corpus is all it depends on.
@@ -94,7 +98,7 @@ impl SpaceService {
     pub fn reload(&self) -> Result<()> {
         let engine = Engine::load(&self.data_dir, &self.db_path)?;
         let built_at = engine.space.manifest.built_at.clone();
-        let catalog = &engine.navigator.catalog;
+        let catalog = engine.catalog();
         let haystacks = (0..catalog.len())
             .map(|i| {
                 let track = catalog.get(i);
@@ -105,13 +109,14 @@ impl SpaceService {
                 }
             })
             .collect();
-        let derived = derive(&engine, &built_at);
+        let derived = derive(&catalog, &built_at);
 
         let loaded = Loaded {
-            engine: Mutex::new(engine),
+            engine,
             built_at,
             haystacks,
             derived: RwLock::new(Arc::new(derived)),
+            blocking: Mutex::new(()),
             baseline: OnceLock::new(),
         };
         let loaded = Arc::new(loaded);
@@ -148,9 +153,9 @@ impl SpaceService {
     /// Apply a changed block list, and redo what depends on it.
     pub fn set_blocked(&self, blocked: HashSet<i64>) {
         let Some(loaded) = self.loaded() else { return };
-        let mut engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        engine.set_blocked(blocked);
-        let derived = derive(&engine, &loaded.built_at);
+        let _blocking = loaded.blocking.lock().unwrap_or_else(|e| e.into_inner());
+        let catalog = loaded.engine.set_blocked(blocked);
+        let derived = derive(&catalog, &loaded.built_at);
         *loaded.derived.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(derived);
     }
 
@@ -161,7 +166,7 @@ impl SpaceService {
             return SpaceInfo::default();
         };
         let derived = loaded.derived();
-        let engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
+        let engine = &loaded.engine;
         SpaceInfo {
             stamp: derived.index.stamp.clone(),
             n_tracks: engine.space.manifest.n_tracks,
@@ -195,20 +200,19 @@ impl SpaceService {
     /// does not hold.
     pub fn tracks(&self, ids: &[i64]) -> Option<Vec<TrackMeta>> {
         let loaded = self.loaded()?;
-        let engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        let navigator = &engine.navigator;
+        let index_of = &loaded.engine.space.index_of;
+        let catalog = loaded.engine.catalog();
         Some(
             ids.iter()
-                .filter_map(|id| navigator.index_of.get(id))
-                .map(|&row| navigator.catalog.get(row).clone())
+                .filter_map(|id| index_of.get(id))
+                .map(|&row| catalog.get(row).clone())
                 .collect(),
         )
     }
 
     pub fn search(&self, query: &str, sort: SpaceSort, descending: bool, limit: usize) -> Option<SpaceSearch> {
         let loaded = self.loaded()?;
-        let engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        let catalog = &engine.navigator.catalog;
+        let catalog = loaded.engine.catalog();
         let terms: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
 
         // Tracks, on their titles. Something starting with what was typed is
@@ -249,7 +253,7 @@ impl SpaceService {
         rows.truncate(limit);
         let tracks = rows.into_iter().map(|i| catalog.get(i).clone()).collect();
 
-        let (albums, artists) = groups(&loaded.haystacks, &engine, &terms);
+        let (albums, artists) = groups(&loaded.haystacks, &catalog, &terms);
         Some(SpaceSearch {
             total,
             tracks,
@@ -259,12 +263,10 @@ impl SpaceService {
     }
 
     /// Run a recipe. Drift and mood need the phrase embedded first, which is
-    /// the caller's to do: it is async, and this holds the engine.
+    /// the caller's to do: it is async, and this blocks.
     pub fn generate(&self, request: &GenerateRequest, embedding: Option<&[f32]>) -> Option<Vec<Step>> {
         let loaded = self.loaded()?;
-        let mut engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        engine.set_weights(&request.weights);
-        let navigator = &mut engine.navigator;
+        let navigator = loaded.engine.navigator(&request.weights);
         let count = request.count;
         let constraints = Constraints::default();
 
@@ -298,11 +300,11 @@ impl SpaceService {
     /// best first. Empty when the space holds no CLAP vector for it.
     pub fn describe(&self, track_id: i64, vocabulary: &Vocabulary, count: usize) -> Option<Vec<Word>> {
         let loaded = self.loaded()?;
-        // Before the engine, which the baseline does not need: when it is
-        // still being worked out this waits for it, holding up no one else.
+        // When it is still being worked out this waits for it, holding up no
+        // one else. The weights do not matter to a description.
         let baseline = loaded.baseline(vocabulary);
-        let engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(scores) = engine.navigator.describe(track_id, &vocabulary.vectors, baseline) else {
+        let navigator = loaded.engine.navigator(&HashMap::new());
+        let Some(scores) = navigator.describe(track_id, &vocabulary.vectors, baseline) else {
             return Some(Vec::new());
         };
         let mut words: Vec<Word> = vocabulary
@@ -318,9 +320,8 @@ impl SpaceService {
 
     pub fn order(&self, request: &OrderRequest) -> Option<Vec<i64>> {
         let loaded = self.loaded()?;
-        let mut engine = loaded.engine.lock().unwrap_or_else(|e| e.into_inner());
-        engine.set_weights(&request.weights);
-        Some(engine.navigator.shortest_path_order(&request.ids, request.from))
+        let navigator = loaded.engine.navigator(&request.weights);
+        Some(navigator.shortest_path_order(&request.ids, request.from))
     }
 }
 
@@ -330,16 +331,12 @@ impl Loaded {
     }
 
     /// The baseline, worked out by whoever asks first while the others wait.
-    /// Half a second on 23k tracks, seconds on a large corpus, so the engine
-    /// is held only for as long as it takes to share its vectors.
+    /// Half a second on 23k tracks, seconds on a large corpus.
     fn baseline(&self, vocabulary: &Vocabulary) -> &[(f32, f32)] {
         self.baseline.get_or_init(|| {
-            let (clap, dims) = {
-                let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-                (engine.navigator.catalog.clap.clone(), engine.navigator.catalog.clap_dims)
-            };
-            let clap = clap.as_deref().map_or(&[][..], Vec::as_slice);
-            stelly_core::paths::text_baseline(clap, dims, &vocabulary.vectors)
+            let catalog = self.engine.catalog();
+            let clap = catalog.clap.as_deref().map_or(&[][..], Vec::as_slice);
+            stelly_core::paths::text_baseline(clap, catalog.clap_dims, &vocabulary.vectors)
         })
     }
 
@@ -353,9 +350,7 @@ impl Loaded {
     }
 }
 
-fn derive(engine: &Engine, built_at: &str) -> Derived {
-    let catalog = &engine.navigator.catalog;
-
+fn derive(catalog: &Catalog, built_at: &str) -> Derived {
     // The build and the hidden artists are all a client's copy depends on.
     // Hashed rather than counted, so it survives a server restart.
     let mut blocked: Vec<i64> = catalog.blocked_artists().iter().copied().collect();
@@ -385,11 +380,10 @@ fn derive(engine: &Engine, built_at: &str) -> Derived {
 
 /// The albums and artists behind the tracks matching every term somewhere in
 /// artist, title or album, best match first.
-fn groups(haystacks: &[Haystack], engine: &Engine, terms: &[String]) -> (Vec<SpaceAlbum>, Vec<SpaceArtist>) {
+fn groups(haystacks: &[Haystack], catalog: &Catalog, terms: &[String]) -> (Vec<SpaceAlbum>, Vec<SpaceArtist>) {
     let Some(first) = terms.first() else {
         return Default::default();
     };
-    let catalog = &engine.navigator.catalog;
 
     let mut albums: Vec<(u8, SpaceAlbum)> = Vec::new();
     let mut artists: Vec<(u8, SpaceArtist)> = Vec::new();

@@ -9,12 +9,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Default)]
+/// The tracks the space holds and what is worked out from them. Cloning one
+/// shares everything but the block list: what is worked out once per load
+/// sits behind an `Arc`, so a catalogue with other artists hidden costs a
+/// flag per row, not a copy of every track.
+#[derive(Default, Clone)]
 pub struct Catalog {
-    pub tracks: Vec<TrackMeta>,
+    pub tracks: Arc<Vec<TrackMeta>>,
     /// Raw CLAP audio embeddings, row-aligned with `tracks`. Raw rather than
     /// the PCA'd semantic block; see paths::text_target. Shared, so the
-    /// describe baseline can scan it without holding the engine.
+    /// describe baseline can scan it on its own.
     pub clap: Option<Arc<Vec<f32>>>,
     pub clap_dims: usize,
     /// Artists to pretend are not there. The space keeps their rows, so
@@ -26,12 +30,12 @@ pub struct Catalog {
     blocked: Vec<bool>,
     /// Per row, its artist numbered from 0, so a walk counts artists in a
     /// plain array rather than a map. `NO_ARTIST` for a track without one.
-    artists: Vec<u32>,
+    artists: Arc<Vec<u32>>,
     artist_count: usize,
     /// For each row that is not the only one of its recording, the rows that
     /// are the same song on other releases. See `recording`. Worked out once
     /// per load, since it depends on the catalogue alone.
-    pub twins: HashMap<usize, Vec<usize>>,
+    pub twins: Arc<HashMap<usize, Vec<usize>>>,
 }
 
 /// Track ids bound into one query at load.
@@ -210,15 +214,22 @@ impl Catalog {
             })
             .collect();
         let mut catalog = Self {
-            twins: Self::twins_of(&tracks),
-            tracks,
+            twins: Arc::new(Self::twins_of(&tracks)),
+            tracks: Arc::new(tracks),
             clap,
             clap_dims,
             blocked_artists: HashSet::new(),
             blocked: Vec::new(),
-            artists,
+            artists: Arc::new(artists),
             artist_count: numbers.len(),
         };
+        catalog.set_blocked(blocked_artists);
+        catalog
+    }
+
+    /// The same catalogue with another block list, sharing its tracks.
+    pub fn with_blocked(&self, blocked_artists: HashSet<i64>) -> Self {
+        let mut catalog = self.clone();
         catalog.set_blocked(blocked_artists);
         catalog
     }

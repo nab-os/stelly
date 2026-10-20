@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 /// The space format this build understands, and the one the server writes.
 ///
@@ -52,7 +53,9 @@ pub struct Manifest {
 pub struct Space {
     pub manifest: Manifest,
     mmap: Mmap,
-    pub index_of: HashMap<i64, usize>,
+    /// Shared with every navigator over this space, rather than copied into
+    /// each.
+    pub index_of: Arc<HashMap<i64, usize>>,
 }
 
 impl Space {
@@ -97,12 +100,14 @@ impl Space {
             manifest.n_dims
         );
 
-        let index_of = manifest
-            .track_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i))
-            .collect();
+        let index_of = Arc::new(
+            manifest
+                .track_ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i))
+                .collect(),
+        );
 
         Ok(Self {
             manifest,
