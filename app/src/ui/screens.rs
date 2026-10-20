@@ -18,11 +18,13 @@ use super::{
 use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
 use crate::catalogue::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 /// Add to or remove from this user's likes, which the server keeps and Qobuz
-/// never hears of. `kind` is "track", "album" or "artist". The heart flipping
-/// is the confirmation; only a failure is worth a line of text.
+/// never hears of. `kind` is "track", "album" or "artist". The heart flips at
+/// once, the server taking its time to look the item up; only a failure is
+/// worth a line of text, and puts the heart back.
 pub(super) fn toggle_like(
     kind: &'static str,
     id: String,
@@ -31,15 +33,19 @@ pub(super) fn toggle_like(
     mut status: Signal<Option<String>>,
 ) {
     let want = !currently_liked;
-    spawn(async move {
+    let ticket = library.flip(kind, &id, want);
+    // Not tied to the page: leaving it must not drop the request, nor leave
+    // the heart flipped for good.
+    spawn_forever(async move {
         let result = if want {
             backend().favorite_add(kind, &id).await
         } else {
             backend().favorite_remove(kind, &id).await
         };
-        match result {
-            Ok(()) => library.set_liked(kind, &id, want),
-            Err(err) => status.set(Some(format!("{err:#}"))),
+        library.settle(ticket, result.is_ok());
+        if let Err(err) = result {
+            let undone = if want { "like" } else { "unlike" };
+            status.set(Some(format!("could not {undone} it: {err:#}")));
         }
     });
 }

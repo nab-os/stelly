@@ -334,6 +334,9 @@ pub struct Library {
     /// `None` before the first time `liked_only` turns on, the fetch that
     /// fills this is not worth paying for a session that never asks.
     liked: Signal<Option<Liked>>,
+    /// Likes and unlikes shown ahead of `liked`: sent and not yet answered,
+    /// or answered before `liked` had loaded. Oldest first.
+    flips: Signal<Vec<Flip>>,
     /// Bumped by every `show`. A fetch carries the value it started with and
     /// discards its result if it no longer matches, because `pending` is a
     /// single slot but the tasks it spawns are not: two views asked for in
@@ -363,6 +366,64 @@ pub(crate) struct Liked {
     pub(crate) artists: std::collections::HashSet<i64>,
 }
 
+impl Liked {
+    /// Put one id in or out of its set. `kind` is "track", "album" or
+    /// "artist".
+    fn set(&mut self, kind: &str, id: &str, liked: bool) {
+        fn put<T: std::hash::Hash + Eq>(set: &mut std::collections::HashSet<T>, id: T, liked: bool) {
+            if liked {
+                set.insert(id);
+            } else {
+                set.remove(&id);
+            }
+        }
+        match kind {
+            "track" => {
+                if let Ok(id) = id.parse() {
+                    put(&mut self.tracks, id, liked);
+                }
+            }
+            "album" => put(&mut self.albums, id.to_string(), liked),
+            "artist" => {
+                if let Ok(id) = id.parse() {
+                    put(&mut self.artists, id, liked);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One like or unlike the hearts show before the loaded sets have it.
+#[derive(Clone, PartialEq)]
+struct Flip {
+    ticket: u64,
+    kind: &'static str,
+    id: String,
+    liked: bool,
+    /// The server has it: kept only until there are loaded sets to fold it
+    /// into.
+    saved: bool,
+}
+
+/// The loaded sets, or none yet, with the flips over them.
+fn with_flips(base: Option<&Liked>, flips: &[Flip]) -> Liked {
+    let mut liked = base.cloned().unwrap_or_default();
+    for flip in flips {
+        liked.set(flip.kind, &flip.id, flip.liked);
+    }
+    liked
+}
+
+/// The saved flips folded into freshly loaded sets, which may have been
+/// read before the server had them. Those still on their way stay flips.
+fn fold_saved(liked: &mut Liked, flips: &mut Vec<Flip>) {
+    for flip in flips.iter().filter(|flip| flip.saved) {
+        liked.set(flip.kind, &flip.id, flip.liked);
+    }
+    flips.retain(|flip| !flip.saved);
+}
+
 impl Library {
     pub fn new() -> Self {
         let prefs = Prefs::load();
@@ -385,6 +446,7 @@ impl Library {
             only: Signal::new(None),
             source: Signal::new(Source::Catalogue),
             liked: Signal::new(None),
+            flips: Signal::new(Vec::new()),
             epoch: Signal::new(0),
             kept: Signal::new(Vec::new()),
             searches: Signal::new(prefs.searches),
@@ -429,18 +491,20 @@ impl Library {
         if self.liked.peek().is_some() {
             return;
         }
-        let mut liked = self.liked;
+        let (mut liked, mut flips) = (self.liked, self.flips);
         spawn(async move {
             let (tracks, albums, artists) = tokio::join!(
                 backend().favourite_tracks(LIST_CAP),
                 backend().favourite_albums(LIST_CAP),
                 backend().favourite_artists(LIST_CAP),
             );
-            liked.set(Some(Liked {
+            let mut loaded = Liked {
                 tracks: tracks.unwrap_or_default().iter().map(|t| t.id).collect(),
                 albums: albums.unwrap_or_default().iter().map(|a| a.id.clone()).collect(),
                 artists: artists.unwrap_or_default().iter().map(|a| a.id).collect(),
-            }));
+            };
+            fold_saved(&mut loaded, &mut flips.write());
+            liked.set(Some(loaded));
         });
     }
 
@@ -459,47 +523,73 @@ impl Library {
     /// liked things". The detail sheet's heart icon is the other reader;
     /// both go through `ensure_liked_loaded` first, so whichever asks first
     /// pays for the fetch and the other finds it already there.
+    ///
+    /// Likes and unlikes not yet saved show as if they were.
     pub(crate) fn liked(&self) -> Liked {
-        self.liked.read().clone().unwrap_or_default()
+        with_flips(self.liked.read().as_ref(), &self.flips.read())
     }
 
-    /// Flip one id's membership in the cached favourite sets, optimistically,
-    /// after a successful favourite add/remove, so the heart in the
-    /// detail sheet does not sit wrong until the next full reload. A no-op
-    /// before the cache has ever been loaded: there is no set to flip a
-    /// member of yet, and by the time one is loaded it will ask Qobuz fresh
-    /// rather than replay this.
-    pub(crate) fn set_liked(&self, kind: &str, id: &str, liked: bool) {
-        let mut signal = self.liked;
-        let mut current = signal.write();
-        let Some(current) = current.as_mut() else { return };
-        match kind {
-            "track" => {
-                if let Ok(track_id) = id.parse::<i64>() {
-                    if liked {
-                        current.tracks.insert(track_id);
-                    } else {
-                        current.tracks.remove(&track_id);
+    /// Show a like or unlike at once, before the server has it. Undone by
+    /// `settle` if it fails. Returns the ticket `settle` takes.
+    pub(crate) fn flip(mut self, kind: &'static str, id: &str, liked: bool) -> u64 {
+        static TICKETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ticket = TICKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.flips.write().push(Flip {
+            ticket,
+            kind,
+            id: id.to_string(),
+            liked,
+            saved: false,
+        });
+        if !liked {
+            self.drop_from_favourites(kind, id);
+        }
+        ticket
+    }
+
+    /// The server has answered a `flip`. Saved, it moves into the loaded
+    /// sets, or waits for them; refused, it is let go of and the heart goes
+    /// back. Either way the home page asks again, to show what it now holds.
+    pub(crate) fn settle(mut self, ticket: u64, saved: bool) {
+        {
+            let mut flips = self.flips.write();
+            let Some(at) = flips.iter().position(|flip| flip.ticket == ticket) else {
+                return;
+            };
+            if saved {
+                if self.liked.peek().is_some() {
+                    let flip = flips.remove(at);
+                    if let Some(liked) = self.liked.write().as_mut() {
+                        liked.set(flip.kind, &flip.id, flip.liked);
                     }
-                }
-            }
-            "album" => {
-                if liked {
-                    current.albums.insert(id.to_string());
                 } else {
-                    current.albums.remove(id);
+                    flips[at].saved = true;
+                }
+            } else {
+                flips.remove(at);
+            }
+        }
+        let view = self.view.peek().clone();
+        if matches!(view, View::Favourites { .. }) && !*self.loading.peek() {
+            self.show(view);
+        }
+    }
+
+    /// Take an unliked item off the home page, and off the copies of it kept
+    /// for going back, rather than leave it there until the next fetch.
+    fn drop_from_favourites(&mut self, kind: &str, id: &str) {
+        if matches!(*self.view.peek(), View::Favourites { .. }) {
+            for mut shelf in [self.shelf, self.loaded] {
+                let mut kept = shelf.peek().clone();
+                if kept.drop_liked(kind, id) {
+                    shelf.set(kept);
                 }
             }
-            "artist" => {
-                if let Ok(artist_id) = id.parse::<i64>() {
-                    if liked {
-                        current.artists.insert(artist_id);
-                    } else {
-                        current.artists.remove(&artist_id);
-                    }
-                }
+        }
+        for (view, _, shelf) in self.kept.write().iter_mut() {
+            if matches!(view, View::Favourites { .. }) {
+                shelf.drop_liked(kind, id);
             }
-            _ => {}
         }
     }
 
@@ -760,6 +850,20 @@ impl Library {
             }
             library.loading.set(false);
         });
+    }
+}
+
+impl Shelf {
+    /// Take out the track, album or artist `id`. Says whether it was there.
+    fn drop_liked(&mut self, kind: &str, id: &str) -> bool {
+        let before = self.tracks.len() + self.albums.len() + self.artists.len();
+        match kind {
+            "track" => self.tracks.retain(|track| track.id.to_string() != id),
+            "album" => self.albums.retain(|album| album.id != id),
+            "artist" => self.artists.retain(|artist| artist.id.to_string() != id),
+            _ => {}
+        }
+        before != self.tracks.len() + self.albums.len() + self.artists.len()
     }
 }
 
@@ -2301,6 +2405,45 @@ mod tests {
             tracks: ids.iter().map(|&id| RemoteTrack { id, ..Default::default() }).collect(),
             ..Default::default()
         }
+    }
+
+    fn flip(ticket: u64, kind: &'static str, id: &str, liked: bool, saved: bool) -> Flip {
+        Flip { ticket, kind, id: id.into(), liked, saved }
+    }
+
+    #[test]
+    fn a_like_shows_before_the_sets_have_loaded() {
+        let liked = with_flips(None, &[flip(0, "track", "7", true, false)]);
+        assert!(liked.tracks.contains(&7));
+    }
+
+    #[test]
+    fn the_last_flip_of_an_id_wins() {
+        let mut base = Liked::default();
+        base.albums.insert("a".into());
+        let flips = [flip(0, "album", "a", false, false), flip(1, "album", "a", true, false)];
+        assert!(with_flips(Some(&base), &flips).albums.contains("a"));
+        assert!(!with_flips(Some(&base), &flips[..1]).albums.contains("a"));
+    }
+
+    #[test]
+    fn loaded_sets_take_in_saved_flips_and_keep_the_rest_pending() {
+        let mut loaded = Liked::default();
+        loaded.artists.insert(3);
+        let mut flips = vec![flip(0, "artist", "3", false, true), flip(1, "track", "9", true, false)];
+        fold_saved(&mut loaded, &mut flips);
+        assert!(!loaded.artists.contains(&3));
+        assert!(!loaded.tracks.contains(&9));
+        assert_eq!(flips.len(), 1);
+        assert_eq!(flips[0].ticket, 1);
+    }
+
+    #[test]
+    fn an_unlike_takes_the_row_off_a_shelf() {
+        let mut shelf = tracks(&[1, 2]);
+        assert!(shelf.drop_liked("track", "2"));
+        assert!(!shelf.drop_liked("track", "5"));
+        assert_eq!(shelf.tracks.len(), 1);
     }
 
     fn ids(tracks: Option<Vec<RemoteTrack>>) -> Option<Vec<i64>> {
