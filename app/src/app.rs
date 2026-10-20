@@ -603,9 +603,10 @@ fn Shell() -> Element {
     crate::ui::use_session(player);
 
     // Open on the user's own library, which is also what the crawl seeds from.
-    use_future(move || async move {
-        crate::ui::open_initial(library);
-    });
+    // Before the first frame, so it already has last time's favourites in it
+    // rather than an empty home page; a read of a few hundred KB, and the
+    // fetch behind it is `LibraryPanel`'s, after the window is up.
+    use_hook(|| crate::ui::open_initial(library));
 
     // Lazy cover loading, installed once and delegated from the document, so
     // it covers every list in the window including ones not yet rendered.
