@@ -194,9 +194,14 @@
   let routeIds = [];
 
   // The canvas rect, cached. Reading it inside draw forces a layout on every
-  // frame of a drag, which is exactly when there is no budget for one.
+  // frame of a drag, which is exactly when there is no budget for one. Where
+  // it sits is kept too, for the fingers, and goes stale when anything
+  // scrolls.
   let width = 0;
   let height = 0;
+  let left = 0;
+  let top = 0;
+  let placed = false;
 
   const ratio = () => window.devicePixelRatio || 1;
 
@@ -204,12 +209,25 @@
     const rect = canvas.getBoundingClientRect();
     width = rect.width;
     height = rect.height;
+    left = rect.left;
+    top = rect.top;
+    placed = true;
     return rect;
   }
+
+  // What the backing store was last sized for. Opening the map takes the
+  // canvas from no rect to the same one it had before; sizing it again would
+  // clear it and throw the cloud away, a full raster for nothing.
+  let sized = { width: -1, height: -1, dpr: 0 };
 
   function resize() {
     const dpr = ratio();
     const rect = measure();
+    if (rect.width === sized.width && rect.height === sized.height && dpr === sized.dpr) {
+      draw();
+      return;
+    }
+    sized = { width: rect.width, height: rect.height, dpr };
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -800,6 +818,11 @@
   // with a pan or a zoom. A DOM element over the canvas rather than something
   // drawn into it, so it keeps the same size on screen at any zoom and can be
   // clicked. The canvas fills its parent, so its coordinates are the card's.
+  // Moved by `transform` rather than `left`/`top`, so following the point
+  // each frame costs no layout.
+  let cardAt = "";
+  let cardNode = null;
+
   function placeCard() {
     const card = document.getElementById("map-card");
     if (!card) return;
@@ -810,8 +833,14 @@
     const [x, y] = toScreen(selected);
     const away = x < -40 || y < -40 || x > width + 40 || y > height + 40;
     card.style.visibility = away ? "hidden" : "visible";
-    card.style.left = `${x}px`;
-    card.style.top = `${y}px`;
+    // Whole pixels, so the text stays sharp; the lift above the point is the
+    // stylesheet's, repeated here because this replaces it.
+    const at = `translate(${Math.round(x)}px, ${Math.round(y)}px) translate(-50%, calc(-100% - 20px))`;
+    if (at !== cardAt || card !== cardNode) {
+      card.style.transform = at;
+      cardAt = at;
+      cardNode = card;
+    }
   }
 
   /// A point worth looking at: halo, ring, core, and what it actually is.
@@ -1068,13 +1097,15 @@
   let pinch = 0;
   let touchCount = 0;
 
+  // Called on every move, so from the cached rect: measuring here would force
+  // a layout per touch event.
   function centre(touches) {
-    const rect = canvas.getBoundingClientRect();
+    if (!placed) measure();
     let x = 0;
     let y = 0;
     for (const t of touches) {
-      x += t.clientX - rect.left;
-      y += t.clientY - rect.top;
+      x += t.clientX - left;
+      y += t.clientY - top;
     }
     return { x: x / touches.length, y: y / touches.length };
   }
@@ -1280,6 +1311,9 @@
   };
 
   window.addEventListener("resize", resize);
+  // Any scroll may move the canvas on the page; measured again when next
+  // needed rather than on each scroll event.
+  document.addEventListener("scroll", () => { placed = false; }, { passive: true, capture: true });
 
   // The canvas can resize without the window doing so: opening the map
   // with `display: none` takes it from 0x0 to full with no resize event. `fit`

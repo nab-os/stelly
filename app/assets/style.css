@@ -405,10 +405,10 @@ button.danger:hover:not(:disabled),
 
 .map-route { position: absolute; top: 12px; left: 12px; z-index: 11; }
 
-/* Pinned over the selected point by map.js, which sets `left`/`top` to the
-   point and owns `visibility`. The transform lifts it above the point, with
-   the arrow underneath pointing down at it. Screen pixels, so a zoom moves it
-   without scaling it. */
+/* Pinned over the selected point by map.js, which translates it to the
+   point and owns `visibility`. The second translate, repeated there, lifts it
+   above the point, with the arrow underneath pointing down at it. Screen
+   pixels, so a zoom moves it without scaling it. */
 .map-card {
   position: absolute;
   left: 0;
