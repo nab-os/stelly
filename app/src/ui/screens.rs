@@ -662,28 +662,18 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
     library.ensure_liked_loaded();
     let followed = library.is_liked("artist", &artist.id.to_string());
 
-    // The portrait and biography, which nothing that links here carries. A
-    // server from before that route answers 404; the page just goes without.
-    let mut info: Signal<Option<RemoteArtist>> = use_signal(|| None);
-    {
-        let id = artist.id;
-        use_future(move || async move {
-            if let Ok(found) = backend().artist(id).await {
-                info.set(Some(found));
-            }
-        });
-    }
-    let fetched = info.read().clone();
-    let image = fetched.as_ref().and_then(|a| a.image.clone()).or_else(|| artist.image.clone());
-    let biography = fetched.as_ref().and_then(|a| a.biography.clone());
-    let albums_count = fetched.as_ref().and_then(|a| a.albums_count).or(artist.albums_count);
-
     // Sorted and keyed once per shelf, not on every render: the follow
     // button, the bio folding out and each step of the window render again.
     let id = artist.id;
     let grouped = use_memo(move || sections(library.shelf.read().visible_albums(&blocklist), id));
     let grouped = grouped.read();
     let shelf = library.shelf.read().clone();
+    // The portrait and biography, fetched with the discography and kept
+    // with it. Until then, whatever the link here carried.
+    let about = shelf.about.as_ref().filter(|about| about.id == artist.id);
+    let image = about.and_then(|a| a.image.clone()).or_else(|| artist.image.clone());
+    let biography = about.and_then(|a| a.biography.clone());
+    let albums_count = about.and_then(|a| a.albums_count).or(artist.albums_count);
     // One window over the whole discography, in page order: a section
     // further down starts only once those above it are drawn in full.
     let lengths: Vec<usize> = grouped.iter().map(|(_, albums, _)| albums.len()).collect();

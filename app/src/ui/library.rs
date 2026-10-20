@@ -161,7 +161,7 @@ pub enum View {
     /// wherever this was reached, so the page can show the cover and
     /// details while the tracklist is still loading.
     Album(RemoteAlbum),
-    /// As `Album`: the page fetches the portrait and biography on top.
+    /// As `Album`, with the portrait and biography fetched alongside.
     Artist(RemoteArtist),
     /// One track, everything known about it, laid out to be screenshotted.
     Track(RemoteTrack),
@@ -282,6 +282,11 @@ pub struct Shelf {
     /// Shown under an artist: the same hop the crawl takes when it expands
     /// the frontier, so you can see where analysis would go next.
     pub similar: Vec<crate::catalogue::RemoteArtist>,
+    /// An artist's portrait and biography, which nothing that links to
+    /// their page carries. Kept with the rest, so going back to the page, or
+    /// opening it again after a restart, does not drop them in late.
+    #[serde(default)]
+    pub about: Option<crate::catalogue::RemoteArtist>,
 }
 
 #[derive(Clone, Copy)]
@@ -943,10 +948,17 @@ impl Library {
         } else {
             None
         };
+        let page = page_name(&target);
         // Releases can take minutes to fetch cold, so last time's list is
-        // shown in the meantime, not only at startup the way home's is.
-        if *self.loading.peek() && target == View::Releases {
-            self.from_disk(epoch, RELEASES_CACHE);
+        // shown in the meantime, not only at startup the way home's is. So
+        // is an album or artist page seen before, which is often the next
+        // one opened after a restart.
+        if *self.loading.peek() {
+            if target == View::Releases {
+                self.from_disk(epoch, RELEASES_CACHE.to_string());
+            } else if let Some(name) = &page {
+                self.from_disk(epoch, format!("{PAGES}/{name}"));
+            }
         }
 
         let task = spawn(async move {
@@ -986,6 +998,9 @@ impl Library {
                     if let Some(name) = cache.filter(|_| favourites.is_none()) {
                         crate::cache::write_soon(name, shelf.clone());
                     }
+                    if let Some(name) = &page {
+                        crate::cache::write_soon_among(PAGES, name, KEPT_PAGES, shelf.clone());
+                    }
                     let sorted = in_order(&shelf, *library.sort.peek());
                     library.loaded.set(shelf);
                     library.shelf.set(sorted);
@@ -1015,10 +1030,10 @@ impl Library {
 
     /// Show what the disk kept of the view asked for at `epoch`, read off
     /// the UI thread, unless its fetch has landed first or it was left.
-    fn from_disk(self, epoch: u64, name: &'static str) {
+    fn from_disk(self, epoch: u64, name: String) {
         spawn(async move {
             let mut library = self;
-            let read = tokio::task::spawn_blocking(move || crate::cache::read::<Shelf>(name)).await;
+            let read = tokio::task::spawn_blocking(move || crate::cache::read::<Shelf>(&name)).await;
             let Ok(Some(shelf)) = read else { return };
             if *library.epoch.peek() != epoch || !*library.loading.peek() {
                 return;
@@ -1216,6 +1231,31 @@ fn home() -> View {
 const HOME_CACHE: &str = "favourites.json";
 const RELEASES_CACHE: &str = "releases.json";
 
+/// Where the album and artist pages seen lately are kept, one file each.
+const PAGES: &str = "pages";
+
+/// How many of them. A page is a few to a few dozen KB.
+const KEPT_PAGES: usize = 100;
+
+/// The file in `PAGES` a view is kept in, if it is an album or artist page.
+/// The id is escaped, as an album's is the provider's text.
+fn page_name(view: &View) -> Option<String> {
+    let (kind, id) = match view {
+        View::Album(album) => ("album", album.id.clone()),
+        View::Artist(artist) => ("artist", artist.id.to_string()),
+        _ => return None,
+    };
+    let mut name = format!("{kind}-");
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            name.push(byte as char);
+        } else {
+            name.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    Some(name + ".json")
+}
+
 /// How far back new releases reach.
 const RELEASES_DAYS: u32 = 90;
 
@@ -1301,14 +1341,17 @@ async fn load(view: View, space_only: bool, only: Option<String>) -> anyhow::Res
         View::Artist(artist) => {
             // Asked together: neither needs the other, and one after the
             // other the page waited out both round trips.
-            let (albums, similar) = tokio::join!(
+            let (albums, similar, about) = tokio::join!(
                 backend().artist_albums(artist.id, LIST_CAP),
                 backend().similar_artists(artist.id, 20),
+                backend().artist(artist.id),
             );
             shelf.albums = albums?;
             // Not fatal: an artist with no similar list should still show a
-            // discography rather than an error.
+            // discography rather than an error. Nor is a server from before
+            // the portrait and biography, which answers 404 for them.
             shelf.similar = similar.unwrap_or_default();
+            shelf.about = about.ok();
         }
         // Pages that carry what they show, or fetch it themselves.
         View::Track(_) | View::Settings => {}
@@ -2394,6 +2437,7 @@ impl Shelf {
                 _ => None,
             }),
             similar: sort.apply(self.similar, artist),
+            about: self.about,
         }
     }
 
@@ -2829,6 +2873,16 @@ mod tests {
 
     fn ids(tracks: Option<Vec<RemoteTrack>>) -> Option<Vec<i64>> {
         tracks.map(|tracks| tracks.iter().map(|track| track.id).collect())
+    }
+
+    #[test]
+    fn a_page_is_kept_under_a_name_its_id_cannot_escape() {
+        let album = |id: &str| View::Album(RemoteAlbum { id: id.into(), ..Default::default() });
+        assert_eq!(page_name(&album("0060254728690")).as_deref(), Some("album-0060254728690.json"));
+        assert_eq!(page_name(&album("../user")).as_deref(), Some("album-%2e%2e%2fuser.json"));
+        let artist = View::Artist(RemoteArtist { id: 42, ..Default::default() });
+        assert_eq!(page_name(&artist).as_deref(), Some("artist-42.json"));
+        assert_eq!(page_name(&View::Settings), None);
     }
 
     #[test]
