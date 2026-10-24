@@ -94,6 +94,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mix/library", get(mix_library))
         .route("/api/mix/tracks", post(mix_tracks))
         .route("/api/mix/tracks/{id}", get(mix_track))
+        .route("/api/mix/tracks/{id}/analyse", post(mix_track_analyse))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
         .route("/api/mix/find", get(mix_find))
@@ -967,6 +968,18 @@ async fn mix_track(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i6
     let mix = state.hub.mix().mix().await?;
     let track = mix.track(id).cloned().ok_or_else(|| Failure::not_found(format!("track {id} has no mix analysis")))?;
     Ok(Json(track))
+}
+
+/// A track's mix analysis, made now if it has none: ahead of everything
+/// queued, and waited on. `play`, like reading: it is one track.
+async fn mix_track_analyse(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_mix::library::Track> {
+    use crate::mix::Asked;
+    match state.hub.mix().analyse_now(id).await? {
+        Asked::Analysed(track) => Ok(Json(track)),
+        Asked::Failed(why) => Err(Failure::unprocessable(why)),
+        Asked::Unknown => Err(Failure::not_found(format!("track {id} is not in the catalogue"))),
+        Asked::Waiting => Err(Failure::unavailable(format!("track {id} is still queued for its mix analysis"))),
+    }
 }
 
 #[derive(Deserialize)]

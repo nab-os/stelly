@@ -58,7 +58,7 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
 | 2.1 | `listens`, recorded from the session: opened on a new current track, closed with what was listened and how it ended | `schema.sql`, `server/src/playback.rs` | M | #175 |
 | 2.2 | A play-through queues the track at `played`, run one at a time when nothing else waits | `server/src/playback.rs`, `mix.rs` | S | #176 |
 | 2.3 | Each like queued once, newest first: a track or album liked in the last day at `liked`, older ones and artists' 20 catalogued tracks at `played`; with no provider answering, the queue waits rather than failing everything | `server/src/mix.rs`, `hub.rs`, `provider.rs` | S | #177 |
-| 2.4 | `POST /api/mix/tracks/{id}/analyse`: queued at `asked`, answers when it is done | `server/src/routes.rs`, `mix.rs` | S | |
+| 2.4 | `POST /api/mix/tracks/{id}/analyse`: queued at `asked`, answers when it is done | `server/src/routes.rs`, `mix.rs` | S | #178 |
 
 ## Phase 3: the app shows it
 

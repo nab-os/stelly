@@ -246,6 +246,15 @@ fn pending_columns() -> String {
     )
 }
 
+/// `id`'s current mix analysis, if it has one.
+fn stored(conn: &mut SqliteConnection, id: i64) -> Result<Option<Track>> {
+    let row = diesel::sql_query(format!("SELECT track_id, entry_json FROM mix WHERE track_id = ? AND version = {VERSION}"))
+        .bind::<BigInt, _>(id)
+        .get_result::<Row>(conn)
+        .optional()?;
+    Ok(row.and_then(|row| serde_json::from_str(&row.entry_json).ok()))
+}
+
 fn store(conn: &mut SqliteConnection, id: i64, track: &Track) -> Result<()> {
     diesel::sql_query(
         "INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (?, ?, ?, ?)
@@ -331,9 +340,10 @@ impl Reason {
 }
 
 /// Queue those of `ids` with no current mix analysis, nor a failed one, for
-/// `reason`; answers those, which are in the queue now.
+/// `reason`; answers those, which are in the queue now. Asked for, one that
+/// failed is tried again: someone wants it now.
 pub fn enqueue(conn: &mut SqliteConnection, ids: &[i64], reason: Reason) -> Result<Vec<i64>> {
-    let todo: Vec<i64> = pending(conn, ids, false)?.into_iter().map(|p| p.id).collect();
+    let todo: Vec<i64> = pending(conn, ids, reason == Reason::Asked)?.into_iter().map(|p| p.id).collect();
     let now = crate::db::utc_now();
     conn.transaction(|conn| {
         for &id in &todo {
@@ -469,7 +479,21 @@ pub struct MixService {
     /// hub last rebuilt it for them, and the signal that a burst added some.
     spaced: AtomicUsize,
     settled: tokio::sync::Notify,
+    /// Each track as it is recorded, and why not when it failed, for whoever
+    /// is waiting on one.
+    finished: tokio::sync::broadcast::Sender<(i64, std::result::Result<(), String>)>,
     log: Arc<LogBuffer>,
+}
+
+/// What a track asked for came to.
+pub enum Asked {
+    Analysed(Track),
+    Failed(String),
+    /// Not in the catalogue, so nothing to fetch it by.
+    Unknown,
+    /// Still queued after `ASKED_WAIT`: the providers not answering, or a
+    /// long queue ahead of the tracks a worker already has.
+    Waiting,
 }
 
 impl MixService {
@@ -486,6 +510,7 @@ impl MixService {
             liked_since: Default::default(),
             spaced: AtomicUsize::new(0),
             settled: tokio::sync::Notify::new(),
+            finished: tokio::sync::broadcast::channel(256).0,
             log,
         }
     }
@@ -599,6 +624,52 @@ impl MixService {
             self.bell.ring();
         }
         Ok(queued)
+    }
+
+    /// Analyse `id` ahead of everything and wait for it: what stelly-mix
+    /// asks for a track it is about to mix and has no analysis of.
+    pub async fn analyse_now(&self, id: i64) -> Result<Asked> {
+        // Before queueing, so the end cannot come between the two.
+        let mut finished = self.finished.subscribe();
+        let db_path = self.paths.db_path.clone();
+        let read = move || -> Result<Option<Track>> { stored(&mut crate::db::open_for_write(&db_path)?, id) };
+        if let Some(track) = tokio::task::spawn_blocking(read.clone()).await?? {
+            return Ok(Asked::Analysed(track));
+        }
+        let db_path = self.paths.db_path.clone();
+        let queued = tokio::task::spawn_blocking(move || enqueue(&mut crate::db::open_for_write(&db_path)?, &[id], Reason::Asked)).await??;
+        if queued.is_empty() {
+            return Ok(Asked::Unknown);
+        }
+        self.bell.ring();
+        let outcome = tokio::time::timeout(ASKED_WAIT, async {
+            loop {
+                match finished.recv().await {
+                    Ok((done, outcome)) if done == id => return outcome,
+                    Ok(_) => {}
+                    // Missed some: it may be among them.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if matches!(tokio::task::spawn_blocking(read.clone()).await, Ok(Ok(Some(_)))) {
+                            return Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Err("the mix queue is gone".to_string()),
+                }
+            }
+        })
+        .await;
+        Ok(match outcome {
+            Err(_) => Asked::Waiting,
+            Ok(Err(why)) => Asked::Failed(why),
+            Ok(Ok(())) => {
+                // So `next` and `set` know it at once.
+                self.reread().await;
+                match tokio::task::spawn_blocking(read).await?? {
+                    Some(track) => Asked::Analysed(track),
+                    None => Asked::Failed("analysed, then gone: merged into another track?".into()),
+                }
+            }
+        })
     }
 
     /// Queue the tracks of every like not queued yet, newest first, on a
@@ -850,6 +921,7 @@ impl MixService {
     /// is one of its.
     fn tell(&self, id: i64, recorded: &Recorded) {
         self.log.push(format!("mix: {}", recorded.line));
+        let _ = self.finished.send((id, if recorded.ok { Ok(()) } else { Err(recorded.line.clone()) }));
         let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
         if !batch.left.remove(&id) {
             return;
@@ -918,6 +990,10 @@ fn artist_tracks(conn: &mut SqliteConnection, artist: i64) -> Result<Vec<i64>> {
         .load(conn)?;
     Ok(ids.into_iter().map(|row| row.id).collect())
 }
+
+/// How long a track asked for is waited on before the asking is told it is
+/// still queued.
+const ASKED_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// After a failure to drain, how long before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -996,8 +1072,12 @@ impl Feed {
         self.ready.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Asked for goes first: someone is waiting on it.
     fn push(&self, work: Work) {
-        self.ready().push_back(work);
+        match work.reason {
+            Reason::Asked => self.ready().push_front(work),
+            _ => self.ready().push_back(work),
+        }
         self.more.notify_one();
     }
 
@@ -1251,6 +1331,16 @@ mod tests {
             .unwrap();
         assert_eq!(order(conn, &[]), [(2, Reason::Selection)]);
         assert_eq!(queued(conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn asked_for_a_failed_track_is_tried_again() {
+        let conn = &mut database("asked");
+        diesel::connection::SimpleConnection::batch_execute(conn, "INSERT INTO mix_failures (track_id, reason) VALUES (1, 'no audio');")
+            .unwrap();
+        assert!(enqueue(conn, &[1], Reason::Liked).unwrap().is_empty());
+        assert_eq!(enqueue(conn, &[1, 6], Reason::Asked).unwrap(), [1]);
+        assert_eq!(order(conn, &[]), [(1, Reason::Asked)]);
     }
 
     #[test]
