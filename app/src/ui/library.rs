@@ -1637,6 +1637,11 @@ fn SearchBar() -> Element {
     let only = library.only.read().clone();
     let mut query = search.text;
     let source = *library.source.read();
+    // Mood needs no track, so it lives here rather than on a track's page:
+    // the same words, played as what they sound like.
+    let generator = use_context::<super::Generator>();
+    let steer = generator.can_steer();
+    let busy = *generator.busy.read();
 
     // The magnifier opened this screen to type into, so the keyboard should
     // already be up.
@@ -1665,7 +1670,7 @@ fn SearchBar() -> Element {
             div { class: "search-wrap",
                 input {
                     class: "search",
-                    placeholder: "artist, title or album, any order",
+                    placeholder: if steer { "search, or describe a mood" } else { "artist, title or album, any order" },
                     value: "{query}",
                     oninput: move |e| {
                         // A search is timed from its last keystroke.
@@ -1695,6 +1700,16 @@ fn SearchBar() -> Element {
                         onclick: move |_| query.set(String::new()),
                         "×"
                     }
+                }
+            }
+            if steer && !query().trim().is_empty() {
+                button {
+                    class: "mood-search",
+                    title: "play what sounds like these words, from your space",
+                    disabled: busy,
+                    onclick: move |_| generator.feel(query.peek().trim()),
+                    {super::icons::mood()}
+                    if busy { "working…" } else { "Play as a mood" }
                 }
             }
             // Where to look, as a phrase: one dropdown, so the box keeps

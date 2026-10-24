@@ -4,8 +4,8 @@
 //! It points at the real thing rather than at a picture of it: each step
 //! names the elements it is about, and `tour.js` rings the first of them
 //! that is on screen, dimming the rest, and sets the card beside it. A list
-//! rather than one, because a phone hides some of them: the generate panel
-//! is off to the side there, and its floating button is what to point at.
+//! rather than one, because not all of them are always showing: a track's
+//! page may not be open, and then the queue button is what to point at.
 
 use super::prefs;
 use dioxus::prelude::*;
@@ -34,10 +34,11 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "Generate",
-        body: "Select a track and let the space choose what comes next: its nearest \
-               neighbours, a radio that keeps going, a path from A to B, a drift towards \
-               a phrase, or tracks that sound like a mood you describe.",
-        targets: &[".side-panel", ".fab-generate"],
+        body: "Open a track from your space and start something from it: a radio that \
+               keeps going, its nearest neighbours, a path to it from another track, or a \
+               drift towards a phrase. Describe a mood in the search box. Whatever you \
+               start joins the queue as its own section, to reroll, save or stop.",
+        targets: &[".start-box", ".queue-btn"],
     },
     Step {
         title: "The map",

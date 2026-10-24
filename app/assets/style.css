@@ -81,8 +81,8 @@ code {
   display: flex;
   gap: 12px;
   padding: 12px 12px 0;
-  /* The queue drawer and, on a phone, the generate panel are positioned
-     against this box, so both stop at the player rather than covering it. */
+  /* On a phone the queue drawer is positioned against this box, so it stops
+     at the player rather than covering it. */
   position: relative;
 }
 
@@ -351,17 +351,6 @@ button.danger:hover:not(:disabled),
   50% { opacity: 0.25; }
 }
 
-/* The same news in the generate panel, which is what it stops. */
-.panel-offline {
-  margin: 0;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border-left: 3px solid var(--danger);
-  background: #3a1d26;
-  color: var(--danger);
-  font-size: 12px;
-}
-
 .fab {
   display: grid;
   place-items: center;
@@ -374,9 +363,6 @@ button.danger:hover:not(:disabled),
 .fab-map .icon { width: 26px; height: 26px; }
 .fab-map:hover:not(:disabled) { background: #8fb3ff; }
 .fab-map.active { box-shadow: 0 0 0 3px var(--panel), 0 0 0 5px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
-
-/* Phone only, see the `@media` block. */
-.hero-generate, .fab-generate { display: none; }
 
 /* --------------------------------------------------------------------- map
    Over the main area. The background must stay opaque and must stay
@@ -832,27 +818,100 @@ button.adding:disabled {
 
 .rule { border-top: 1px solid var(--row); }
 
+/* A track's details beside its credits, under a rule. */
+.details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--row);
+  font-size: 12px;
+}
+.credits-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.credits-col .shelf-head { margin: 0; }
+
 .facts {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: 7px 28px;
+  gap: 4px 24px;
   margin: 0;
+  align-content: start;
 }
 .fact { display: contents; }
 .fact dt { color: var(--muted); }
 .fact dd { margin: 0; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.fact dd.no { color: var(--danger); }
 
 .credits {
-  list-style: none;
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) minmax(0, 1fr);
+  gap: 4px 16px;
   margin: 0;
-  padding: 0;
+}
+
+.page-foot { margin-top: 10px; align-self: flex-start; }
+
+/* What to start from a track: its own row under play and queue, darker
+   than the page so it reads as one tool. Locked, its buttons dim and a line
+   says why, beside the way in. */
+.start-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--bg);
+  max-width: 620px;
+}
+.start-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.start-row > .icon { width: 16px; height: 16px; color: var(--accent); flex: none; }
+.start-why { font-size: 12px; }
+.start-why.error { color: var(--danger); }
+.start-box .icon { width: 15px; height: 15px; }
+.drift-row .search { flex: 1 1 200px; margin: 0; min-width: 0; }
+
+/* Radio, and an arrow for the other walks, joined into one button. */
+.split { position: relative; display: flex; }
+.split-main { border-radius: 6px 0 0 6px; gap: 6px; }
+.split-more { border-radius: 0 6px 6px 0; border-left: 1px solid var(--row-hover); padding: 0 10px; }
+.split-more.active { background: var(--row-hover); }
+.split-scrim { position: fixed; inset: 0; z-index: 30; }
+.split-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 31;
+  width: 280px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
   display: flex;
   flex-direction: column;
   gap: 2px;
-  color: var(--muted);
 }
+.split-item {
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 8px;
+  background: transparent;
+  text-align: left;
+}
+.split-item:hover:not(:disabled) { background: var(--row-hover); }
+.split-item .icon { width: 18px; height: 18px; color: var(--accent); flex: none; }
+.split-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.split-text .muted { font-size: 12px; }
+.split-foot { padding: 6px 8px 2px; border-top: 1px solid var(--row); font-size: 11px; }
 
-.page-foot { margin-top: 10px; }
+.path-to { gap: 6px; }
+.path-to .icon { color: var(--path-a); }
+.path-to.set { color: var(--path-a); box-shadow: inset 0 0 0 1px rgba(158, 206, 106, 0.55); }
+
+.start-box.locked .split-main,
+.start-box.locked .split-more,
+.start-box.locked .path-to { color: var(--muted); }
+.start-box.locked .icon { color: inherit; }
 
 /* Folded to a few lines by default, faded out where it is cut. */
 .bio {
@@ -897,51 +956,8 @@ span.path-end {
   .album-tracks .row:hover .row-actions { opacity: 1; }
 }
 
-/* ------------------------------------------------------------ generate panel */
-
-.side-panel {
-  width: 380px;
-  flex: none;
-  overflow-y: auto;
-  gap: 10px;
-}
-/* One scroller for the whole panel; nothing inside it shrinks to fit. */
-.side-panel > * { flex: none; }
-.side-panel h2 { margin: 0; }
-.side-panel .actions { margin: 0; }
-.side-panel .search { margin: 0; }
-
-/* Phone only, see the `@media` block. */
-.side-back { display: none; }
-
-.seed {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px;
-  background: var(--row);
-  border-radius: 8px;
-  cursor: pointer;
-}
-.seed:hover { background: var(--row-hover); }
-.seed-text { display: flex; flex-direction: column; min-width: 0; }
-.seed-text .title { font-weight: 600; }
-.seed-empty { margin: 0; }
-
-.tabs { display: flex; gap: 4px; }
-.tab {
-  flex: 1;
-  background: transparent;
-  color: var(--muted);
-  border-bottom: 2px solid transparent;
-  border-radius: 4px 4px 0 0;
-  padding: 5px 4px;
-  flex-direction: column;
-  gap: 2px;
-}
-.tab .icon { width: 18px; height: 18px; }
-.tab.active { color: var(--text); border-bottom-color: var(--accent); }
-.side-panel .tabs + p { margin: 0; }
+/* ------------------------------------------------------------- generating
+   Its knobs, in settings, and a path half-built, above the player. */
 
 .moods { display: flex; flex-wrap: wrap; gap: 6px; }
 
@@ -962,15 +978,7 @@ span.path-end {
 }
 .slider label { font-size: 12px; }
 .slider input { width: 100%; }
-
-.result-head {
-  text-transform: none;
-  letter-spacing: normal;
-  font-size: 12px;
-  margin: 4px 0 0;
-}
-.result-head .ellipsis { min-width: 0; }
-.result.list .title { font-size: 12px; }
+.generate-setting .slider { max-width: 480px; grid-template-columns: 90px 1fr 36px; }
 
 .weights-disclosure { border-top: 1px solid var(--row); padding-top: 4px; }
 .weights-toggle {
@@ -989,8 +997,22 @@ span.path-end {
 .weights-toggle:hover:not(:disabled) { background: transparent; color: var(--text); }
 .weights-disclosure .slider { margin-bottom: 4px; }
 
-/* A path half-built, on a phone only, where the panel is usually away. */
-.path-pill { display: none; }
+/* A path half-built: its start is set, its end is being looked for. */
+.path-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 6px 8px 6px 10px;
+  background: var(--panel);
+  border-radius: 10px;
+  flex: none;
+}
+.path-pill .ellipsis { flex: 1; min-width: 0; font-size: 12px; }
+
+/* Mood, beside the search box: the same words, played as a sound. */
+.mood-search { gap: 6px; flex: none; }
+.mood-search .icon { width: 15px; height: 15px; color: var(--accent); }
 
 /* ------------------------------------------------------------------ player
    The full width of the window, under everything. A grid of three: two
@@ -1123,32 +1145,55 @@ span.path-end {
   z-index: 5;
 }
 
-/* ------------------------------------------------------------ queue drawer
-   Rises from the player over the bottom right of the workspace, and goes
-   back down when the queue button is pressed again. */
+/* ------------------------------------------------------------------ queue
+   The right-hand column beside the main area, there while the queue button
+   is on and gone, giving the main area its width back, while it is off. On
+   a phone, a drawer instead; see the `@media` block. */
 
 .queue-drawer {
-  position: absolute;
-  right: 12px;
-  bottom: 0;
-  z-index: 20;
-  width: min(460px, calc(100% - 24px));
-  max-height: 72%;
+  width: 360px;
+  flex: none;
   gap: 8px;
-  border-radius: 12px 12px 0 0;
-  box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.45);
-  transform: translateY(calc(100% + 16px));
-  visibility: hidden;
-  transition: transform 200ms ease, visibility 0s linear 200ms;
+  padding: 0 8px 8px;
+  display: none;
 }
-.queue-drawer.open {
-  transform: none;
-  visibility: visible;
-  transition: transform 200ms ease;
-}
+.queue-drawer.open { display: flex; }
 
-.queue-head { display: flex; align-items: center; gap: 6px; flex: none; }
-.queue-head h2 { margin: 0; }
+.queue-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin: 0 -8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--row);
+}
+.queue-head h2 { margin: 0; color: var(--text); }
+.queue-where { font-variant-numeric: tabular-nums; }
+.queue-drawer > p { margin: 8px 6px; }
+
+/* The generated section: a header over its rows, which carry its colour
+   down their left edge. */
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px 8px 0 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--row);
+}
+.section-icon { display: grid; place-items: center; color: var(--accent); flex: none; }
+.section-icon .icon { width: 16px; height: 16px; }
+.section-text { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.3; }
+.section-text .title { font-weight: 600; font-size: 12px; }
+.section-text .muted { font-size: 11px; }
+.section-actions { display: flex; gap: 8px; flex: none; }
+.section-actions .link { font-size: 11px; }
+.section-actions .link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+.section-status { margin: 0; padding: 4px 10px; background: var(--bg); font-size: 11px; }
+.queue-row.generated { box-shadow: inset 2px 0 0 var(--accent); border-radius: 0 8px 8px 0; }
 
 /* Phone only, see the `@media` block. */
 .drawer-handle { display: none; }
@@ -1663,9 +1708,8 @@ span.path-end {
 }
 
 /* ============================================================== phone
-   The generate panel leaves the row and slides in from the right, over the
-   main area but not the player, with a floating arrow to send it back. A
-   floating button beside the map one, the panel's own, brings it in. */
+   The main area takes the whole width, and the queue rises over it from
+   the player as a drawer. */
 
 @media (max-width: 900px) {
   .workspace { padding: 0; gap: 0; }
@@ -1674,71 +1718,16 @@ span.path-end {
   .screen-body { padding: 12px 12px 96px; }
   .topbar { padding: 6px 8px; padding-top: max(6px, env(safe-area-inset-top)); }
 
-  .side-panel {
-    position: absolute;
-    inset: 0;
-    z-index: 25;
-    width: auto;
-    border-radius: 0;
-    padding-top: max(12px, env(safe-area-inset-top));
-    transform: translateX(100%);
-    visibility: hidden;
-    transition: transform 220ms ease, visibility 0s linear 220ms;
-  }
-  .side-panel.open {
-    transform: none;
-    visibility: visible;
-    transition: transform 220ms ease;
-  }
-  /* Room beside the heading for the floating arrow. */
-  .side-panel h2 { min-height: 40px; padding-left: 52px; }
-  /* So the end of the panel can scroll clear of the floating buttons. */
-  .side-panel { padding-bottom: 84px; }
-
-  /* Fixed, so it stays put while the panel scrolls under it. The panel's
-     transform makes it the containing block while sliding, so the arrow
-     slides in with it, and once in (`transform: none`) it is the window's. */
-  .side-back {
-    display: grid;
-    place-items: center;
-    position: fixed;
-    top: max(12px, env(safe-area-inset-top));
-    left: 12px;
-    z-index: 26;
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    border-radius: 50%;
-    background: var(--row-hover);
-    color: var(--text);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-  }
-  .side-back .icon { width: 20px; height: 20px; }
-
-  .hero-generate { display: inline-flex; }
-  .fab-generate {
-    display: grid;
-    width: 44px;
-    height: 44px;
-    background: var(--row-hover);
-    color: var(--accent);
-  }
-  .fab-generate .icon { width: 20px; height: 20px; }
-  .fab-generate.active { box-shadow: inset 0 0 0 2px var(--accent), 0 4px 14px rgba(0, 0, 0, 0.4); }
-  /* Over the generate panel, under the queue drawer. */
+  /* Under the queue drawer. */
   .fabs { right: 14px; bottom: 14px; gap: 10px; z-index: 26; }
 
-  .path-pill {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 6px 10px 0;
-    padding: 6px 8px 6px 10px;
-    background: var(--panel);
-    border-radius: 10px;
-    flex: none;
-  }
-  .path-pill .ellipsis { flex: 1; min-width: 0; font-size: 12px; }
+  .path-pill { margin: 6px 10px 0; }
+
+  .start-box { max-width: none; }
+  .details { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  /* Mood on a line of its own, under the box and where it looks. */
+  .search-bar { flex-wrap: wrap; }
+  .mood-search { flex-basis: 100%; }
 
   /* ---------------------------------------------------------- player bar
      Cover and names, then the transport, then the queue. The volume goes:
@@ -1766,17 +1755,29 @@ span.path-end {
 
   /* ---------------------------------------------------------- queue drawer
      Most of the screen, from the bottom, with a handle to drag it back
-     down by. Over the generate panel and its arrow, which can be open
-     under it. */
+     down by. Always there, so opening and closing can slide. */
   .queue-drawer {
+    display: flex;
+    position: absolute;
+    bottom: 0;
     z-index: 27;
     left: 0;
     right: 0;
     width: auto;
     max-height: 88%;
-    padding-top: 0;
+    padding: 0 12px 12px;
     border-radius: 16px 16px 0 0;
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.45);
+    transform: translateY(calc(100% + 16px));
+    visibility: hidden;
+    transition: transform 200ms ease, visibility 0s linear 200ms;
   }
+  .queue-drawer.open {
+    transform: none;
+    visibility: visible;
+    transition: transform 200ms ease;
+  }
+  .queue-head { margin: 0 -12px; border-bottom: none; padding-top: 0; }
   .drawer-handle {
     display: block;
     position: relative;
@@ -1808,7 +1809,6 @@ span.path-end {
 
   /* ------------------------------------------------------ touch targets */
   .row { padding: 10px 8px; gap: 10px; }
-  .tab { padding: 9px 6px; }
   button { padding: 9px 12px; }
   .chip { padding: 7px 10px; font-size: 12px; }
   .icon-btn { width: 38px; height: 38px; padding: 0; }

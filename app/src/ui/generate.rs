@@ -1,7 +1,9 @@
 //! Making a sequence of tracks out of the space.
 //!
-//! One panel with five modes, because they differ only in how the sequence is
-//! chosen:
+//! Started from a track's page, the search box or a row's menu, and landed in
+//! the queue as a section of its own, right after what is playing, which can
+//! be rerolled, saved or stopped from its header there. Five modes, because
+//! they differ only in how the sequence is chosen:
 //!   - **neighbours**: the k most similar tracks.
 //!   - **radio**: a greedy walk, pushed away from artists already used.
 //!   - **path**: A to B, shortest route or evenly paced.
@@ -12,10 +14,11 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use super::icons;
+use super::player::{play_list, set_upcoming, Player};
 pub use crate::api::Recipe;
 use crate::api::{GenerateRequest, Step, TrackMeta};
 use crate::catalogue::RemoteTrack;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -27,8 +30,6 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub const ALL: [Mode; 5] = [Mode::Mood, Mode::Neighbours, Mode::Radio, Mode::Path, Mode::Drift];
-
     pub fn label(self) -> &'static str {
         match self {
             Mode::Neighbours => "neighbours",
@@ -51,17 +52,23 @@ impl Mode {
 
     pub(crate) fn blurb(self) -> &'static str {
         match self {
-            Mode::Neighbours => "The most similar tracks to the selection.",
-            Mode::Radio => "Keep jumping to the nearest track not yet played.",
-            Mode::Path => "Travel from A to B through the space.",
-            Mode::Drift => "Walk away from the selection, towards a phrase.",
-            Mode::Mood => "Describe a mood, get the tracks that sound like it.",
+            Mode::Neighbours => "The tracks most alike",
+            Mode::Radio => "Keep walking, never repeat",
+            Mode::Path => "Walk here from the path's start",
+            Mode::Drift => "Away, towards a phrase",
+            Mode::Mood => "Whatever sounds like a phrase",
         }
     }
 
-    /// Whether the mode starts from the track in hand.
-    pub(crate) fn seeded(self) -> bool {
-        !matches!(self, Mode::Path | Mode::Mood)
+    /// The mode as a section of the queue is headed.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Mode::Neighbours => "Neighbours",
+            Mode::Radio => "Radio",
+            Mode::Path => "Path",
+            Mode::Drift => "Drift",
+            Mode::Mood => "Mood",
+        }
     }
 
     /// Whether the mode needs the server to embed a phrase.
@@ -70,22 +77,14 @@ impl Mode {
     }
 }
 
-/// Starting points for mood, one tap each. Phrased the way CLAP was trained,
-/// as a description of a sound, since that is what the text tower matches.
-pub const MOODS: [&str; 8] = [
-    "calm rainy morning",
-    "late night drive",
-    "sunny and carefree",
-    "melancholic and slow",
-    "high energy workout",
-    "deep focus, no vocals",
-    "dreamy and floating",
-    "warm dinner with friends",
-];
-
 #[derive(Clone, Copy)]
 pub struct Generator {
+    /// Where results go: the queue, as a section of their own.
+    player: Player,
     pub mode: Signal<Mode>,
+    /// The tracks of the queue's generated section, as they were placed.
+    /// Rows since removed from the queue simply stop being found there;
+    /// this is what the section's header and the map's route read.
     pub result: Signal<Vec<Step>>,
     /// What produced `result`, for its heading. `None` when there is none.
     pub produced_by: Signal<Option<Recipe>>,
@@ -113,14 +112,15 @@ pub struct Generator {
     /// The sliders, sent with every request: the server keeps no weights of
     /// its own for a device.
     pub weights: Signal<HashMap<String, f32>>,
-    /// Whether the panel is slid in, on a phone. A wide screen always shows
-    /// it and ignores this.
-    pub panel_open: Signal<bool>,
+    /// The track whose page should show drift's phrase box, asked for from
+    /// a row's menu, which has no room to type in.
+    pub drift_for: Signal<Option<i64>>,
 }
 
 impl Generator {
-    pub fn new() -> Self {
+    pub fn new(player: Player) -> Self {
         Self {
+            player,
             // The one mode that works before anything is selected.
             mode: Signal::new(Mode::Mood),
             result: Signal::new(Vec::new()),
@@ -139,23 +139,13 @@ impl Generator {
             failed: Signal::new(false),
             tower: Signal::new(false),
             weights: Signal::new(HashMap::new()),
-            panel_open: Signal::new(false),
+            drift_for: Signal::new(None),
         }
     }
 
     /// Whether drift and mood are offerable at all.
     pub(crate) fn can_steer(&self) -> bool {
         *self.tower.read()
-    }
-
-    /// Whether the current mode has what it needs.
-    pub(crate) fn ready(&self, selected: Option<i64>) -> bool {
-        match *self.mode.peek() {
-            Mode::Neighbours | Mode::Radio => selected.is_some(),
-            Mode::Path => self.from.peek().is_some() && self.to.peek().is_some(),
-            Mode::Drift => selected.is_some() && !self.phrase.peek().trim().is_empty(),
-            Mode::Mood => !self.phrase.peek().trim().is_empty(),
-        }
     }
 
     /// Produce a sequence. Spawned, because the walk is the server's: one
@@ -165,9 +155,6 @@ impl Generator {
         generator.status.set(None);
         generator.failed.set(false);
         generator.busy.set(true);
-        // Asked for from a row or a path button, the result has to be
-        // somewhere to look at, which on a phone means sliding the panel in.
-        generator.panel_open.set(true);
 
         let count = *self.count.peek();
         let mode = *self.mode.peek();
@@ -236,11 +223,59 @@ impl Generator {
                     .into(),
                 ));
             }
+            if !produced.is_empty() {
+                generator.land(&produced);
+            }
             generator.result.set(produced);
             generator.produced_by.set(recipe);
             generator.stale.set(false);
             generator.busy.set(false);
         });
+    }
+
+    /// Put a result in the queue, in place of the section the last one made:
+    /// where that section was, or right after what is playing. Into an empty
+    /// queue it is the queue, and plays.
+    fn land(self, produced: &[Step]) {
+        let mut player = self.player;
+        let tracks: Vec<RemoteTrack> = produced.iter().map(|step| as_remote(&step.track)).collect();
+        let placement = place(&player.queue.peek(), *player.index.peek(), &self.ids(), tracks);
+        match placement {
+            Placement::Load(tracks) => play_list(player, tracks, 0),
+            Placement::Upcoming(tracks) => set_upcoming(player, tracks),
+        }
+        // The section has to be somewhere to look at.
+        player.queue_open.set(true);
+    }
+
+    /// The track ids of the generated section.
+    pub(crate) fn ids(&self) -> HashSet<i64> {
+        self.result.peek().iter().map(|step| step.track.track_id).collect()
+    }
+
+    /// Make the section again from what made it. The rows still to come are
+    /// swapped for the new ones; those already played stay where they are.
+    pub fn reroll(self) {
+        if let Some(recipe) = self.produced_by.peek().clone() {
+            self.rerun(&recipe);
+        }
+    }
+
+    /// Take what is left of the section out of the queue, and forget it.
+    /// What is playing keeps playing, even if the section put it there.
+    pub fn stop(self) {
+        let player = self.player;
+        let old = self.ids();
+        let queue = player.queue.peek().clone();
+        let index = *player.index.peek();
+        if index < queue.len() {
+            let upcoming: Vec<RemoteTrack> =
+                queue[index + 1..].iter().filter(|track| !old.contains(&track.id)).cloned().collect();
+            if index + 1 + upcoming.len() != queue.len() {
+                set_upcoming(player, upcoming);
+            }
+        }
+        self.clear();
     }
 
     /// Run a mode directly, rather than whichever one the panel happens to be
@@ -257,22 +292,45 @@ impl Generator {
     /// does not then need a third click to be worth anything.
     pub fn set_path_end(self, end: PathEnd, id: i64) {
         let mut generator = self;
-        generator.mode.set(Mode::Path);
         match end {
             PathEnd::A => generator.from.set(Some(id)),
             PathEnd::B => generator.to.set(Some(id)),
         }
         if generator.from.peek().is_some() && generator.to.peek().is_some() {
+            generator.mode.set(Mode::Path);
             generator.run(None);
         }
     }
 
-    /// Show drift's inputs without running it. Drift seeds from the selection,
-    /// which the caller sets; what it still lacks is the phrase, and guessing
-    /// one would be inventing the user's intent.
-    pub fn aim_drift(self) {
+    /// Start a path here, forgetting any end it had: a new start is a new
+    /// path, and keeping the old end would walk it at once.
+    pub fn start_path(self, id: i64) {
         let mut generator = self;
-        generator.mode.set(Mode::Drift);
+        generator.to.set(None);
+        generator.from.set(Some(id));
+    }
+
+    /// Forget a half-built path.
+    pub fn cancel_path(self) {
+        let mut generator = self;
+        generator.from.set(None);
+        generator.to.set(None);
+    }
+
+    /// Ask for drift's phrase on a track's page, without running it. What
+    /// drift still lacks is the phrase, and guessing one would be inventing
+    /// the user's intent.
+    pub fn aim_drift(self, id: i64) {
+        let mut generator = self;
+        generator.drift_for.set(Some(id));
+    }
+
+    /// Drift from a track towards a phrase.
+    pub fn drift(self, seed: i64, phrase: &str) {
+        let mut generator = self;
+        generator.phrase.set(phrase.to_string());
+        generator.drift_for.set(None);
+        generator.request(Mode::Drift, seed);
     }
 
     /// Run a recipe again, restoring the inputs that produced it. Re-running
@@ -355,10 +413,41 @@ pub enum PathEnd {
     B,
 }
 
-impl Default for Generator {
-    fn default() -> Self {
-        Self::new()
+/// Where a result goes in the queue.
+#[derive(Debug, PartialEq)]
+enum Placement {
+    /// The queue was empty: the result becomes it.
+    Load(Vec<RemoteTrack>),
+    /// Everything after what is playing, with the result in it.
+    Upcoming(Vec<RemoteTrack>),
+}
+
+/// Fit `new` into the queue in place of the old section's rows still to
+/// come, `old`: where the first of them was, or straight after what is
+/// playing when none are left. Rows the result repeats are taken from where
+/// they were, so it plays them in its own order, and what is playing is
+/// never queued again behind itself.
+fn place(queue: &[RemoteTrack], index: usize, old: &HashSet<i64>, new: Vec<RemoteTrack>) -> Placement {
+    if queue.is_empty() {
+        return Placement::Load(new);
     }
+    let index = index.min(queue.len() - 1);
+    let current = queue[index].id;
+    let new: Vec<RemoteTrack> = new.into_iter().filter(|track| track.id != current).collect();
+    let fresh: HashSet<i64> = new.iter().map(|track| track.id).collect();
+    let upcoming = &queue[index + 1..];
+    let at = upcoming.iter().position(|track| old.contains(&track.id)).unwrap_or(0);
+    let keep = |tracks: &[RemoteTrack]| -> Vec<RemoteTrack> {
+        tracks
+            .iter()
+            .filter(|track| !old.contains(&track.id) && !fresh.contains(&track.id))
+            .cloned()
+            .collect()
+    };
+    let mut placed = keep(&upcoming[..at]);
+    placed.extend(new);
+    placed.extend(keep(&upcoming[at..]));
+    Placement::Upcoming(placed)
 }
 
 /// The result's heading. Says what made these rows, because with generation
@@ -416,8 +505,58 @@ pub(crate) fn as_remote(meta: &TrackMeta) -> RemoteTrack {
 
 #[cfg(test)]
 mod tests {
-    use super::dedup_by_recording;
+    use super::{dedup_by_recording, place, Placement};
     use crate::api::{Step, TrackMeta};
+    use crate::catalogue::RemoteTrack;
+    use std::collections::HashSet;
+
+    fn track(id: i64) -> RemoteTrack {
+        super::as_remote(&step(id, None).track)
+    }
+
+    fn ids(placement: Placement) -> Vec<i64> {
+        match placement {
+            Placement::Load(tracks) | Placement::Upcoming(tracks) => tracks.iter().map(|t| t.id).collect(),
+        }
+    }
+
+    #[test]
+    fn an_empty_queue_becomes_the_result() {
+        let placed = place(&[], 0, &HashSet::new(), vec![track(1), track(2)]);
+        assert!(matches!(placed, Placement::Load(_)));
+        assert_eq!(ids(placed), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_first_result_comes_straight_after_what_is_playing() {
+        let queue = [track(1), track(2), track(3)];
+        let placed = place(&queue, 0, &HashSet::new(), vec![track(7), track(8)]);
+        assert_eq!(ids(placed), vec![7, 8, 2, 3]);
+    }
+
+    /// Playing 1, then the user's 2, the old section's 5 and 6 (4 already
+    /// gone), then the user's 9.
+    #[test]
+    fn a_reroll_takes_the_old_sections_place() {
+        let queue = [track(1), track(2), track(5), track(6), track(9)];
+        let old = HashSet::from([4, 5, 6]);
+        let placed = place(&queue, 0, &old, vec![track(7), track(8)]);
+        assert_eq!(ids(placed), vec![2, 7, 8, 9]);
+    }
+
+    #[test]
+    fn what_is_playing_is_not_queued_behind_itself() {
+        let queue = [track(1), track(2)];
+        let placed = place(&queue, 0, &HashSet::new(), vec![track(1), track(3)]);
+        assert_eq!(ids(placed), vec![3, 2]);
+    }
+
+    #[test]
+    fn a_track_already_queued_moves_into_the_section() {
+        let queue = [track(1), track(2), track(3)];
+        let placed = place(&queue, 0, &HashSet::new(), vec![track(3), track(4)]);
+        assert_eq!(ids(placed), vec![3, 4, 2]);
+    }
 
     fn step(track_id: i64, isrc: Option<&str>) -> Step {
         Step {

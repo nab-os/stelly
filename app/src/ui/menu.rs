@@ -552,6 +552,7 @@ fn QueueItems(index: usize) -> Element {
 #[component]
 fn GenerationItems(track_id: i64) -> Element {
     let generator = use_context::<Generator>();
+    let library = use_context::<Library>();
     let mut selection = use_context::<Selection>().0;
     let mut menu = use_context::<ContextMenu>().0;
 
@@ -606,16 +607,19 @@ fn GenerationItems(track_id: i64) -> Element {
                 "Set as path B"
             }
         }
-        button {
-            class: "menu-item",
-            onclick: move |_| {
-                // Deliberately does not run: drift still needs a phrase, and
-                // inventing one would be inventing the intent.
-                selection.set(Some(track_id));
-                generator.aim_drift();
-                menu.set(None);
-            },
-            "Drift from here…"
+        if generator.can_steer() {
+            button {
+                class: "menu-item",
+                onclick: move |_| {
+                    // Deliberately does not run: drift still needs a phrase,
+                    // and inventing one would be inventing the intent. The
+                    // track's page has the box to type it in.
+                    generator.aim_drift(track_id);
+                    super::open_track(library, selection, track_id);
+                    menu.set(None);
+                },
+                "Drift from here…"
+            }
         }
     }
 }

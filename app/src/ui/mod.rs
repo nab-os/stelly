@@ -47,7 +47,7 @@ pub use pipeline::Pipeline;
 pub use player::{use_session, use_transport, Player, PlayerBar};
 pub use queue::QueueView;
 pub use release::{ReleaseNotice, Releases};
-pub use side::{GeneratePanel, PathPill};
+pub use side::PathPill;
 
 use dioxus::prelude::*;
 use crate::api::{BlockedArtist, Device, SpaceIndex, SpaceInfo, TrackMeta};
@@ -114,8 +114,7 @@ pub(crate) fn row_keys<T: std::fmt::Display>(ids: impl IntoIterator<Item = T>) -
 /// and only ever a space track: nothing else has coordinates to select.
 ///
 /// Separate from what the main area shows: picking a point on the map selects
-/// it without leaving the map, and the generate panel keeps its seed while you
-/// browse somewhere else entirely.
+/// it without leaving the map.
 #[derive(Clone, Copy)]
 pub struct Selection(pub Signal<Option<i64>>);
 

@@ -1,13 +1,19 @@
-//! The play queue, as a drawer above the player bar.
+//! The play queue: the right-hand column beside the main area, or on a phone
+//! a drawer over it.
 //!
 //! Opened and closed by the player's queue button; on a phone it also has a
 //! handle to drag it back down by. Rows reorder by dragging (after a long
 //! press, on a touch screen), and leave by a swipe or the red cross that
 //! shows on hover. The gestures live in `queue-drag.js`.
+//!
+//! What generating produced is a section of it, under a header that says
+//! what made it and how much of it is left, and rerolls, saves or stops it.
 
+use super::generate::{describe, Generator, Recipe};
 use super::menu::{open_menu, ContextMenu, MenuTarget};
 use super::player::{clear_queue, move_to, play_at, remove_at, set_upcoming, Player};
-use super::{album_link, artist_link, icons, Cover, Library};
+use super::side::{export_result, title_for};
+use super::{album_link, artist_link, icons, Cover, Library, MapView};
 use crate::api::OrderRequest;
 use crate::backend::backend;
 use crate::catalogue::RemoteTrack;
@@ -89,7 +95,8 @@ async fn sort_upcoming(mut player: Player, weights: std::collections::HashMap<St
     Ok(())
 }
 
-/// How long the drawer takes to slide shut, `.queue-drawer`'s transition.
+/// How long the drawer takes to slide shut, `.queue-drawer`'s transition on
+/// a phone.
 const SLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[component]
@@ -158,9 +165,9 @@ pub fn QueueView() -> Element {
             div { class: "drawer-handle", title: "close" }
 
             div { class: "queue-head",
-                h2 {
-                    "Queue"
-                    span { class: "muted", "{total} tracks" }
+                h2 { "Queue" }
+                if total > 0 {
+                    span { class: "muted queue-where", "{(current + 1).min(total)} of {total}" }
                 }
                 span { class: "spacer" }
                 button {
@@ -180,7 +187,9 @@ pub fn QueueView() -> Element {
             }
 
             if total == 0 {
-                p { class: "muted", "Nothing queued." }
+                p { class: "muted",
+                    "Nothing queued. Open a track from your space and start a radio from it, or describe a mood in the search box."
+                }
             } else if shown {
                 QueueRows {}
             }
@@ -196,18 +205,41 @@ pub fn QueueView() -> Element {
 fn QueueRows() -> Element {
     let player = use_context::<Player>();
     let library = use_context::<Library>();
+    let generator = use_context::<Generator>();
     let mut menu = use_context::<ContextMenu>().0;
 
     let queue = player.queue.read().clone();
     let now_playing = player.current().map(|track| track.id);
     let keys = super::row_keys(queue.iter().map(|track| track.id));
 
+    // The generated section: its header goes over the first of its rows
+    // still in the queue, and each of them is marked as its own. Not
+    // necessarily one run, since rows can be dragged out of it.
+    let section: std::collections::HashSet<i64> = generator
+        .result
+        .read()
+        .iter()
+        .map(|step| step.track.track_id)
+        .collect();
+    let head_at = queue.iter().position(|track| section.contains(&track.id));
+
     rsx! {
+        // The header is not an `li`: queue-drag.js counts only those as rows.
+        // Drawn after the row before the section, the row being what each
+        // turn of the loop is keyed by.
         ol { class: "queue-list",
+            if head_at == Some(0) {
+                SectionHead {}
+            }
             for ((index, track), key) in queue.into_iter().enumerate().zip(keys) {
                 li {
                     key: "{key}",
-                    class: if now_playing == Some(track.id) { "queue-row playing" } else { "queue-row" },
+                    class: match (now_playing == Some(track.id), section.contains(&track.id)) {
+                        (true, true) => "queue-row playing generated",
+                        (true, false) => "queue-row playing",
+                        (false, true) => "queue-row generated",
+                        (false, false) => "queue-row",
+                    },
                     "data-track": "{track.id}",
                     onclick: move |_| play_at(player, index),
                     // Right-click only: a long press here starts a
@@ -238,9 +270,104 @@ fn QueueRows() -> Element {
                         {icons::close()}
                     }
                 }
+                if head_at == Some(index + 1) {
+                    SectionHead {}
+                }
             }
         }
     }
+}
+
+/// The generated section's header: what made it, how many of its tracks are
+/// still to come, and what can be done with it.
+#[component]
+fn SectionHead() -> Element {
+    let player = use_context::<Player>();
+    let generator = use_context::<Generator>();
+    let provider = use_context::<super::Provider>();
+    let map = use_context::<MapView>();
+
+    let Some(recipe) = generator.produced_by.read().clone() else {
+        return rsx! { div { class: "section-head" } };
+    };
+    let section = generator.ids();
+    let index = *player.index.read();
+    let left = player
+        .queue
+        .read()
+        .iter()
+        .skip(index + 1)
+        .filter(|track| section.contains(&track.id))
+        .count();
+    let busy = *generator.busy.read();
+    let (icon, heading) = heading(&recipe);
+
+    rsx! {
+        div { class: "section-head",
+            span { class: "section-icon", {icon} }
+            div { class: "section-text",
+                span { class: "title ellipsis", title: "{describe(&recipe, label)}", "{heading}" }
+                span { class: "muted",
+                    if busy {
+                        "working…"
+                    } else if *generator.stale.read() {
+                        "{left} left · the space changed, reroll for a fresh one"
+                    } else {
+                        "{left} left"
+                    }
+                }
+            }
+            div { class: "section-actions",
+                button {
+                    class: "link",
+                    title: "make it again, in place of what is left of it",
+                    disabled: busy,
+                    onclick: move |_| generator.reroll(),
+                    "reroll"
+                }
+                button {
+                    class: "link",
+                    title: "trace it on the map",
+                    onclick: move |_| map.show_route(),
+                    "map"
+                }
+                if provider.exports() {
+                    button {
+                        class: "link",
+                        title: "save it as a playlist",
+                        onclick: move |_| export_result(generator),
+                        "save"
+                    }
+                }
+                button {
+                    class: "link",
+                    title: "take what is left of it out of the queue",
+                    onclick: move |_| generator.stop(),
+                    "stop"
+                }
+            }
+        }
+        if let Some(message) = generator.status.read().clone() {
+            p { class: if *generator.failed.read() { "section-status error" } else { "section-status muted" }, "{message}" }
+        }
+    }
+}
+
+/// The mode, and what it started from, as short as a header has room for.
+fn heading(recipe: &Recipe) -> (Element, String) {
+    use super::generate::Mode;
+    let (mode, from) = match recipe {
+        Recipe::Neighbours { seed } => (Mode::Neighbours, title_for(*seed)),
+        Recipe::Radio { seed } => (Mode::Radio, title_for(*seed)),
+        Recipe::Path { a, b, .. } => (Mode::Path, format!("{} → {}", title_for(*a), title_for(*b))),
+        Recipe::Drift { seed, phrase } => (Mode::Drift, format!("{} → “{phrase}”", title_for(*seed))),
+        Recipe::Mood { phrase } => (Mode::Mood, format!("“{phrase}”")),
+    };
+    (mode.icon(), format!("{} · {from}", mode.title()))
+}
+
+fn label(id: Option<i64>) -> String {
+    super::side::label_for(id)
 }
 
 #[cfg(test)]
@@ -249,10 +376,12 @@ mod tests {
 
     // Rows taken down before the drawer is out of sight would vanish
     // mid-slide; long after, and a closed drawer keeps them for nothing.
+    // Only the phone's queue slides; the docked column just goes.
     #[test]
     fn the_rows_wait_for_the_drawer_to_slide_shut() {
         let css = include_str!("../../assets/style.css");
-        let at = css.find(".queue-drawer {").expect("the drawer's rule");
+        let phone = css.find("@media (max-width: 900px)").expect("the phone's block");
+        let at = phone + css[phone..].find(".queue-drawer {").expect("the drawer's rule");
         let rule = &css[at..at + css[at..].find('}').unwrap()];
         let slide = format!("transform {}ms", SLIDE.as_millis());
         assert!(rule.contains(&slide), "{rule}");
