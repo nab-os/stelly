@@ -3,7 +3,7 @@
 //! devices, who is hidden, and the pipeline that builds the space, with its output last.
 
 use super::family::FamilyRow;
-use super::pipeline::{PipelineControls, PipelineLog};
+use super::pipeline::{MixQueuePanel, PipelineControls, PipelineLog};
 use super::player::{quality_label, Player};
 use super::prefs;
 use super::release::ReleaseRow;
@@ -26,6 +26,7 @@ pub fn SettingsScreen() -> Element {
             FamilyRow {}
             HiddenArtists {}
             PipelineControls {}
+            MixQueuePanel {}
             PipelineLog {}
         }
     }

@@ -5,9 +5,9 @@
 //! to download before it can generate. Audio does not proxy.
 
 use crate::api::{
-    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest,
-    PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch, SpaceSort, Stage,
-    Step, Target, TrackMeta, TracksRequest, User, Word,
+    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, MixBrief, MixQueue, MixSelect, MixState,
+    OrderRequest, PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch,
+    SpaceSort, Stage, Step, Target, TrackMeta, TracksRequest, User, Word,
 };
 use crate::session::{Command, Session, Update};
 use crate::catalogue::{Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack, SearchResults};
@@ -644,6 +644,46 @@ impl Remote {
     /// the rest of the space, best first.
     pub async fn describe(&self, track_id: i64) -> Result<Vec<Word>> {
         self.get(&format!("/api/space/describe/{track_id}")).await
+    }
+
+    // ------------------------------------------------------------------ mix
+
+    /// Where a track stands for mixing, and what its analysis found.
+    pub async fn mix_state(&self, track_id: i64) -> Result<MixState> {
+        self.get(&format!("/api/mix/state/{track_id}")).await
+    }
+
+    /// The mix queue: what waits and why, and the selection last asked for.
+    pub async fn mix_queue(&self) -> Result<MixQueue> {
+        self.get("/api/mix/queue").await
+    }
+
+    /// Queue a selection for its mix analysis, written as `server-analyse`
+    /// takes it. Wants `admin`.
+    pub async fn mix_select(&self, selection: &str) -> Result<()> {
+        let _: serde_json::Value = self.post("/api/mix/select", &MixSelect { selection: selection.to_string() }).await?;
+        Ok(())
+    }
+
+    /// Call the running selection off; what was queued for another reason
+    /// stays. Wants `admin`.
+    pub async fn mix_stop(&self) -> Result<()> {
+        let _: serde_json::Value = self.post("/api/mix/analyse/stop", &()).await?;
+        Ok(())
+    }
+
+    /// The tempo and key of each of `ids` that has been analysed for mixing.
+    pub async fn mix_briefs(&self, ids: Vec<i64>) -> Result<Vec<MixBrief>> {
+        self.post("/api/mix/briefs", &TracksRequest { ids }).await
+    }
+
+    /// Have the track analysed for mixing now, ahead of everything queued,
+    /// and wait for it: a download and a few seconds of analysis, unless the
+    /// workers are busy with long tracks.
+    pub async fn mix_analyse(&self, track_id: i64) -> Result<()> {
+        let path = format!("/api/mix/tracks/{track_id}/analyse");
+        let _: serde_json::Value = self.post_within(&path, &(), std::time::Duration::from_secs(11 * 60)).await?;
+        Ok(())
     }
 
     pub async fn generate(&self, request: &GenerateRequest) -> Result<Vec<Step>> {

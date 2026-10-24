@@ -210,9 +210,33 @@ pub fn merge(conn: &mut SqliteConnection, from: i64, into: i64, similarity: f32)
     .bind::<BigInt, _>(from)
     .bind::<BigInt, _>(into)
     .execute(conn)?;
-    // The mix analysis names the track it was made for: the one kept keeps
-    // its own, or is mix-analysed again.
-    for table in ["features", "layout", "failures", "mix", "mix_failures", "dedupe_seen"] {
+    // Who listened to it listened to `into`.
+    text("UPDATE listens SET track_id = ? WHERE track_id = ?")
+        .bind::<BigInt, _>(into)
+        .bind::<BigInt, _>(from)
+        .execute(conn)?;
+    // Why it was waiting for its mix analysis is `into`'s now, the more
+    // urgent reason of the two when both were.
+    text(
+        "INSERT INTO mix_queue (track_id, priority, reason, queued_at)
+         SELECT ?, priority, reason, queued_at FROM mix_queue WHERE track_id = ?
+         ON CONFLICT(track_id) DO UPDATE SET priority = excluded.priority, reason = excluded.reason
+         WHERE excluded.priority < mix_queue.priority",
+    )
+    .bind::<BigInt, _>(into)
+    .bind::<BigInt, _>(from)
+    .execute(conn)?;
+    // The same recording, so its mix analysis is `into`'s when `into` has
+    // none, renamed for it: the entry names the track it was made for.
+    text(
+        "INSERT OR IGNORE INTO mix (track_id, version, entry_json, analysed_at)
+         SELECT ?, version, json_set(entry_json, '$.origin.item.id', ?), analysed_at FROM mix WHERE track_id = ?",
+    )
+    .bind::<BigInt, _>(into)
+    .bind::<Text, _>(&into_s)
+    .bind::<BigInt, _>(from)
+    .execute(conn)?;
+    for table in ["features", "layout", "failures", "mix", "mix_failures", "mix_queue", "dedupe_seen"] {
         text(&format!("DELETE FROM {table} WHERE track_id = ?")).bind::<BigInt, _>(from).execute(conn)?;
     }
     text("DELETE FROM tracks WHERE id = ?").bind::<BigInt, _>(from).execute(conn)?;
@@ -396,7 +420,10 @@ mod tests {
         conn.batch_execute(
             "INSERT INTO tracks (id, title, seed_distance, isrc) VALUES (1, 'One', 2, NULL), (2, 'One again', 0, 'X');
              INSERT INTO refs (kind, id, provider, ref) VALUES ('track', '1', 'qobuz', '1'), ('track', '2', 'local', '9');
-             INSERT INTO features (track_id, extractor_version) VALUES (1, 'v'), (2, 'v');",
+             INSERT INTO features (track_id, extractor_version) VALUES (1, 'v'), (2, 'v');
+             INSERT INTO mix_queue (track_id, priority, reason, queued_at) VALUES (2, 1, 'liked', '');
+             INSERT INTO mix (track_id, version, entry_json, analysed_at)
+               VALUES (2, 1, '{\"origin\":{\"source\":\"stelly\",\"item\":{\"id\":\"2\"}}}', 'then');",
         )
         .unwrap();
         merge(conn, 2, 1, 0.999).unwrap();
@@ -415,5 +442,19 @@ mod tests {
         let kept = diesel::sql_query("SELECT seed_distance, isrc FROM tracks WHERE id = 1").get_result::<Kept>(conn).unwrap();
         assert_eq!((kept.seed_distance, kept.isrc.as_deref()), (0, Some("X")));
         assert_eq!(diesel::sql_query("SELECT COUNT(*) AS n FROM tracks").get_result::<Count>(conn).unwrap().n, 1);
+        // Liked as 2, so 1 is analysed for mixing in its place.
+        assert_eq!(diesel::sql_query("SELECT COUNT(*) AS n FROM mix_queue WHERE track_id = 1 AND reason = 'liked'").get_result::<Count>(conn).unwrap().n, 1);
+        assert_eq!(diesel::sql_query("SELECT COUNT(*) AS n FROM mix_queue").get_result::<Count>(conn).unwrap().n, 1);
+        // And 2's mix analysis is 1's, named for it.
+        #[derive(QueryableByName)]
+        struct Entry {
+            #[diesel(sql_type = Text)]
+            id: String,
+        }
+        let moved = diesel::sql_query("SELECT json_extract(entry_json, '$.origin.item.id') AS id FROM mix WHERE track_id = 1")
+            .get_result::<Entry>(conn)
+            .unwrap();
+        assert_eq!(moved.id, "1");
+        assert_eq!(diesel::sql_query("SELECT COUNT(*) AS n FROM mix").get_result::<Count>(conn).unwrap().n, 1);
     }
 }
