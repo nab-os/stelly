@@ -147,7 +147,7 @@ pub fn store(conn: &mut SqliteConnection, track_id: i64, descriptors: &Descripto
     Ok(())
 }
 
-fn record_failure(conn: &mut SqliteConnection, track_id: i64, reason: &str) -> Result<()> {
+pub fn record_failure(conn: &mut SqliteConnection, track_id: i64, reason: &str) -> Result<()> {
     let reason: String = reason.chars().take(500).collect();
     diesel::insert_into(failures::table)
         .values((
