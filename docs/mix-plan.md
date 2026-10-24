@@ -74,8 +74,8 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
 | 4.1 | The family's likes with when they were liked, `GET /api/mix/liked?since=` | `server/src/routes.rs` | S | #183 |
-| 4.2 | `sync` brings them, and the app opens on the last liked | mix `src/stelly.rs`, `app/` | M | |
-| 4.3 | `next`, `set` and `mix` on a `stelly:` track with no entry ask for it and wait | mix `src/stelly.rs`, `src/cli.rs` | S | |
+| 4.2 | `sync` brings them, and the app opens on the last liked | mix `src/stelly.rs`, `app/` | M | stelly-mix#8 |
+| 4.3 | `next`, `set` and `mix` on a `stelly:` track with no entry ask for it and wait | mix `src/stelly.rs`, `src/cli.rs` | S | stelly-mix#9 |
 
 ## Later
 
