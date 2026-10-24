@@ -134,6 +134,26 @@ CREATE TABLE IF NOT EXISTS mix_queue (
 
 CREATE INDEX IF NOT EXISTS idx_mix_queue_order ON mix_queue(priority);
 
+-- Every track played, one row each once it stopped being the one playing,
+-- kept raw for whatever is wanted of it later. See server/src/listens.rs.
+CREATE TABLE IF NOT EXISTS listens (
+    id                INTEGER PRIMARY KEY,
+    user_id           INTEGER NOT NULL,
+    -- The output it started on.
+    device_id         INTEGER,
+    track_id          INTEGER NOT NULL,
+    -- Unix seconds.
+    started_at        INTEGER NOT NULL,
+    -- What the position moved by while playing: a seek is not listening.
+    listened_seconds  REAL NOT NULL,
+    track_seconds     REAL,
+    -- 'finished' | 'skipped' | 'stopped'
+    ended             TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_listens_user ON listens(user_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_listens_track ON listens(track_id);
+
 -- Which providers' items each of Stelly's own ids stands for: one row per
 -- provider item, several for one recording found on several providers.
 -- See server/src/refs.rs.

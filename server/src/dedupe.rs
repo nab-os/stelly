@@ -210,6 +210,11 @@ pub fn merge(conn: &mut SqliteConnection, from: i64, into: i64, similarity: f32)
     .bind::<BigInt, _>(from)
     .bind::<BigInt, _>(into)
     .execute(conn)?;
+    // Who listened to it listened to `into`.
+    text("UPDATE listens SET track_id = ? WHERE track_id = ?")
+        .bind::<BigInt, _>(into)
+        .bind::<BigInt, _>(from)
+        .execute(conn)?;
     // Why it was waiting for its mix analysis is `into`'s now, the more
     // urgent reason of the two when both were.
     text(
