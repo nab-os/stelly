@@ -81,6 +81,9 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
 
 - The nearest neighbours of each like, queued at `played`: a mix needs what
   goes with a find, not only the find.
+- The server's memory after a burst: ~5 GB resident on a 32-core machine once
+  the workers are gone, what the allocator keeps of their ONNX sessions and
+  decoded tracks. Measured with 1.2; the one-off job before it kept the same.
 - The rest of the catalogue, when the server is idle, off by default: a whole
   track is about ten times the download and the CPU of an excerpt.
 - Whatever the listens are wanted for: skips against the space, what a radio

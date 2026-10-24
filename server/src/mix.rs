@@ -22,7 +22,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Nullable, Text};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use stelly_core::logbuffer::LogBuffer;
 use stelly_core::api::{GenerateRequest, Recipe, Target};
@@ -222,20 +222,28 @@ fn pending(conn: &mut SqliteConnection, ids: &[i64], retry_failed: bool) -> Resu
         let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
         let failed = if retry_failed { "" } else { "AND NOT EXISTS (SELECT 1 FROM mix_failures f WHERE f.track_id = t.id)" };
         let query = format!(
-            "SELECT t.id AS id, t.title AS title, a.name AS artist, t.duration AS duration,
-               NOT EXISTS (SELECT 1 FROM features f WHERE f.track_id = t.id
-                           AND f.extractor_version = '{features}') AS needs_features
+            "SELECT {columns}
              FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id
              WHERE t.id IN ({list})
                AND NOT EXISTS (SELECT 1 FROM mix m WHERE m.track_id = t.id AND m.version = {VERSION})
                {failed}",
-            features = analyse::VERSION,
+            columns = pending_columns(),
         );
         out.extend(diesel::sql_query(query).load::<Pending>(conn)?);
     }
     let order: std::collections::HashMap<i64, usize> = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
     out.sort_by_key(|p| order.get(&p.id).copied().unwrap_or(usize::MAX));
     Ok(out)
+}
+
+/// What a `Pending` is read with, from `tracks t` and `artists a`.
+fn pending_columns() -> String {
+    format!(
+        "t.id AS id, t.title AS title, a.name AS artist, t.duration AS duration,
+         NOT EXISTS (SELECT 1 FROM features f WHERE f.track_id = t.id
+                     AND f.extractor_version = '{}') AS needs_features",
+        analyse::VERSION
+    )
 }
 
 fn store(conn: &mut SqliteConnection, id: i64, track: &Track) -> Result<()> {
@@ -287,17 +295,166 @@ pub fn load(db_path: &std::path::Path) -> Result<Mix> {
     Ok(Mix::new(entries))
 }
 
+// ------------------------------------------------------------------- queue
+
+/// Why a track is in the queue, most urgent first, which is the order it is
+/// taken in. A track queued again keeps the more urgent of its reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reason {
+    /// Someone is waiting on it.
+    Asked = 0,
+    Liked = 1,
+    /// `server-analyse`, or a selection from the pipeline controls.
+    Selection = 2,
+    /// Listened through: the library growing by itself, behind the rest.
+    Played = 3,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::Asked => "asked",
+            Reason::Liked => "liked",
+            Reason::Selection => "selection",
+            Reason::Played => "played",
+        }
+    }
+
+    fn of(priority: i32) -> Self {
+        match priority {
+            0 => Reason::Asked,
+            1 => Reason::Liked,
+            2 => Reason::Selection,
+            _ => Reason::Played,
+        }
+    }
+}
+
+/// Queue those of `ids` with no current mix analysis, nor a failed one, for
+/// `reason`; answers those, which are in the queue now.
+pub fn enqueue(conn: &mut SqliteConnection, ids: &[i64], reason: Reason) -> Result<Vec<i64>> {
+    let todo: Vec<i64> = pending(conn, ids, false)?.into_iter().map(|p| p.id).collect();
+    let now = crate::db::utc_now();
+    conn.transaction(|conn| {
+        for &id in &todo {
+            diesel::sql_query(
+                "INSERT INTO mix_queue (track_id, priority, reason, queued_at) VALUES (?, ?, ?, ?)
+                 ON CONFLICT(track_id) DO UPDATE SET priority = excluded.priority, reason = excluded.reason
+                 WHERE excluded.priority < mix_queue.priority",
+            )
+            .bind::<BigInt, _>(id)
+            .bind::<Integer, _>(reason as i32)
+            .bind::<Text, _>(reason.as_str())
+            .bind::<Text, _>(&now)
+            .execute(conn)?;
+        }
+        Ok::<_, diesel::result::Error>(())
+    })?;
+    Ok(todo)
+}
+
+#[derive(QueryableByName)]
+struct Queued {
+    #[diesel(embed)]
+    track: Pending,
+    #[diesel(sql_type = Integer)]
+    priority: i32,
+}
+
+/// The next `n` queued tracks but those `taken`, most urgent first.
+fn claim(conn: &mut SqliteConnection, n: usize, taken: &HashSet<i64>) -> Result<Vec<Queued>> {
+    // Analysed some other way since, or gone from the catalogue.
+    diesel::sql_query(format!(
+        "DELETE FROM mix_queue
+         WHERE track_id IN (SELECT track_id FROM mix WHERE version = {VERSION})
+            OR NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = mix_queue.track_id)"
+    ))
+    .execute(conn)?;
+    let taken = taken.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let query = format!(
+        "SELECT {columns}, q.priority AS priority
+         FROM mix_queue q JOIN tracks t ON t.id = q.track_id LEFT JOIN artists a ON a.id = t.artist_id
+         WHERE q.track_id NOT IN ({taken})
+         ORDER BY q.priority, q.rowid
+         LIMIT {n}",
+        columns = pending_columns(),
+    );
+    Ok(diesel::sql_query(query).load(conn)?)
+}
+
+fn dequeue(conn: &mut SqliteConnection, id: i64) -> Result<()> {
+    diesel::sql_query("DELETE FROM mix_queue WHERE track_id = ?").bind::<BigInt, _>(id).execute(conn)?;
+    Ok(())
+}
+
+fn queued(conn: &mut SqliteConnection) -> Result<usize> {
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = BigInt)]
+        n: i64,
+    }
+    Ok(diesel::sql_query("SELECT COUNT(*) AS n FROM mix_queue").get_result::<Count>(conn)?.n as usize)
+}
+
+/// Rung when something is queued, so the worker need not wait to look.
+#[derive(Default)]
+struct Bell {
+    rung: Mutex<bool>,
+    ringing: Condvar,
+}
+
+impl Bell {
+    fn ring(&self) {
+        *self.rung.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ringing.notify_all();
+    }
+
+    /// Until it rings, or `at_most`.
+    fn wait(&self, at_most: Duration) {
+        let mut rung = self.rung.lock().unwrap_or_else(|e| e.into_inner());
+        if !*rung {
+            rung = self.ringing.wait_timeout(rung, at_most).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        *rung = false;
+    }
+}
+
 // ----------------------------------------------------------------- serving
 
+/// The selection last asked for, as `server-analyse` follows it: running
+/// until each track it queued has been analysed or has failed.
+#[derive(Default)]
+struct Batch {
+    status: JobStatus,
+    /// Still choosing its tracks.
+    selecting: bool,
+    left: HashSet<i64>,
+    stats: Stats,
+}
+
+impl Batch {
+    fn finish(&mut self, last: String) {
+        self.status.running = false;
+        self.status.stats = Some(self.stats.clone());
+        self.status.last = Some(last);
+        self.left.clear();
+    }
+}
+
 /// The mix library as the server holds it, loaded on first use and again
-/// after each analysis, and the analysis an admin runs in the background.
+/// as tracks are analysed, and the queue's worker, for as long as the
+/// server runs.
 pub struct MixService {
     paths: Paths,
     /// The server's space, which a selection made from it walks.
     space: Arc<SpaceService>,
     loaded: Arc<tokio::sync::RwLock<Option<Arc<Mix>>>>,
-    job: Arc<Mutex<JobStatus>>,
+    batch: Arc<Mutex<Batch>>,
+    /// Calls off the selection being chosen.
     cancel: Arc<AtomicBool>,
+    bell: Arc<Bell>,
+    /// Set by `stop`: the worker drops what selections queued.
+    drop_selections: AtomicBool,
     log: Arc<LogBuffer>,
 }
 
@@ -307,8 +464,10 @@ impl MixService {
             paths,
             space,
             loaded: Default::default(),
-            job: Default::default(),
+            batch: Default::default(),
             cancel: Default::default(),
+            bell: Default::default(),
+            drop_selections: AtomicBool::new(false),
             log,
         }
     }
@@ -328,55 +487,230 @@ impl MixService {
         Ok(mix)
     }
 
-    pub fn status(&self) -> JobStatus {
-        self.job.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    /// What was added is read in on the next ask.
+    fn forget_loaded(&self) {
+        *self.loaded.blocking_write() = None;
     }
 
+    pub fn status(&self) -> JobStatus {
+        self.batch.lock().unwrap_or_else(|e| e.into_inner()).status.clone()
+    }
+
+    /// Call off the selection: its choosing, and what it queued that is not
+    /// already being analysed. What was queued for another reason stays.
     pub fn stop(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+        self.drop_selections.store(true, Ordering::SeqCst);
+        self.bell.ring();
+        let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+        if batch.status.running && !batch.selecting {
+            let stats = batch.stats.clone();
+            batch.finish(format!("stopped, {} analysed, {} failed", stats.done, stats.failed));
+        }
     }
 
-    /// Analyse `selection` on a thread of its own; nothing if one already runs.
+    /// Choose `selection`'s tracks on a thread of its own and queue them;
+    /// refused while the last selection is still running.
     pub fn start(&self, selection: Selection) -> Result<()> {
         {
-            let mut job = self.job.lock().unwrap_or_else(|e| e.into_inner());
-            if job.running {
-                bail!("a mix analysis is already running: {}", job.selection.clone().unwrap_or_default());
+            let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+            if batch.status.running {
+                bail!("a mix analysis is already running: {}", batch.status.selection.clone().unwrap_or_default());
             }
-            *job = JobStatus { running: true, selection: Some(selection.to_string()), ..Default::default() };
+            *batch = Batch {
+                status: JobStatus { running: true, selection: Some(selection.to_string()), ..Default::default() },
+                selecting: true,
+                ..Default::default()
+            };
         }
         self.cancel.store(false, Ordering::SeqCst);
-        let (paths, status, log, loaded) = (self.paths.clone(), self.job.clone(), self.log.clone(), self.loaded.clone());
+        let (paths, batch, log, bell) = (self.paths.clone(), self.batch.clone(), self.log.clone(), self.bell.clone());
         let space = self.space.clone();
         let sink = {
-            let (status, log) = (status.clone(), log.clone());
+            let (batch, log) = (batch.clone(), log.clone());
             move |line: &str| {
                 log.push(format!("mix: {line}"));
-                status.lock().unwrap_or_else(|e| e.into_inner()).last = Some(line.to_string());
+                batch.lock().unwrap_or_else(|e| e.into_inner()).status.last = Some(line.to_string());
             }
         };
         let job = Job::new(sink, self.cancel.clone());
-        std::thread::Builder::new().name("stelly-mix-job".into()).spawn(move || {
-            let outcome = (|| -> Result<Stats> {
+        std::thread::Builder::new().name("stelly-mix-select".into()).spawn(move || {
+            let chosen = (|| -> Result<Vec<i64>> {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                let ids = runtime.block_on(select(&paths, &selection, &job, Some(&space)))?;
-                run(&paths, &ids, &Options::default(), &job)
+                runtime.block_on(select(&paths, &selection, &job, Some(&space)))
             })();
-            let mut status = status.lock().unwrap_or_else(|e| e.into_inner());
-            status.running = false;
-            match outcome {
-                Ok(stats) => status.stats = Some(stats),
+            let mut batch = batch.lock().unwrap_or_else(|e| e.into_inner());
+            batch.selecting = false;
+            // Queued holding the batch, so the worker cannot finish one of its
+            // tracks before the batch knows it is one.
+            let queued = chosen.and_then(|ids| {
+                if job.cancelled() {
+                    return Ok(Vec::new());
+                }
+                enqueue(&mut crate::db::open_for_write(&paths.db_path)?, &ids, Reason::Selection)
+            });
+            match queued {
+                Ok(ids) if ids.is_empty() => batch.finish("nothing to analyse".into()),
+                Ok(ids) => {
+                    let line = format!("{} tracks queued", ids.len());
+                    log.push(format!("mix: {line}"));
+                    batch.status.last = Some(line);
+                    batch.stats.total = ids.len();
+                    batch.left = ids.into_iter().collect();
+                    bell.ring();
+                }
                 Err(err) => {
                     log.push(format!("mix: {err:#}"));
-                    status.last = Some(format!("{err:#}"));
+                    batch.finish(format!("{err:#}"));
                 }
             }
-            // What was added is read in on the next ask.
-            *loaded.blocking_write() = None;
         })?;
         Ok(())
     }
+
+    /// Queue `ids` for `reason` and wake the worker; answers those queued.
+    pub fn enqueue(&self, ids: &[i64], reason: Reason) -> Result<Vec<i64>> {
+        let queued = enqueue(&mut crate::db::open_for_write(&self.paths.db_path)?, ids, reason)?;
+        if !queued.is_empty() {
+            self.bell.ring();
+        }
+        Ok(queued)
+    }
+
+    /// Start the worker that drains the queue, for as long as the server
+    /// runs: it looks when something is queued, and now and then anyway.
+    pub fn serve(self: &Arc<Self>) -> Result<()> {
+        let service = self.clone();
+        std::thread::Builder::new().name("stelly-mix-queue".into()).spawn(move || loop {
+            if let Err(err) = service.drain() {
+                service.log.push(format!("mix: {err:#}"));
+                std::thread::sleep(RETRY_AFTER);
+            }
+            service.bell.wait(LOOK_EVERY);
+        })?;
+        Ok(())
+    }
+
+    /// Analyse what is queued until nothing is. The workers start with the
+    /// first track and go with the last, so an idle server holds no ONNX
+    /// session for them.
+    fn drain(&self) -> Result<()> {
+        let mut conn = crate::db::open_for_write(&self.paths.db_path)?;
+        self.drop_if_stopped(&mut conn, None)?;
+        let waiting = queued(&mut conn)?;
+        if waiting == 0 {
+            self.finish_if_idle();
+            return Ok(());
+        }
+        let log = self.log.clone();
+        let job = Job::new(move |line: &str| log.push(format!("mix: {line}")), Arc::new(AtomicBool::new(false)));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(models::ensure(&self.paths.model_dir, &[models::CLAP_AUDIO], &job))?;
+
+        let workers = default_workers().min(waiting);
+        job.log(format!("{waiting} tracks queued, {workers} workers"));
+        let feed = Feed::new(Vec::new());
+        let (report, results) = mpsc::channel();
+        let handles = start_workers(&self.paths, workers, &feed, report, &job)?;
+        let mut taken = HashSet::new();
+        let mut unread = 0;
+        let drained = (|| -> Result<()> {
+            loop {
+                self.drop_if_stopped(&mut conn, Some((&feed, &mut taken)))?;
+                if feed.len() < workers {
+                    for queued in claim(&mut conn, workers - feed.len(), &taken)? {
+                        taken.insert(queued.track.id);
+                        feed.push(Work::of(queued.track, Reason::of(queued.priority)));
+                    }
+                }
+                if taken.is_empty() {
+                    return Ok(());
+                }
+                let (id, name, outcome) = match results.recv_timeout(Duration::from_secs(2)) {
+                    Ok(result) => result,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => bail!("the mix workers stopped"),
+                };
+                taken.remove(&id);
+                let recorded = record(&mut conn, id, &name, outcome, &job)?;
+                dequeue(&mut conn, id)?;
+                self.tell(id, &recorded);
+                unread += 1;
+                if unread >= RELOAD_EVERY {
+                    self.forget_loaded();
+                    unread = 0;
+                }
+            }
+        })();
+        feed.close();
+        for handle in handles {
+            let _ = handle.join();
+        }
+        self.forget_loaded();
+        drained?;
+        self.finish_if_idle();
+        Ok(())
+    }
+
+    /// After `stop`: the selections' tracks out of the queue, and out of
+    /// the feed when there is one, but those a worker already has.
+    fn drop_if_stopped(&self, conn: &mut SqliteConnection, feed: Option<(&Feed, &mut HashSet<i64>)>) -> Result<()> {
+        if !self.drop_selections.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let dropped = diesel::sql_query("DELETE FROM mix_queue WHERE priority = ?")
+            .bind::<Integer, _>(Reason::Selection as i32)
+            .execute(conn)?;
+        if let Some((feed, taken)) = feed {
+            for id in feed.drop_where(|work| work.reason == Reason::Selection) {
+                taken.remove(&id);
+            }
+        }
+        if dropped > 0 {
+            self.log.push(format!("mix: {dropped} queued tracks dropped"));
+        }
+        Ok(())
+    }
+
+    /// One track done: told in the log, and counted in the selection if it
+    /// is one of its.
+    fn tell(&self, id: i64, recorded: &Recorded) {
+        self.log.push(format!("mix: {}", recorded.line));
+        let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+        if !batch.left.remove(&id) {
+            return;
+        }
+        match recorded.ok {
+            true => batch.stats.done += 1,
+            false => batch.stats.failed += 1,
+        }
+        let Stats { total, done, failed } = batch.stats.clone();
+        batch.status.last = Some(format!("[{}/{total}] {}", done + failed, recorded.line));
+        if batch.left.is_empty() {
+            batch.finish(format!("mix-analysed {done} tracks, {failed} failed"));
+        }
+    }
+
+    /// The queue is empty: a selection still running had its tracks done
+    /// some other way, or before it knew they were its.
+    fn finish_if_idle(&self) {
+        let mut batch = self.batch.lock().unwrap_or_else(|e| e.into_inner());
+        if batch.status.running && !batch.selecting {
+            let Stats { done, failed, .. } = batch.stats.clone();
+            batch.finish(format!("mix-analysed {done} tracks, {failed} failed"));
+        }
+    }
 }
+
+/// After a failure to drain, how long before trying again.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// How often the worker looks at the queue unasked, for what was queued by
+/// another process, the command line's.
+const LOOK_EVERY: Duration = Duration::from_secs(5 * 60);
+/// The library is read in again after this many new tracks, and at the end.
+const RELOAD_EVERY: usize = 25;
 
 // --------------------------------------------------------------- analysing
 
@@ -385,36 +719,12 @@ struct Work {
     id: i64,
     item: Item,
     needs_features: bool,
+    reason: Reason,
 }
 
-/// The mix analysis, and the space's of the excerpt when it was wanted.
-struct Outcome {
-    mix: std::result::Result<Track, String>,
-    features: Option<std::result::Result<(Descriptors, Vec<f32>), String>>,
-}
-
-/// Mix-analyse `ids`, those not done already; blocking, on worker threads of
-/// its own, each with its own ONNX session and gateway client. Only the
-/// calling thread writes to the database.
-pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<Stats> {
-    let mut conn = crate::db::open_for_write(&paths.db_path)?;
-    let todo = pending(&mut conn, ids, options.retry_failed)?;
-    let mut stats = Stats { total: todo.len(), ..Default::default() };
-    if todo.is_empty() {
-        job.log(format!("all {} already have a mix analysis", ids.len()));
-        return Ok(stats);
-    }
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(models::ensure(&paths.model_dir, &[models::CLAP_AUDIO], job))?;
-
-    let workers = if options.workers > 0 { options.workers } else { default_workers() }.min(todo.len());
-    let unanalysed = todo.iter().filter(|p| p.needs_features).count();
-    job.log(format!("mix-analysing {} tracks, {unanalysed} new to the space, {workers} workers", todo.len()));
-    let queue: VecDeque<Work> = todo
-        .into_iter()
-        .map(|p| Work {
+impl Work {
+    fn of(p: Pending, reason: Reason) -> Self {
+        Work {
             id: p.id,
             item: Item {
                 id: p.id.to_string(),
@@ -423,22 +733,86 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
                 seconds: p.duration.map(|d| d as f64),
             },
             needs_features: p.needs_features,
-        })
-        .collect();
-    let queue = Arc::new(Mutex::new(queue));
+            reason,
+        }
+    }
+}
+
+/// The mix analysis, and the space's of the excerpt when it was wanted.
+struct Outcome {
+    mix: std::result::Result<Track, String>,
+    features: Option<std::result::Result<(Descriptors, Vec<f32>), String>>,
+}
+
+/// Tracks handed to the workers, which wait for more until it is closed.
+struct Feed {
+    ready: Mutex<VecDeque<Work>>,
+    more: Condvar,
+    closed: AtomicBool,
+}
+
+impl Feed {
+    fn new(work: Vec<Work>) -> Arc<Self> {
+        Arc::new(Feed { ready: Mutex::new(work.into()), more: Condvar::new(), closed: AtomicBool::new(false) })
+    }
+
+    fn ready(&self) -> std::sync::MutexGuard<'_, VecDeque<Work>> {
+        self.ready.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn push(&self, work: Work) {
+        self.ready().push_back(work);
+        self.more.notify_one();
+    }
+
+    fn len(&self) -> usize {
+        self.ready().len()
+    }
+
+    /// Takes out the work `drop` says, answering whose it was.
+    fn drop_where(&self, drop: impl Fn(&Work) -> bool) -> Vec<i64> {
+        let mut ready = self.ready();
+        let dropped = ready.iter().filter(|w| drop(w)).map(|w| w.id).collect();
+        ready.retain(|w| !drop(w));
+        dropped
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.more.notify_all();
+    }
+
+    /// The next track, waiting for one; none once closed and empty.
+    fn take(&self) -> Option<Work> {
+        let mut ready = self.ready();
+        loop {
+            if let Some(work) = ready.pop_front() {
+                return Some(work);
+            }
+            if self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
+            ready = self.more.wait_timeout(ready, Duration::from_secs(1)).unwrap_or_else(|e| e.into_inner()).0;
+        }
+    }
+}
+
+type Report = (i64, String, Outcome);
+
+/// `n` workers taking from `feed` until it closes, each with its own ONNX
+/// session and gateway client, reporting each track on `report`.
+fn start_workers(paths: &Paths, n: usize, feed: &Arc<Feed>, report: mpsc::Sender<Report>, job: &Job) -> Result<Vec<std::thread::JoinHandle<()>>> {
     // Where each entry says it came from: Stelly's own ids, `stelly:<id>` to
     // stelly-mix, whichever provider has the audio.
     let source = stelly_mix::stelly::SOURCE.to_string();
-    let (report, results) = mpsc::channel::<(i64, String, Outcome)>();
-
     let mut handles = Vec::new();
-    for n in 0..workers {
-        let (queue, report, job) = (queue.clone(), report.clone(), job.clone());
-        let (env_dir, model_dir, db_path) = (paths.env_dir.clone(), paths.model_dir.clone(), paths.db_path.clone());
+    for i in 0..n {
+        let (feed, report, job) = (feed.clone(), report.clone(), job.clone());
+        let (env_dir, db_path) = (paths.env_dir.clone(), paths.db_path.clone());
         let source = source.clone();
         // Loaded here, so a missing model fails the stage rather than a thread.
-        let mut encoder = stelly_audio::clap::AudioEncoder::load(&model_dir, 1)?;
-        let handle = std::thread::Builder::new().name(format!("stelly-mix-{n}")).spawn(move || {
+        let mut encoder = stelly_audio::clap::AudioEncoder::load(&paths.model_dir, 1)?;
+        let handle = std::thread::Builder::new().name(format!("stelly-mix-{i}")).spawn(move || {
             crate::pipeline::step_back();
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             let client = Provider::from_env(&env_dir, &db_path).bulk();
@@ -447,7 +821,7 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
                 if job.cancelled() {
                     break;
                 }
-                let Some(work) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { break };
+                let Some(work) = feed.take() else { break };
                 let name = format!("{} - {}", work.item.artist, work.item.title);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Outcome> {
                     let (bytes, mime) = runtime.block_on(download(&client, &http, work.id))?;
@@ -470,37 +844,80 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
         })?;
         handles.push(handle);
     }
-    drop(report);
+    Ok(handles)
+}
+
+/// What one track came to, as stored.
+struct Recorded {
+    ok: bool,
+    /// Its name and how it went.
+    line: String,
+    /// Its excerpt went into `features` too.
+    spaced: bool,
+}
+
+fn record(conn: &mut SqliteConnection, id: i64, name: &str, outcome: Outcome, job: &Job) -> Result<Recorded> {
+    // The excerpt's analysis stands on its own: a track whose phrases could
+    // not be found can still join the space.
+    let spaced = match &outcome.features {
+        Some(Ok((descriptors, clap))) => {
+            analyse::store(conn, id, descriptors, clap)?;
+            true
+        }
+        Some(Err(error)) => {
+            analyse::record_failure(conn, id, error)?;
+            job.log(format!("{name}: excerpt for the space: {error}"));
+            false
+        }
+        None => false,
+    };
+    Ok(match outcome.mix {
+        Ok(track) => {
+            store(conn, id, &track)?;
+            let joined = if spaced { ", and its excerpt for the space" } else { "" };
+            Recorded { ok: true, line: format!("{name}: {} phrases{joined}", track.segments.len()), spaced }
+        }
+        Err(error) => {
+            record_failure(conn, id, &error)?;
+            Recorded { ok: false, line: format!("{name}: {error}"), spaced }
+        }
+    })
+}
+
+/// Mix-analyse `ids`, those not done already, here and now rather than
+/// through the queue: the command line's, with no server to drain it.
+/// Blocking, on worker threads of its own; only the calling thread writes
+/// to the database.
+pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<Stats> {
+    let mut conn = crate::db::open_for_write(&paths.db_path)?;
+    let todo = pending(&mut conn, ids, options.retry_failed)?;
+    let mut stats = Stats { total: todo.len(), ..Default::default() };
+    if todo.is_empty() {
+        job.log(format!("all {} already have a mix analysis", ids.len()));
+        return Ok(stats);
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(models::ensure(&paths.model_dir, &[models::CLAP_AUDIO], job))?;
+
+    let workers = if options.workers > 0 { options.workers } else { default_workers() }.min(todo.len());
+    let unanalysed = todo.iter().filter(|p| p.needs_features).count();
+    job.log(format!("mix-analysing {} tracks, {unanalysed} new to the space, {workers} workers", todo.len()));
+    let feed = Feed::new(todo.into_iter().map(|p| Work::of(p, Reason::Selection)).collect());
+    feed.close();
+    let (report, results) = mpsc::channel();
+    let handles = start_workers(paths, workers, &feed, report, job)?;
 
     let mut spaced = 0;
     for (id, name, outcome) in results {
-        // The excerpt's analysis stands on its own: a track whose phrases
-        // could not be found can still join the space.
-        let joined = match &outcome.features {
-            Some(Ok((descriptors, clap))) => {
-                analyse::store(&mut conn, id, descriptors, clap)?;
-                spaced += 1;
-                ", and its excerpt for the space"
-            }
-            Some(Err(error)) => {
-                analyse::record_failure(&mut conn, id, error)?;
-                job.log(format!("{name}: excerpt for the space: {error}"));
-                ""
-            }
-            None => "",
-        };
-        match outcome.mix {
-            Ok(track) => {
-                store(&mut conn, id, &track)?;
-                stats.done += 1;
-                job.log(format!("[{}/{}] {name}: {} phrases{joined}", stats.done + stats.failed, stats.total, track.segments.len()));
-            }
-            Err(error) => {
-                record_failure(&mut conn, id, &error)?;
-                stats.failed += 1;
-                job.log(format!("[{}/{}] {name}: {error}", stats.done + stats.failed, stats.total));
-            }
+        let recorded = record(&mut conn, id, &name, outcome, job)?;
+        match recorded.ok {
+            true => stats.done += 1,
+            false => stats.failed += 1,
         }
+        spaced += recorded.spaced as usize;
+        job.log(format!("[{}/{}] {}", stats.done + stats.failed, stats.total, recorded.line));
         job.advance("mix", (stats.done + stats.failed) as u64, stats.total as u64);
     }
     for handle in handles {
@@ -534,6 +951,66 @@ fn default_workers() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn database(name: &str) -> SqliteConnection {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = crate::db::open_for_write(&dir.join("stelly.db")).unwrap();
+        diesel::connection::SimpleConnection::batch_execute(
+            &mut conn,
+            "INSERT INTO tracks (id, title) VALUES (1, 'One'), (2, 'Two'), (3, 'Three'), (4, 'Four'), (5, 'Five');",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn order(conn: &mut SqliteConnection, taken: &[i64]) -> Vec<(i64, Reason)> {
+        let taken = taken.iter().copied().collect();
+        claim(conn, 10, &taken).unwrap().into_iter().map(|q| (q.track.id, Reason::of(q.priority))).collect()
+    }
+
+    #[test]
+    fn the_queue_goes_most_urgent_first_then_in_order() {
+        let conn = &mut database("order");
+        enqueue(conn, &[3, 1], Reason::Played).unwrap();
+        enqueue(conn, &[2], Reason::Selection).unwrap();
+        enqueue(conn, &[5], Reason::Liked).unwrap();
+        assert_eq!(order(conn, &[]), [(5, Reason::Liked), (2, Reason::Selection), (3, Reason::Played), (1, Reason::Played)]);
+        // Taken already: not handed out twice.
+        assert_eq!(order(conn, &[5, 3]), [(2, Reason::Selection), (1, Reason::Played)]);
+    }
+
+    #[test]
+    fn queued_again_a_track_keeps_its_more_urgent_reason() {
+        let conn = &mut database("again");
+        enqueue(conn, &[1, 2], Reason::Played).unwrap();
+        enqueue(conn, &[2], Reason::Asked).unwrap();
+        enqueue(conn, &[2], Reason::Played).unwrap();
+        assert_eq!(order(conn, &[]), [(2, Reason::Asked), (1, Reason::Played)]);
+    }
+
+    #[test]
+    fn analysed_failed_or_gone_tracks_leave_the_queue() {
+        let conn = &mut database("leave");
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            &format!(
+                "INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (1, {VERSION}, '{{}}', ''), (2, 0, '{{}}', '');
+                 INSERT INTO mix_failures (track_id, reason) VALUES (3, 'no audio');"
+            ),
+        )
+        .unwrap();
+        // 1 is done, 3 failed; 2's analysis is from another version.
+        assert_eq!(enqueue(conn, &[1, 2, 3, 4, 5], Reason::Selection).unwrap(), [2, 4, 5]);
+        diesel::sql_query("DELETE FROM tracks WHERE id = 5").execute(conn).unwrap();
+        // And 4 analysed some other way since it was queued.
+        diesel::sql_query(format!("INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (4, {VERSION}, '{{}}', '')"))
+            .execute(conn)
+            .unwrap();
+        assert_eq!(order(conn, &[]), [(2, Reason::Selection)]);
+        assert_eq!(queued(conn).unwrap(), 1);
+    }
 
     #[test]
     fn names_compare_without_case_or_punctuation() {
