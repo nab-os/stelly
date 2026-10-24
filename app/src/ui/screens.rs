@@ -16,11 +16,12 @@ use super::{
     album_link, artist_link, open_remote_track, row_keys, space_mark, Blocklist, Cover, LocalIds, MapView,
     Pipeline, Selection, SpaceReach,
 };
-use crate::api::{MixState, MixSummary, PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
+use crate::api::{MixBrief, MixState, MixSummary, PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
 use crate::catalogue::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
+use std::collections::HashMap;
 
 /// Add to or remove from this user's likes, which the server keeps and Qobuz
 /// never hears of. `kind` is "track", "album" or "artist". The heart flips at
@@ -468,6 +469,12 @@ fn ForMixing(track_id: i64, mix: Signal<Option<Result<MixState, String>>>) -> El
     }
 }
 
+/// "128 · 5A", or whichever of the two there is.
+fn brief_label(brief: &MixBrief) -> String {
+    let bpm = brief.bpm.map(|bpm| format!("{bpm:.0}"));
+    [bpm, brief.camelot.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
 fn queued_because(reason: &str) -> &'static str {
     match reason {
         "asked" => "asked for",
@@ -562,6 +569,18 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
 
     library.ensure_liked_loaded();
     let liked = library.is_liked("album", &album.id);
+
+    // The tempo and key of the tracks analysed for mixing, asked once the
+    // tracklist is in. A server from before them answers nothing.
+    let briefs = use_resource(move || async move {
+        let ids: Vec<i64> = library.shelf.read().tracks.iter().map(|t| t.id).collect();
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+        let briefs = backend().mix_briefs(ids).await.unwrap_or_default();
+        briefs.into_iter().map(|brief| (brief.track_id, brief)).collect::<HashMap<i64, MixBrief>>()
+    });
+    let briefs = briefs.read().clone().unwrap_or_default();
 
     // `LibraryPanel`'s drive fetched these for this view; the menu's
     // `ShelfTrack` indices address the same list. Read where they are, as
@@ -689,6 +708,12 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                             }
                             if local_ids.contains(&track.id) {
                                 span { class: "in-space-dot", title: "in your space", "•" }
+                            }
+                            // Empty for a track not analysed, so the column stays put.
+                            span {
+                                class: "muted mix-brief",
+                                title: "tempo and key of the whole track",
+                                {briefs.get(&track.id).map(brief_label).unwrap_or_default()}
                             }
                             span { class: "muted", "{track.duration_label()}" }
                             div { class: "row-actions",

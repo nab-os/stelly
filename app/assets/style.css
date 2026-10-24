@@ -894,6 +894,8 @@ span.path-end {
 /* An album's tracklist: play, A, B on every row. */
 .album-tracks .row { padding: 4px 7px; }
 .album-tracks .title .muted { font-size: 12px; }
+/* Tempo and key, lined up down the list. */
+.mix-brief { font-size: 12px; font-variant-numeric: tabular-nums; min-width: 64px; text-align: right; }
 .row-actions { display: flex; align-items: center; gap: 4px; flex: none; }
 .row-actions .icon-btn .icon { width: 14px; height: 14px; }
 .row-actions .path-end { width: 28px; height: 28px; padding: 0; border-radius: 50%; font-size: 12px; }
