@@ -2,12 +2,13 @@
 //! main area rather than a sheet over it.
 //!
 //! What you can do with a thing sits at the top, under its cover: play it,
-//! like it, add it to the space, or, for a track the space holds, name it as
-//! either end of a path. The generate panel beside the main area is where
-//! that path, or any other walk, then shows up.
+//! like it, add it to the space. A track's page then starts something from
+//! it, a radio, its neighbours, a path to it or a drift away from it, which
+//! lands in the queue as a section of its own.
 
-use super::generate::{Generator, PathEnd};
+use super::generate::{Generator, Mode, PathEnd};
 use super::pipeline::queued_label;
+use super::side::title_for;
 use super::icons;
 use super::library::{ArtistRows, Library, TracksView, View, ViewToggle};
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
@@ -238,7 +239,6 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     let map = use_context::<MapView>();
     let mut selection = use_context::<Selection>().0;
     let generator = use_context::<Generator>();
-    let mut panel_open = generator.panel_open;
     let status = use_signal(|| None::<String>);
 
     library.ensure_liked_loaded();
@@ -257,7 +257,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     };
 
     // Looking at a track the space holds makes it the one in hand, for the
-    // generate panel and the map, however the page was reached.
+    // map, however the page was reached.
     let seed = track.id;
     if in_space {
         super::glimpse(&track);
@@ -269,15 +269,7 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     });
 
     let quality = if track.hires { "hi-res available" } else { "CD quality" };
-    let credits: Vec<String> = track
-        .performers
-        .as_deref()
-        .unwrap_or_default()
-        .split(';')
-        .map(str::trim)
-        .filter(|c| !c.is_empty())
-        .map(str::to_string)
-        .collect();
+    let credits = by_role(track.performers.as_deref().unwrap_or_default());
 
     rsx! {
         div { class: "page",
@@ -316,58 +308,70 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                             },
                             {icons::heart(liked)}
                         }
-                    }
-                    div { class: "hero-actions",
-                        AddOrBadge {
-                            held: if in_space { Held::All } else { Held::None },
-                            target: Target::Track(track.id),
-                            title: "analyse this track and put it on the map",
-                            status,
-                        }
-                        PathButtons { track: track.clone(), enabled: in_space, compact: false }
                         if in_space {
                             button {
-                                title: "show where it sits",
+                                class: "icon-btn",
+                                title: "show where it sits on the map",
                                 onclick: move |_| map.browse(),
                                 {icons::constellation()}
-                                "Map"
-                            }
-                            // Phone only: beside the main area the panel is
-                            // already in view.
-                            button {
-                                class: "hero-generate",
-                                title: "make a playlist from this track",
-                                onclick: move |_| panel_open.set(true),
-                                {icons::spark()}
-                                "Generate"
                             }
                         }
                     }
+                    StartBox { track: track.clone(), in_space, status }
                     if let Some(message) = status() {
                         p { class: "muted", "{message}" }
                     }
                 }
             }
 
-            div { class: "rule" }
+            div { class: "details",
+                dl { class: "facts",
+                    {fact("Released", track.released.clone())}
+                    {fact("Duration", track.duration.filter(|d| *d > 0).map(clock))}
+                    {fact("Genre", meta.as_ref().map(|m| m.genre.clone()))}
+                    {fact("Tempo", mixed.as_ref().and_then(|m| m.bpm).or_else(|| meta.as_ref().and_then(|m| m.bpm).map(f64::from)).map(|bpm| format!("{bpm:.0} bpm")))}
+                    {fact("Key", mixed.as_ref().and_then(|m| Some(format!("{} · {}", m.key.as_ref()?, m.camelot.as_ref()?))))}
+                    {fact("Quality", Some(quality.to_string()))}
+                    {fact("Streamable", Some(if track.streamable { "yes" } else { "not here" }.to_string()))}
+                    if !in_space {
+                        div { class: "fact",
+                            dt { "In your space" }
+                            dd { class: "no", "no" }
+                        }
+                    }
+                    {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from a like", m.seed_distance)))}
+                    {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
+                    {fact("ISRC", track.isrc.clone().or_else(|| meta.as_ref().and_then(|m| m.isrc.clone())))}
+                    {fact("Track id", Some(track.id.to_string()))}
+                    {fact("Album id", track.album_id.clone())}
+                }
 
-            dl { class: "facts",
-                {fact("Title", Some(track.title.clone()))}
-                {fact("Artist", Some(track.artist.clone()))}
-                {fact("Album", Some(track.album.clone()))}
-                {fact("Duration", track.duration.filter(|d| *d > 0).map(clock))}
-                {fact("Released", track.released.clone())}
-                {fact("Genre", meta.as_ref().map(|m| m.genre.clone()))}
-                {fact("Tempo", mixed.as_ref().and_then(|m| m.bpm).or_else(|| meta.as_ref().and_then(|m| m.bpm).map(f64::from)).map(|bpm| format!("{bpm:.0} bpm")))}
-                {fact("Key", mixed.as_ref().and_then(|m| Some(format!("{} · {}", m.key.as_ref()?, m.camelot.as_ref()?))))}
-                {fact("ISRC", track.isrc.clone().or_else(|| meta.as_ref().and_then(|m| m.isrc.clone())))}
-                {fact("Quality", Some(quality.to_string()))}
-                {fact("Streamable", Some(if track.streamable { "yes" } else { "not here" }.to_string()))}
-                {fact("In your space", Some(if in_space { "yes" } else { "no" }.to_string()))}
-                {fact("Crawl distance", meta.as_ref().map(|m| format!("{} hops from a like", m.seed_distance)))}
-                {fact("On the map", meta.as_ref().and_then(|m| Some(format!("{:.2}, {:.2}", m.x?, m.y?))))}
-                {fact("Track id", Some(track.id.to_string()))}
-                {fact("Album id", track.album_id.clone())}
+                div { class: "credits-col",
+                    if !credits.is_empty() {
+                        h3 { class: "shelf-head", "Credits" }
+                        dl { class: "credits",
+                            for (role, who) in credits {
+                                div { key: "{role}", class: "fact",
+                                    dt { "{role}" }
+                                    dd { "{who}" }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(artist_id) = track.artist_id.filter(|_| *blocklist.editable.read()) {
+                        button {
+                            class: "danger page-foot",
+                            onclick: {
+                                let name = track.artist.clone();
+                                move |_| {
+                                    blocklist.block.call((artist_id, name.clone()));
+                                    library.back();
+                                }
+                            },
+                            "Hide {track.artist}"
+                        }
+                    }
+                }
             }
 
             ForMixing { track_id: track.id, mix }
@@ -375,33 +379,236 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
             if in_space && generator.can_steer() {
                 Described { key: "{track.id}", track_id: track.id }
             }
+        }
+    }
+}
 
-            if !credits.is_empty() {
-                h3 { class: "shelf-head", "Credits" }
-                ul { class: "credits",
-                    for (i, credit) in credits.into_iter().enumerate() {
-                        li { key: "{i}", "{credit}" }
+/// What to start from a track, its own row under play and queue: a radio,
+/// split from the other walks behind its arrow, and the path button, which
+/// says what it would do with a path's start already set or not. A track the
+/// space does not hold has nowhere to walk from, so both stay locked, say
+/// why, and adding it to the space is the way in.
+#[component]
+fn StartBox(track: RemoteTrack, in_space: bool, status: Signal<Option<String>>) -> Element {
+    let generator = use_context::<Generator>();
+    let mut selection = use_context::<Selection>().0;
+    let offline = use_context::<super::Space>().offline.read().is_some();
+    let mut menu_open = use_signal(|| false);
+    let mut phrase = use_signal(String::new);
+
+    let id = track.id;
+    let from = *generator.from.read();
+    let busy = *generator.busy.read();
+    let steer = generator.can_steer();
+    let drifting = *generator.drift_for.read() == Some(id);
+    let locked = !in_space;
+    let why = if locked { " (add it to your space first)" } else { "" };
+
+    // From this track: it is the one in hand, for the map, and the seed.
+    let mut start = move |mode: Mode| {
+        selection.set(Some(id));
+        generator.request(mode, id);
+    };
+
+    rsx! {
+        div { class: if locked { "start-box locked" } else { "start-box" },
+            div { class: "start-row",
+                div { class: "split",
+                    button {
+                        class: "split-main",
+                        disabled: locked || busy,
+                        title: "a radio from this track, into the queue{why}",
+                        onclick: move |_| start(Mode::Radio),
+                        {icons::radio()}
+                        if busy { "working…" } else { "Radio" }
+                    }
+                    button {
+                        class: if menu_open() { "split-more active" } else { "split-more" },
+                        disabled: locked || busy,
+                        title: "other ways to start from this track",
+                        onclick: move |_| menu_open.set(!menu_open()),
+                        "▾"
+                    }
+                    if menu_open() {
+                        // Under the menu, over everything else: a click
+                        // anywhere outside it closes it.
+                        div { class: "split-scrim", onclick: move |_| menu_open.set(false) }
+                        div { class: "split-menu",
+                            for mode in [Mode::Radio, Mode::Neighbours, Mode::Drift] {
+                                button {
+                                    key: "{mode.label()}",
+                                    class: "split-item",
+                                    disabled: mode.steered() && !steer,
+                                    title: if mode.steered() && !steer { "needs the CLAP text tower on the server: stelly-server models" } else { "" },
+                                    onclick: move |_| {
+                                        menu_open.set(false);
+                                        if mode == Mode::Drift {
+                                            generator.aim_drift(id);
+                                        } else {
+                                            start(mode);
+                                        }
+                                    },
+                                    {mode.icon()}
+                                    span { class: "split-text",
+                                        span { class: "title", if mode == Mode::Drift { "Drift…" } else { "{mode.title()}" } }
+                                        span { class: "muted", "{mode.blurb()}" }
+                                    }
+                                }
+                            }
+                            div { class: "split-foot muted",
+                                "{generator.count} tracks, after what is playing · change in settings"
+                            }
+                        }
+                    }
+                }
+
+                // A path is two tracks apart: its start set on one page, then
+                // walked to from another.
+                match from {
+                    Some(a) if a != id => rsx! {
+                        button {
+                            class: "path-to",
+                            disabled: locked || busy,
+                            title: "walk from {title_for(a)} to this track{why}",
+                            onclick: move |_| {
+                                selection.set(Some(id));
+                                generator.set_path_end(PathEnd::B, id);
+                            },
+                            {icons::path()}
+                            "Path to here"
+                        }
+                    },
+                    Some(_) => rsx! {
+                        button {
+                            class: "path-to set",
+                            title: "this track starts the path; open another and pick “Path to here”. Click to cancel.",
+                            onclick: move |_| generator.cancel_path(),
+                            {icons::path()}
+                            "Path starts here ×"
+                        }
+                    },
+                    None => rsx! {
+                        button {
+                            class: "path-to",
+                            disabled: locked,
+                            title: "start a path here, then pick “Path to here” on another track{why}",
+                            onclick: move |_| generator.start_path(id),
+                            {icons::path()}
+                            "Path from here"
+                        }
+                    },
+                }
+
+                span { class: "spacer" }
+                AddOrBadge {
+                    held: if in_space { Held::All } else { Held::None },
+                    target: Target::Track(id),
+                    title: "analyse this track and put it on the map",
+                    status,
+                }
+            }
+
+            if drifting && !locked {
+                div { class: "start-row drift-row",
+                    {icons::drift()}
+                    input {
+                        class: "search",
+                        placeholder: "drift towards… darker and slower",
+                        value: "{phrase}",
+                        oninput: move |event| phrase.set(event.value()),
+                        onkeydown: move |event| {
+                            if event.key() == Key::Enter && !phrase.peek().trim().is_empty() && !*generator.busy.peek() {
+                                selection.set(Some(id));
+                                generator.drift(id, phrase.peek().trim());
+                            }
+                        },
+                    }
+                    button {
+                        class: "primary",
+                        disabled: phrase().trim().is_empty() || busy || !steer,
+                        onclick: move |_| {
+                            selection.set(Some(id));
+                            generator.drift(id, phrase.peek().trim());
+                        },
+                        "Drift"
+                    }
+                    button {
+                        class: "chip",
+                        title: "never mind",
+                        onclick: move |_| { let mut drift_for = generator.drift_for; drift_for.set(None); },
+                        "×"
                     }
                 }
             }
 
-            if let Some(artist_id) = track.artist_id.filter(|_| *blocklist.editable.read()) {
-                div { class: "page-foot",
-                    button {
-                        class: "danger",
-                        onclick: {
-                            let name = track.artist.clone();
-                            move |_| {
-                                blocklist.block.call((artist_id, name.clone()));
-                                library.back();
-                            }
-                        },
-                        "Hide {track.artist}"
-                    }
+            if locked {
+                span { class: "start-why muted",
+                    "{track.title} isn't in your space yet. Add it to start a radio, path or drift from here."
+                }
+            } else if offline {
+                span { class: "start-why error", "The server is unreachable, generating needs it." }
+            } else if let Some(message) = generator.status.read().clone() {
+                if *generator.failed.read() {
+                    span { class: "start-why error", title: "{message}", "{message}" }
+                } else {
+                    span { class: "start-why muted", "{message}" }
                 }
             }
         }
     }
+}
+
+/// Credits as the provider reports them, "name, role, role" each, grouped
+/// the other way round: each role once, with everyone who had it. Roles
+/// that came out with the same people are one line ("Composer, lyricist").
+fn by_role(performers: &str) -> Vec<(String, String)> {
+    let mut roles: Vec<(String, Vec<String>)> = Vec::new();
+    for credit in performers.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+        let mut parts = credit.split(',').map(str::trim).filter(|p| !p.is_empty());
+        let Some(name) = parts.next() else { continue };
+        let mut any = false;
+        for role in parts {
+            any = true;
+            let role = spaced(role);
+            match roles.iter_mut().find(|(known, _)| *known == role) {
+                Some((_, names)) if names.iter().any(|n| n == name) => {}
+                Some((_, names)) => names.push(name.to_string()),
+                None => roles.push((role, vec![name.to_string()])),
+            }
+        }
+        if !any {
+            match roles.iter_mut().find(|(known, _)| known == "Credited") {
+                Some((_, names)) => names.push(name.to_string()),
+                None => roles.push(("Credited".into(), vec![name.to_string()])),
+            }
+        }
+    }
+
+    let mut lines: Vec<(String, Vec<String>)> = Vec::new();
+    for (role, names) in roles {
+        match lines.iter_mut().find(|(_, known)| *known == names) {
+            Some((line, _)) => {
+                line.push_str(", ");
+                line.push_str(&role.to_lowercase());
+            }
+            None => lines.push((role, names)),
+        }
+    }
+    lines.into_iter().map(|(role, names)| (role, names.join(", "))).collect()
+}
+
+/// "MainArtist" as "Main artist": Qobuz runs its role names together.
+fn spaced(role: &str) -> String {
+    let mut out = String::with_capacity(role.len() + 4);
+    for (i, c) in role.chars().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            out.push(' ');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Where a track stands for mixing, asked again every few seconds while it
@@ -982,5 +1189,36 @@ pub fn ArtistScreen(artist: RemoteArtist) -> Element {
                 ArtistRows { heading: "Similar artists".to_string(), similar: true }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::by_role;
+
+    #[test]
+    fn credits_are_grouped_by_role() {
+        let got = by_role("Aurora, MainArtist, Vocals; Tom Rowlands, MainArtist, Producer; Mike Marsh, Mastering");
+        assert_eq!(
+            got,
+            vec![
+                ("Main artist".to_string(), "Aurora, Tom Rowlands".to_string()),
+                ("Vocals".to_string(), "Aurora".to_string()),
+                ("Producer".to_string(), "Tom Rowlands".to_string()),
+                ("Mastering".to_string(), "Mike Marsh".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn roles_with_the_same_people_share_a_line() {
+        let got = by_role("Aurora Aksnes, Composer, Lyricist; Tom Rowlands, Composer, Lyricist");
+        assert_eq!(got, vec![("Composer, lyricist".to_string(), "Aurora Aksnes, Tom Rowlands".to_string())]);
+    }
+
+    #[test]
+    fn a_name_without_a_role_is_still_credited() {
+        assert_eq!(by_role("Someone"), vec![("Credited".to_string(), "Someone".to_string())]);
+        assert!(by_role("").is_empty());
     }
 }

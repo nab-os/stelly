@@ -7,7 +7,7 @@ use crate::api::{BlockedArtist, Device, Scope, SpaceIndex, SpaceInfo, SpaceSort}
 use crate::backend::{self, backend};
 use crate::catalogue::RemoteTrack;
 use crate::ui::{
-    icons, Blocklist, ContextMenu, ContextMenuView, Crawler, Family, GeneratePanel, Generator,
+    icons, Blocklist, ContextMenu, ContextMenuView, Crawler, Family, Generator,
     Library, LocalIds, MainScreen, MapView, Me, PathPill, Provider, Pipeline, Player, PlayerBar, QueueView,
     ReleaseNotice, Releases, Search, Selection, Space, SpaceMatches, SpaceReach, SpaceRow, TitleBar,
     View, Weights,
@@ -358,7 +358,7 @@ fn Shell() -> Element {
     let library = use_context_provider(Library::new);
     use_context_provider(Tour::new);
 
-    let generator = use_context_provider(Generator::new);
+    let generator = use_context_provider(|| Generator::new(player));
     use_context_provider(|| Weights(generator.weights));
     let crawler = use_context_provider(Crawler::new);
     let pipeline = use_context_provider(Pipeline::new);
@@ -684,7 +684,6 @@ fn Shell() -> Element {
     let can_back = move || {
         menu.read().is_some()
             || *player.queue_open.read()
-            || *generator.panel_open.read()
             || map_open()
             || !library.history.read().is_empty()
     };
@@ -697,7 +696,6 @@ fn Shell() -> Element {
         arm_back(can_back());
 
         let mut queue_open = player.queue_open;
-        let mut panel_open = generator.panel_open;
         let map = MapView { map_open, map_route };
         // What each back did, latest last, so forward can undo it: step back
         // into the page, or open again what back closed.
@@ -710,19 +708,15 @@ fn Shell() -> Element {
                     // opened from, and is quicker opened again than found.
                     if menu.peek().is_some() {
                         menu.set(None);
-                    } else if *queue_open.peek() {
+                    } else if *queue_open.peek() && narrow {
+                        // A drawer over the page on a phone. Docked beside
+                        // the page on a wide screen it is never in the way.
                         queue_open.set(false);
                         undone.push(Undone::Queue);
-                    } else if *panel_open.peek() && narrow {
-                        panel_open.set(false);
-                        undone.push(Undone::Panel);
                     } else if *map_open.peek() {
                         undone.push(Undone::Map { route: *map_route.peek() });
                         map.close();
                     } else {
-                        // Docked on a wide screen, the panel was never in
-                        // the way; left open it would keep the key armed.
-                        panel_open.set(false);
                         if !library.history.peek().is_empty() {
                             library.back();
                             undone.push(Undone::Page);
@@ -731,7 +725,6 @@ fn Shell() -> Element {
                 }
                 Some("forward") => match undone.pop() {
                     Some(Undone::Queue) => queue_open.set(true),
-                    Some(Undone::Panel) => panel_open.set(true),
                     Some(Undone::Map { route: true }) => map.show_route(),
                     Some(Undone::Map { route: false }) => map.browse(),
                     // Going somewhere new since forgets the way forward, as a
@@ -1004,25 +997,7 @@ fn Shell() -> Element {
 
     use_context_provider(|| SpaceMatches(filtered));
 
-    // Whether the layout is the phone's, where the generate panel slides over
-    // the main area rather than sitting docked beside it. `panel_open` alone
-    // cannot say: generating opens it on any screen.
-    let mut narrow = use_signal(|| false);
-    use_future(move || async move {
-        let mut handle = document::eval(
-            "const query = window.matchMedia('(max-width: 900px)');
-             dioxus.send(query.matches);
-             query.addEventListener('change', (event) => dioxus.send(event.matches));
-             await new Promise(() => {});",
-        );
-        while let Ok(matches) = handle.recv::<bool>().await {
-            narrow.set(matches);
-        }
-    });
-
     let map = MapView { map_open, map_route };
-    let mut panel_open = generator.panel_open;
-    let covered = narrow() && panel_open();
 
     // Once, after the first render: the window has the app in it now.
     use_effect(|| crate::timings::mark("shell-rendered", ""));
@@ -1032,12 +1007,13 @@ fn Shell() -> Element {
             ReleaseNotice {}
 
             // Everything above the player: the main area and, beside it, the
-            // generate panel. The queue drawer opens over both.
+            // queue, when it is open. On a phone the queue is a drawer over
+            // the main area instead.
             div { class: "workspace",
                 main { class: "main",
                     MainScreen {}
 
-                    // Over the main area only, never the panel beside it.
+                    // Over the main area only, never the queue beside it.
                     // Hidden, never unmounted, and never moved in this tree:
                     // map.js caches the canvas node, its 2d context, its
                     // listeners and a ResizeObserver at eval time and has no
@@ -1059,43 +1035,21 @@ fn Shell() -> Element {
                     OfflineNotice {}
 
                     // Bottom right of the main area, over the map as well,
-                    // since its own button is how you close it again. On a
-                    // phone, over the generate panel too: the map is the main
-                    // area's, so from there it slides the panel away first,
-                    // and answers to what is under it only once it can be
-                    // seen.
+                    // since its own button is how you close it again.
                     div { class: "fabs",
-                        // Phone only: the panel is always showing otherwise.
                         button {
-                            class: if covered { "fab fab-generate active" } else { "fab fab-generate" },
-                            title: if covered { "close generate" } else { "generate" },
-                            onclick: move |_| panel_open.set(!covered),
-                            {icons::spark()}
-                        }
-                        button {
-                            class: if map_open() && !covered { "fab fab-map active" } else { "fab fab-map" },
-                            title: if map_open() && !covered { "close the map" } else { "the map" },
-                            onclick: move |_| {
-                                if covered {
-                                    panel_open.set(false);
-                                    if !map_open() {
-                                        map.browse();
-                                    }
-                                } else {
-                                    map.toggle();
-                                }
-                            },
+                            class: if map_open() { "fab fab-map active" } else { "fab fab-map" },
+                            title: if map_open() { "close the map" } else { "the map" },
+                            onclick: move |_| map.toggle(),
                             {icons::constellation()}
                         }
                     }
                 }
 
-                GeneratePanel {}
-
                 QueueView {}
             }
 
-            // A half-built path survives the panel being slid away on a phone.
+            // A path's start, while its end is looked for page to page.
             PathPill {}
 
             PlayerBar {}
@@ -1277,7 +1231,6 @@ fn space_sort(sort: Sort) -> (SpaceSort, bool) {
 enum Undone {
     Page,
     Queue,
-    Panel,
     Map { route: bool },
 }
 
