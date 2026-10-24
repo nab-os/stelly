@@ -315,6 +315,8 @@ fn state_of(conn: &mut SqliteConnection, id: i64) -> Result<MixState> {
 #[derive(Debug, PartialEq, serde::Serialize)]
 pub struct LikedTrack {
     pub track_id: i64,
+    pub title: String,
+    pub artist: String,
     /// Unix seconds; the latest, when several liked it.
     pub liked_at: i64,
     /// Who liked it, by name.
@@ -328,6 +330,10 @@ pub fn liked_tracks(conn: &mut SqliteConnection, since: i64) -> Result<Vec<Liked
     struct Row {
         #[diesel(sql_type = BigInt)]
         track_id: i64,
+        #[diesel(sql_type = Nullable<Text>)]
+        title: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        artist: Option<String>,
         #[diesel(sql_type = BigInt)]
         liked_at: i64,
         #[diesel(sql_type = Nullable<Text>)]
@@ -336,12 +342,15 @@ pub fn liked_tracks(conn: &mut SqliteConnection, since: i64) -> Result<Vec<Liked
         analysed: bool,
     }
     let rows: Vec<Row> = diesel::sql_query(format!(
-        "SELECT x.track_id AS track_id, MAX(x.liked_at) AS liked_at, GROUP_CONCAT(DISTINCT u.name) AS by,
+        "SELECT x.track_id AS track_id, t.title AS title, a.name AS artist,
+           MAX(x.liked_at) AS liked_at, GROUP_CONCAT(DISTINCT u.name) AS by,
            EXISTS (SELECT 1 FROM mix m WHERE m.track_id = x.track_id AND m.version = {VERSION}) AS analysed
          FROM (SELECT CAST(l.ref_id AS INTEGER) AS track_id, l.liked_at, l.user_id FROM likes l WHERE l.kind = 'track'
                UNION ALL
                SELECT t.id, l.liked_at, l.user_id FROM likes l JOIN tracks t ON t.album_id = l.ref_id WHERE l.kind = 'album') x
          LEFT JOIN users u ON u.id = x.user_id
+         LEFT JOIN tracks t ON t.id = x.track_id
+         LEFT JOIN artists a ON a.id = t.artist_id
          WHERE x.liked_at > ?
          GROUP BY x.track_id
          ORDER BY liked_at DESC, x.track_id"
@@ -352,6 +361,8 @@ pub fn liked_tracks(conn: &mut SqliteConnection, since: i64) -> Result<Vec<Liked
         .into_iter()
         .map(|row| LikedTrack {
             track_id: row.track_id,
+            title: row.title.unwrap_or_default(),
+            artist: row.artist.unwrap_or_default(),
             liked_at: row.liked_at,
             by: row.by.map(|by| by.split(',').map(str::to_string).collect()).unwrap_or_default(),
             analysed: row.analysed,
@@ -1630,7 +1641,7 @@ mod tests {
         let liked = liked_tracks(conn, 5).unwrap();
         let mut first = liked[0].by.clone();
         first.sort();
-        assert_eq!((liked[0].track_id, liked[0].liked_at, liked[0].analysed), (1, 30, true));
+        assert_eq!((liked[0].track_id, liked[0].title.as_str(), liked[0].liked_at, liked[0].analysed), (1, "One", 30, true));
         assert_eq!(first, ["lou", "sasha"]);
         // The album's tracks, at the album's date; 5 is from before `since`.
         assert_eq!(liked[1..].iter().map(|l| (l.track_id, l.liked_at, l.analysed)).collect::<Vec<_>>(), [(3, 20, false), (4, 20, false)]);
