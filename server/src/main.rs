@@ -442,7 +442,7 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
 
         state.hub.load_text();
         state.hub.import_legacy();
-        listens::record(db_path, heard);
+        listens::record(db_path, heard, state.hub.mix().clone());
         // The mix queue: what likes, plays and selections put in it.
         if let Err(err) = state.hub.mix().serve() {
             eprintln!("the mix queue is not served: {err:#}");

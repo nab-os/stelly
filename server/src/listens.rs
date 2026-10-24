@@ -11,6 +11,8 @@
 use anyhow::Result;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Double, Nullable, Text};
+use crate::mix::{MixService, Reason};
+use std::sync::Arc;
 use std::time::Instant;
 use stelly_core::session::{Clocked, Op};
 
@@ -196,12 +198,20 @@ pub fn store(conn: &mut SqliteConnection, listen: &Listen) -> Result<()> {
     Ok(())
 }
 
-/// Store every listen the sessions end, as they end, off their locks.
-pub fn record(db_path: std::path::PathBuf, mut listens: tokio::sync::mpsc::UnboundedReceiver<Listen>) {
+/// Store every listen the sessions end, as they end, off their locks; a
+/// track played through is queued for its mix analysis, behind the rest.
+pub fn record(db_path: std::path::PathBuf, mut listens: tokio::sync::mpsc::UnboundedReceiver<Listen>, mix: Arc<MixService>) {
     tokio::spawn(async move {
         while let Some(listen) = listens.recv().await {
-            let db_path = db_path.clone();
-            let stored = tokio::task::spawn_blocking(move || store(&mut crate::db::open_for_write(&db_path)?, &listen)).await;
+            let (db_path, mix) = (db_path.clone(), mix.clone());
+            let stored = tokio::task::spawn_blocking(move || {
+                store(&mut crate::db::open_for_write(&db_path)?, &listen)?;
+                if listen.played_through() {
+                    mix.enqueue(&[listen.track_id], Reason::Played)?;
+                }
+                anyhow::Ok(())
+            })
+            .await;
             if let Ok(Err(err)) | Err(err) = stored.map_err(anyhow::Error::from) {
                 eprintln!("a listen was not recorded: {err:#}");
             }

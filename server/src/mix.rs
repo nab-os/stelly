@@ -387,13 +387,20 @@ fn dequeue(conn: &mut SqliteConnection, id: i64) -> Result<()> {
     Ok(())
 }
 
+#[derive(QueryableByName)]
+struct Count {
+    #[diesel(sql_type = BigInt)]
+    n: i64,
+}
+
 fn queued(conn: &mut SqliteConnection) -> Result<usize> {
-    #[derive(QueryableByName)]
-    struct Count {
-        #[diesel(sql_type = BigInt)]
-        n: i64,
-    }
     Ok(diesel::sql_query("SELECT COUNT(*) AS n FROM mix_queue").get_result::<Count>(conn)?.n as usize)
+}
+
+/// How many are queued for a more urgent reason than `reason`.
+fn queued_before(conn: &mut SqliteConnection, reason: Reason) -> Result<usize> {
+    let count = diesel::sql_query("SELECT COUNT(*) AS n FROM mix_queue WHERE priority < ?").bind::<Integer, _>(reason as i32);
+    Ok(count.get_result::<Count>(conn)?.n as usize)
 }
 
 /// Rung when something is queued, so the worker need not wait to look.
@@ -618,6 +625,12 @@ impl MixService {
     /// Analyse what is queued until nothing is. The workers start with the
     /// first track and go with the last, so an idle server holds no ONNX
     /// session for them.
+    ///
+    /// Played tracks are the library growing by itself, which is no hurry:
+    /// one at a time, on one worker, when nothing else is queued. A burst of
+    /// them that something more urgent comes into ends once its track is
+    /// done, as does a burst of urgent ones once only played tracks are
+    /// left, and the next starts with as many workers as it wants.
     fn drain(&self) -> Result<()> {
         let mut conn = crate::db::open_for_write(&self.paths.db_path)?;
         self.drop_if_stopped(&mut conn, None)?;
@@ -633,25 +646,43 @@ impl MixService {
             .build()?
             .block_on(models::ensure(&self.paths.model_dir, &[models::CLAP_AUDIO], &job))?;
 
-        let workers = default_workers().min(waiting);
-        job.log(format!("{waiting} tracks queued, {workers} workers"));
+        let urgent = queued_before(&mut conn, Reason::Played)?;
+        let workers = if urgent == 0 { 1 } else { default_workers().min(urgent) };
+        job.log(format!("{waiting} tracks queued, {} played through; {workers} workers", waiting - urgent));
         let feed = Feed::new(Vec::new());
         let (report, results) = mpsc::channel();
         let handles = start_workers(&self.paths, workers, &feed, report, &job)?;
         let mut taken = HashSet::new();
         let mut unread = 0;
         let mut spaced = 0;
-        let drained = (|| -> Result<()> {
+        // Whether to start again with other workers, once what they have is done.
+        let mut again = false;
+        let drained = (|| -> Result<bool> {
             loop {
                 self.drop_if_stopped(&mut conn, Some((&feed, &mut taken)))?;
-                if feed.len() < workers {
+                if feed.len() < workers && !again {
                     for queued in claim(&mut conn, workers - feed.len(), &taken)? {
-                        taken.insert(queued.track.id);
-                        feed.push(Work::of(queued.track, Reason::of(queued.priority)));
+                        let reason = Reason::of(queued.priority);
+                        match reason {
+                            Reason::Played if workers > 1 => again = true,
+                            Reason::Played if !taken.is_empty() => {}
+                            Reason::Played => {
+                                taken.insert(queued.track.id);
+                                feed.push(Work::of(queued.track, reason));
+                                continue;
+                            }
+                            _ if urgent == 0 => again = true,
+                            _ => {
+                                taken.insert(queued.track.id);
+                                feed.push(Work::of(queued.track, reason));
+                                continue;
+                            }
+                        }
+                        break;
                     }
                 }
                 if taken.is_empty() {
-                    return Ok(());
+                    return Ok(!again);
                 }
                 let (id, name, outcome) = match results.recv_timeout(Duration::from_secs(2)) {
                     Ok(result) => result,
@@ -679,8 +710,10 @@ impl MixService {
             self.spaced.fetch_add(spaced, Ordering::SeqCst);
             self.settled.notify_one();
         }
-        drained?;
-        self.finish_if_idle();
+        match drained? {
+            true => self.finish_if_idle(),
+            false => self.bell.ring(),
+        }
         Ok(())
     }
 
