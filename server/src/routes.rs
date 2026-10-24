@@ -96,6 +96,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mix/library", get(mix_library))
         .route("/api/mix/tracks", post(mix_tracks))
         .route("/api/mix/tracks/{id}", get(mix_track))
+        .route("/api/mix/tracks/{id}/analyse", post(mix_track_analyse))
+        .route("/api/mix/state/{id}", get(mix_state))
+        .route("/api/mix/briefs", post(mix_briefs))
+        .route("/api/mix/queue", get(mix_queue))
+        .route("/api/mix/liked", get(mix_liked))
+        .route("/api/mix/select", post(mix_select))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
         .route("/api/mix/find", get(mix_find))
@@ -984,6 +990,63 @@ async fn mix_track(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i6
     let mix = state.hub.mix().mix().await?;
     let track = mix.track(id).cloned().ok_or_else(|| Failure::not_found(format!("track {id} has no mix analysis")))?;
     Ok(Json(track))
+}
+
+/// Where a track stands for mixing, and what its analysis found once it has
+/// one: the app's, which has no use for the beats themselves.
+async fn mix_state(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_core::api::MixState> {
+    Ok(Json(state.hub.mix().state(id).await?))
+}
+
+#[derive(Deserialize)]
+struct SinceQuery {
+    /// Unix seconds; everything when absent.
+    #[serde(default)]
+    since: i64,
+}
+
+/// The family's liked tracks, and their liked albums' tracks, newest first:
+/// what stelly-mix opens on.
+async fn mix_liked(State(state): State<AppState>, _: PlayAuth, Query(query): Query<SinceQuery>) -> Reply<Vec<crate::mix::LikedTrack>> {
+    Ok(Json(state.hub.mix().liked(query.since).await?))
+}
+
+/// The mix queue, for the pipeline controls.
+async fn mix_queue(State(state): State<AppState>, _: PlayAuth) -> Reply<stelly_core::api::MixQueue> {
+    Ok(Json(state.hub.mix().queue().await?))
+}
+
+/// A selection to analyse for mixing, written as text, as the app's box and
+/// `server-analyse` take it, rather than as stelly-mix's type.
+async fn mix_select(
+    State(state): State<AppState>,
+    _: AdminAuth,
+    Json(body): Json<stelly_core::api::MixSelect>,
+) -> Reply<stelly_mix::api::JobStatus> {
+    let selection: stelly_mix::api::Selection = body.selection.trim().parse().map_err(Failure::unprocessable)?;
+    state.hub.mix().start(selection).map_err(|err| Failure::conflict(format!("{err:#}")))?;
+    Ok(Json(state.hub.mix().status()))
+}
+
+/// The tempo and key of each of a list of tracks that has them.
+async fn mix_briefs(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<stelly_core::api::TracksRequest>,
+) -> Reply<Vec<stelly_core::api::MixBrief>> {
+    Ok(Json(state.hub.mix().briefs(&body.ids).await?))
+}
+
+/// A track's mix analysis, made now if it has none: ahead of everything
+/// queued, and waited on. `play`, like reading: it is one track.
+async fn mix_track_analyse(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_mix::library::Track> {
+    use crate::mix::Asked;
+    match state.hub.mix().analyse_now(id).await? {
+        Asked::Analysed(track) => Ok(Json(track)),
+        Asked::Failed(why) => Err(Failure::unprocessable(why)),
+        Asked::Unknown => Err(Failure::not_found(format!("track {id} is not in the catalogue"))),
+        Asked::Waiting => Err(Failure::unavailable(format!("track {id} is still queued for its mix analysis"))),
+    }
 }
 
 #[derive(Deserialize)]

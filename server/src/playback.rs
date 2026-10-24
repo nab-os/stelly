@@ -8,7 +8,10 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use crate::listens::{unix_now, Listen, Moment, Tracker};
+use std::time::{Duration, Instant};
+use stelly_core::session::Op;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 use stelly_core::api::Device;
 use stelly_core::catalogue::RemoteTrack;
@@ -22,15 +25,23 @@ const GRACE: Duration = Duration::from_secs(10);
 /// Everyone's session, each made the first time its user asks for it. Held
 /// for as long as the server runs, which for a family is a handful.
 #[derive(Default)]
-pub struct Sessions(Mutex<HashMap<i64, Arc<Playback>>>);
+pub struct Sessions {
+    all: Mutex<HashMap<i64, Arc<Playback>>>,
+    /// Where the sessions send each listen as it ends; none, not kept.
+    listens: Option<UnboundedSender<Listen>>,
+}
 
 impl Sessions {
+    pub fn recording(listens: UnboundedSender<Listen>) -> Self {
+        Sessions { all: Mutex::default(), listens: Some(listens) }
+    }
+
     pub fn of(&self, user_id: i64) -> Arc<Playback> {
-        self.0
+        self.all
             .lock()
             .unwrap()
             .entry(user_id)
-            .or_insert_with(Playback::new)
+            .or_insert_with(|| Playback::listened(user_id, self.listens.clone()))
             .clone()
     }
 }
@@ -38,6 +49,8 @@ impl Sessions {
 pub struct Playback {
     inner: Mutex<Inner>,
     published: watch::Sender<Arc<Published>>,
+    user_id: i64,
+    listens: Option<UnboundedSender<Listen>>,
 }
 
 #[derive(Default)]
@@ -50,6 +63,7 @@ struct Inner {
     /// Counted rather than flagged: a device reconnecting opens its new
     /// stream before the old one is noticed closed.
     connected: HashMap<i64, (String, usize)>,
+    tracker: Tracker,
 }
 
 impl Inner {
@@ -146,12 +160,33 @@ impl Published {
 }
 
 impl Playback {
+    #[cfg(test)]
     pub fn new() -> Arc<Self> {
+        Self::listened(0, None)
+    }
+
+    fn listened(user_id: i64, listens: Option<UnboundedSender<Listen>>) -> Arc<Self> {
         let (published, _) = watch::channel(Arc::new(Published::new(Session::default(), Arc::default(), None)));
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
             published,
+            user_id,
+            listens,
         })
+    }
+
+    /// Apply `op`, telling the tracker what it did to the listen.
+    fn apply(&self, inner: &mut Inner, op: Op, queue_version: u64, from: i64) -> Result<(), Stale> {
+        let before = Moment::of(&inner.clocked);
+        let watched = self.listens.as_ref().map(|_| op.clone());
+        inner.clocked.apply(op, queue_version, from)?;
+        if let (Some(op), Some(listens)) = (watched, &self.listens) {
+            let after = Moment::of(&inner.clocked);
+            if let Some(listen) = inner.tracker.observe(self.user_id, &op, &before, &after, Instant::now(), unix_now()) {
+                let _ = listens.send(listen);
+            }
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Session {
@@ -174,9 +209,7 @@ impl Playback {
             }
         }
 
-        inner
-            .clocked
-            .apply(command.op, command.queue_version, device.id)?;
+        self.apply(&mut inner, command.op, command.queue_version, device.id)?;
         self.publish(&mut inner);
         Ok(())
     }
@@ -232,11 +265,7 @@ impl Playback {
             return;
         }
         let queue_version = inner.clocked.session.queue_version;
-        let released = inner.clocked.apply(
-            stelly_core::session::Op::Output { device_id: None },
-            queue_version,
-            device_id,
-        );
+        let released = self.apply(&mut inner, Op::Output { device_id: None }, queue_version, device_id);
         if released.is_ok() {
             self.publish(&mut inner);
         }
@@ -304,6 +333,24 @@ mod tests {
         let update = published.update(1, *sent, splices);
         *sent = Some(published.queue_version());
         serde_json::from_str(&update).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_session_tells_each_listen_as_it_ends() {
+        let (listens, mut heard) = tokio::sync::mpsc::unbounded_channel();
+        let sessions = Sessions::recording(listens);
+        let playback = sessions.of(1);
+        let (_receiver, _listening) = playback.connect(&device(1));
+        command(&playback, Op::Load { tracks: tracks(0..3), index: 0 });
+        command(&playback, Op::Play);
+        command(&playback, Op::Step { delta: 1 });
+        let listen = heard.try_recv().unwrap();
+        assert_eq!((listen.user_id, listen.track_id, listen.device_id), (1, 0, Some(1)));
+        assert_eq!(listen.ended, crate::listens::Ended::Skipped);
+        command(&playback, Op::Clear);
+        let listen = heard.try_recv().unwrap();
+        assert_eq!((listen.track_id, listen.ended), (1, crate::listens::Ended::Stopped));
+        assert!(heard.try_recv().is_err());
     }
 
     #[tokio::test]

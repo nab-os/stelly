@@ -29,6 +29,7 @@ mod db;
 mod hub;
 mod legacy;
 mod likes;
+mod listens;
 mod mix;
 mod pipeline;
 mod playback;
@@ -98,6 +99,13 @@ impl Failure {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    pub fn unprocessable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
             message: message.into(),
         }
     }
@@ -419,12 +427,14 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
         );
     }
 
+    let db_path = paths.db_path.clone();
     let hub = Arc::new(Hub::new(paths));
+    let (listens, heard) = tokio::sync::mpsc::unbounded_channel();
 
     let state = AppState {
         hub,
         auth: Arc::new(store),
-        playback: Arc::default(),
+        playback: Arc::new(playback::Sessions::recording(listens)),
     };
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -440,6 +450,13 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
 
         state.hub.load_text();
         state.hub.import_legacy();
+        listens::record(db_path, heard, state.hub.mix().clone());
+        // The mix queue: what likes, plays and selections put in it.
+        if let Err(err) = state.hub.mix().serve() {
+            eprintln!("the mix queue is not served: {err:#}");
+        }
+        state.hub.show_mix_finds();
+        state.hub.mix().queue_likes();
 
         if releases_every > 0 {
             let every = std::time::Duration::from_secs(releases_every * 60 * 60);
