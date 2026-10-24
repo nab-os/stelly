@@ -481,6 +481,14 @@ impl Provider {
         Ok(())
     }
 
+    /// Whether any provider has said what it is, waiting for the first
+    /// asking if none has yet: when none has, nothing can be fetched now,
+    /// which is not to say it cannot be later.
+    pub async fn answering_any(&self) -> bool {
+        let _ = self.ready().await;
+        self.sources.iter().any(|s| s.known().is_some())
+    }
+
     /// The providers that have said what they are, by name.
     fn answering(&self) -> Vec<(usize, String)> {
         let known = self.sources.iter().enumerate();

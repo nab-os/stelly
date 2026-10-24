@@ -121,6 +121,49 @@ CREATE TABLE IF NOT EXISTS mix_failures (
     failed_at  TEXT
 );
 
+-- Tracks waiting for their mix analysis, taken most urgent first, then in the
+-- order they came, which is the rowid: so `track_id` is not the primary key.
+-- See server/src/mix.rs.
+CREATE TABLE IF NOT EXISTS mix_queue (
+    track_id   INTEGER NOT NULL UNIQUE,
+    -- 0 asked for and waited on, 1 liked, 2 a selection, 3 played through.
+    priority   INTEGER NOT NULL,
+    reason     TEXT NOT NULL,
+    queued_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mix_queue_order ON mix_queue(priority);
+
+-- The likes whose tracks have been queued for their mix analysis, each once,
+-- whoever liked it.
+CREATE TABLE IF NOT EXISTS mix_liked (
+    -- 'track' | 'album' | 'artist', as in `likes`.
+    kind       TEXT NOT NULL,
+    ref_id     TEXT NOT NULL,
+    queued_at  TEXT NOT NULL,
+    PRIMARY KEY (kind, ref_id)
+);
+
+-- Every track played, one row each once it stopped being the one playing,
+-- kept raw for whatever is wanted of it later. See server/src/listens.rs.
+CREATE TABLE IF NOT EXISTS listens (
+    id                INTEGER PRIMARY KEY,
+    user_id           INTEGER NOT NULL,
+    -- The output it started on.
+    device_id         INTEGER,
+    track_id          INTEGER NOT NULL,
+    -- Unix seconds.
+    started_at        INTEGER NOT NULL,
+    -- What the position moved by while playing: a seek is not listening.
+    listened_seconds  REAL NOT NULL,
+    track_seconds     REAL,
+    -- 'finished' | 'skipped' | 'stopped'
+    ended             TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_listens_user ON listens(user_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_listens_track ON listens(track_id);
+
 -- Which providers' items each of Stelly's own ids stands for: one row per
 -- provider item, several for one recording found on several providers.
 -- See server/src/refs.rs.

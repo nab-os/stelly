@@ -8,7 +8,7 @@
 use super::crawler::Crawler;
 use super::{icons, pace, Me, Space};
 use dioxus::prelude::*;
-use crate::api::{Corpus, PipelineStatus, Progress, Scope, Stage};
+use crate::api::{Corpus, MixQueue, PipelineStatus, Progress, Scope, Stage};
 use crate::backend::backend;
 
 /// How many status polls pass between corpus recounts. Six SQL aggregates
@@ -422,6 +422,166 @@ pub fn PipelineControls() -> Element {
                 }
             }
         }
+    }
+}
+
+/// The mix queue: whole tracks analysed for mixing, what waits and why, and
+/// a box to queue a selection the way stelly-mix's `server-analyse` does.
+/// Asked for every couple of seconds while it is on screen and moving.
+#[component]
+pub fn MixQueuePanel() -> Element {
+    let me = use_context::<Me>().0;
+    let admin = me.read().as_ref().is_none_or(|device| device.scope == Scope::Admin);
+    let mut queue = use_signal(|| None::<Result<MixQueue, String>>);
+    let mut selection = use_signal(String::new);
+    let mut error = use_signal(|| None::<String>);
+    let mut asked = use_signal(|| 0u64);
+
+    use_future(move || async move {
+        loop {
+            let fetched = backend().mix_queue().await.map_err(|err| format!("{err:#}"));
+            let moving = matches!(&fetched, Ok(q) if q.selection_running || !q.analysing.is_empty());
+            if *queue.peek() != Some(fetched.clone()) {
+                queue.set(Some(fetched));
+            }
+            let wait = if moving || asked.peek().clone() > 0 { 2 } else { 10 };
+            asked.set(0);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        }
+    });
+
+    let mut submit = move || {
+        let text = selection.peek().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        error.set(None);
+        spawn(async move {
+            match backend().mix_select(&text).await {
+                Ok(()) => {
+                    selection.set(String::new());
+                    asked.set(1);
+                }
+                Err(err) => error.set(Some(format!("{err:#}"))),
+            }
+        });
+    };
+
+    let Some(Ok(q)) = queue.read().clone() else {
+        return rsx! {
+            section { class: "panel setting pipeline",
+                h2 { "Mix analysis" }
+                match queue.read().clone() {
+                    Some(Err(err)) => rsx! { p { class: "muted", "{err}" } },
+                    _ => rsx! { p { class: "muted", "…" } },
+                }
+            }
+        };
+    };
+    let waiting: usize = q.waiting.iter().map(|(_, n)| n).sum();
+    let (headline, headline_class) = match (q.analysing.len(), waiting) {
+        (0, 0) => ("Up to date".to_string(), "pipeline-state done"),
+        (0, n) => (format!("{n} queued"), "pipeline-state needed"),
+        (_, n) => (format!("analysing, {n} queued"), "pipeline-state running"),
+    };
+
+    rsx! {
+        section { class: "panel setting pipeline mix-queue",
+            h2 {
+                "Mix analysis"
+                span { class: "{headline_class}", "{headline}" }
+                span { class: "spacer" }
+                if admin && q.selection_running {
+                    button {
+                        class: "danger",
+                        title: "call the selection off; liked and played tracks stay queued",
+                        onclick: move |_| {
+                            spawn(async move {
+                                if let Err(err) = backend().mix_stop().await {
+                                    error.set(Some(format!("{err:#}")));
+                                }
+                                asked.set(1);
+                            });
+                        },
+                        {icons::stop()}
+                        "Stop selection"
+                    }
+                }
+            }
+            p { class: "muted",
+                "Whole tracks, for mixing: beats, key, phrases. What is liked or asked for goes first, then selections, then what was played through, one at a time. "
+                "{q.analysed} analysed"
+                if q.failed > 0 { ", {q.failed} could not be" }
+                "."
+            }
+            if let Some(message) = error.read().clone() {
+                p { class: "setup-error", "{message}" }
+            }
+            if !q.waiting.is_empty() {
+                div { class: "moods",
+                    for (reason, n) in q.waiting.iter() {
+                        span { key: "{reason}", class: "chip", "{n} {queued_label(reason)}" }
+                    }
+                }
+            }
+            if !q.analysing.is_empty() || !q.next.is_empty() {
+                ol { class: "list mix-next",
+                    for track in q.analysing.iter() {
+                        li { key: "now-{track.track_id}", class: "row playing",
+                            span { class: "title", "{track.title}" span { class: "muted", " · {track.artist}" } }
+                            span { class: "chip", "now" }
+                        }
+                    }
+                    for track in q.next.iter() {
+                        li { key: "next-{track.track_id}", class: "row",
+                            span { class: "title", "{track.title}" span { class: "muted", " · {track.artist}" } }
+                            span { class: "muted", "{queued_label(&track.reason)}" }
+                        }
+                    }
+                }
+            }
+            if let Some(selection) = q.selection.clone() {
+                p { class: "muted ellipsis",
+                    if q.selection_running { "{selection}: " } else { "Last selection, {selection}: " }
+                    {q.last.clone().unwrap_or_default()}
+                }
+            }
+            if admin {
+                div { class: "pair-actions mix-select",
+                    input {
+                        class: "search",
+                        placeholder: "album/<id>, artist-name/Lun?n=30, mood/dark rolling techno?n=200, favourites",
+                        value: "{selection}",
+                        oninput: move |event| {
+                            selection.set(event.value());
+                            error.set(None);
+                        },
+                        onkeydown: move |event: KeyboardEvent| {
+                            if event.key() == Key::Enter {
+                                submit();
+                            }
+                        },
+                    }
+                    button {
+                        class: "primary",
+                        disabled: q.selection_running,
+                        title: "analyse these whole tracks for mixing, behind what is liked",
+                        onclick: move |_| submit(),
+                        "Queue"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Why a track is in the mix queue, as a person would say it.
+pub(super) fn queued_label(reason: &str) -> &'static str {
+    match reason {
+        "asked" => "asked for",
+        "liked" => "liked",
+        "selection" => "in a selection",
+        _ => "played through",
     }
 }
 
