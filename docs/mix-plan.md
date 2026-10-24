@@ -47,7 +47,7 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
 
 | # | Step | Where | Cost | Status |
 |---|---|---|---|---|
-| 1.1 | A whole-track analysis writes `features` too, when it is missing or outdated, from the excerpt cut out of the samples it already has | `server/src/mix.rs`, `pipeline/analyse.rs`, `pipeline/audio.rs` | S | |
+| 1.1 | A whole-track analysis writes `features` too, when it is missing or outdated, from the excerpt cut out of the samples it already has | `server/src/mix.rs`, `pipeline/analyse.rs`, `pipeline/audio.rs` | S | #172 |
 | 1.2 | `mix_queue` and the worker that drains it, replacing `MixService`'s one-off job; `server-analyse` and its selections queue at `selection`; stop drops the queued selection | `schema.sql`, `server/src/mix.rs`, `hub.rs`, `routes.rs` | M | |
 | 1.3 | Tracks analysed this way join the space: the rebuild `analyse` triggers, triggered here too | `server/src/hub.rs` | S | |
 
