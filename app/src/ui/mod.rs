@@ -309,9 +309,35 @@ pub(crate) fn album_of(track: &RemoteTrack) -> Option<RemoteAlbum> {
 
 /// The dimension weight sliders' values, keyed by block name. A context
 /// rather than a prop: the shell owns the signal and resets it when the
-/// space's blocks change, but the sliders themselves live in the panel.
+/// space's blocks change, but the sliders themselves live in settings.
 #[derive(Clone, Copy)]
 pub struct Weights(pub Signal<std::collections::HashMap<String, f32>>);
+
+/// The weights to use: the space's defaults, with the account's own tuning
+/// over them. A tuned block the space no longer has is left out.
+pub(crate) fn tuned(
+    defaults: &HashMap<String, f32>,
+    saved: Option<&HashMap<String, f32>>,
+) -> HashMap<String, f32> {
+    let mut weights = defaults.clone();
+    for (name, weight) in saved.into_iter().flatten() {
+        if let Some(slot) = weights.get_mut(name) {
+            *slot = *weight;
+        }
+    }
+    weights
+}
+
+/// What of `weights` is worth keeping for the account: only what was moved
+/// off the defaults, so a block nobody touched follows the space's default
+/// if a rebuild changes it.
+pub(crate) fn tuning_of(weights: &HashMap<String, f32>, defaults: &HashMap<String, f32>) -> HashMap<String, f32> {
+    weights
+        .iter()
+        .filter(|(name, weight)| defaults.get(*name).is_none_or(|default| (*weight - default).abs() > 1e-6))
+        .map(|(name, weight)| (name.clone(), *weight))
+        .collect()
+}
 
 /// The one search box. There used to be two, one filtering the analysed
 /// space as you typed, one asking Qobuz on Enter, which made "where do I
@@ -615,6 +641,26 @@ fn larger(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn weights(pairs: &[(&str, f32)]) -> HashMap<String, f32> {
+        pairs.iter().map(|(name, weight)| (name.to_string(), *weight)).collect()
+    }
+
+    #[test]
+    fn the_accounts_tuning_goes_over_the_defaults() {
+        let defaults = weights(&[("timbre", 1.0), ("mood", 1.0)]);
+        let saved = weights(&[("mood", 2.5), ("gone", 3.0)]);
+        assert_eq!(tuned(&defaults, Some(&saved)), weights(&[("timbre", 1.0), ("mood", 2.5)]));
+        assert_eq!(tuned(&defaults, None), defaults);
+    }
+
+    #[test]
+    fn only_what_was_moved_is_kept() {
+        let defaults = weights(&[("timbre", 1.0), ("mood", 1.0)]);
+        let current = weights(&[("timbre", 1.0), ("mood", 0.4)]);
+        assert_eq!(tuning_of(&current, &defaults), weights(&[("mood", 0.4)]));
+        assert!(tuning_of(&defaults, &defaults).is_empty());
+    }
 
     #[test]
     fn larger_covers_only_for_qobuz_albums() {

@@ -525,6 +525,15 @@ impl Hub {
         self.db.write(move |conn| likes::forget(conn, user_id, &kind, &id)).await
     }
 
+    /// A person's "tune the space" weights, see `tuning`.
+    pub async fn tuning(&self, user_id: i64) -> Result<std::collections::HashMap<String, f32>> {
+        self.db.read(move |conn| crate::tuning::load(conn, user_id)).await
+    }
+
+    pub async fn set_tuning(&self, user_id: i64, weights: std::collections::HashMap<String, f32>) -> Result<()> {
+        self.db.write(move |conn| crate::tuning::save(conn, user_id, &weights)).await
+    }
+
     // --------------------------------------------------------- text steering
 
     /// Load the tower in the background, so the first request that steers

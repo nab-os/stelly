@@ -171,7 +171,7 @@ impl AuthStore {
         verified.generation += 1;
     }
 
-    /// Users, devices and likes live in the catalogue database, so one file is still
+    /// Users, devices, likes and tunings live in the catalogue database, so one file is still
     /// the whole backup. Created here rather than in the shared `schema.sql`
     /// because the pipeline has no business knowing which phones are paired.
     fn ensure_schema(&self) -> Result<()> {
@@ -196,6 +196,7 @@ impl AuthStore {
              CREATE INDEX IF NOT EXISTS devices_token ON devices(token_hash);",
         )?;
         crate::likes::ensure_schema(conn)?;
+        crate::tuning::ensure_schema(conn)?;
 
         let has_owner = diesel::sql_query(
             "SELECT COUNT(*) AS n FROM pragma_table_info('devices') WHERE name = 'user_id'",
@@ -328,6 +329,7 @@ impl AuthStore {
             if paired > 0 {
                 bail!("“{name}” still has {paired} paired device(s); revoke them first");
             }
+            crate::tuning::forget(conn, user.id)?;
             diesel::delete(users::table.find(user.id)).execute(conn)?;
             Ok(())
         })?;

@@ -374,16 +374,38 @@ fn Shell() -> Element {
         seen: Signal::new(0),
     });
 
+    // This account's "tune the space", as kept on the server: asked once, and
+    // again until it answers. A server from before tunings refuses the route,
+    // and the weights are then this device's for the session, as they were.
+    let mut saved_tuning = use_signal(|| None::<std::collections::HashMap<String, f32>>);
+    let mut tuning_applied = use_signal(|| false);
+    use_future(move || async move {
+        loop {
+            match backend().tuning().await {
+                Ok(saved) => {
+                    saved_tuning.set(Some(saved));
+                    return;
+                }
+                Err(err) if backend::is_unreachable(&err) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
     // The blocks decide the sliders, and the server whether steering is on.
     use_effect(move || {
         let info = space.info.read();
+        let saved = saved_tuning.read();
         let mut generator = generator;
         let mut pipeline = pipeline;
         generator.tower.set(info.can_steer);
         pipeline.space_counts.set((info.in_space, info.on_map));
 
         // Kept across a rebuild with the same blocks, so a tuned space stays
-        // tuned; reset when the blocks themselves changed.
+        // tuned; set again from the defaults and the account's own tuning
+        // when the blocks themselves changed, or that tuning first arrives.
         let defaults: std::collections::HashMap<String, f32> = info
             .blocks
             .iter()
@@ -393,8 +415,12 @@ fn Shell() -> Element {
             let current = generator.weights.peek();
             current.len() == defaults.len() && current.keys().all(|name| defaults.contains_key(name))
         };
-        if !same_blocks {
-            generator.weights.set(defaults);
+        let arrived = saved.is_some() && !*tuning_applied.peek();
+        if !same_blocks || arrived {
+            generator.weights.set(crate::ui::tuned(&defaults, saved.as_ref()));
+        }
+        if arrived {
+            tuning_applied.set(true);
         }
     });
 
