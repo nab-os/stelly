@@ -399,6 +399,60 @@ pub struct OrderRequest {
     pub weights: HashMap<String, f32>,
 }
 
+// ------------------------------------------------------------------ the mix
+
+/// What a track's whole-length analysis for mixing found, as the app shows
+/// it: its tempo, key and shape, without the beats and phrases themselves.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixSummary {
+    pub bpm: Option<f64>,
+    /// Made on a grid: its beats sit on one from start to end.
+    pub steady: bool,
+    /// Share of its tracked beats on the grid, 0..1.
+    pub on_grid: Option<f64>,
+    /// "C minor".
+    pub key: Option<String>,
+    /// "5A".
+    pub camelot: Option<String>,
+    /// How clearly it is in that key, 0..1.
+    pub key_strength: Option<f64>,
+    /// Integrated, LUFS.
+    pub loudness: Option<f64>,
+    /// Seconds.
+    pub first_downbeat: Option<f64>,
+    /// How sure the first downbeat is, 0..1: low for a track that never
+    /// changes enough to tell.
+    pub downbeat_confidence: f64,
+    pub bars: usize,
+    /// Eight bars each.
+    pub phrases: usize,
+    /// Where each section starts, seconds.
+    pub sections: Vec<f64>,
+    pub seconds: f64,
+}
+
+/// Where a track stands for mixing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum MixState {
+    Analysed { summary: MixSummary },
+    /// Waiting its turn: why it was queued, "asked", "liked", "selection" or
+    /// "played", and how many go before it.
+    Queued { reason: String, ahead: usize },
+    Analysing,
+    Failed { reason: String },
+    /// Nothing has asked for it.
+    Unasked,
+}
+
+/// A track's tempo and key, for a list of tracks.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MixBrief {
+    pub track_id: i64,
+    pub bpm: Option<f64>,
+    pub camelot: Option<String>,
+}
+
 // ----------------------------------------------------------------- the auth
 
 /// What a device is allowed to do. `Play` is every device; `Admin` is the

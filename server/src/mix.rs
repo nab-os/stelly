@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use stelly_core::logbuffer::LogBuffer;
-use stelly_core::api::{GenerateRequest, Recipe, Target};
+use stelly_core::api::{GenerateRequest, MixBrief, MixState, MixSummary, Recipe, Target};
 use stelly_mix::api::{JobStatus, Selection, Stats};
 use stelly_mix::library::Track;
 use stelly_mix::mix::Mix;
@@ -244,6 +244,68 @@ fn pending_columns() -> String {
                      AND f.extractor_version = '{}') AS needs_features",
         analyse::VERSION
     )
+}
+
+/// What the app shows of a track's mix analysis.
+pub fn summary(track: &Track) -> MixSummary {
+    let analysis = &track.analysis;
+    let grid = analysis.grid.as_ref();
+    let key = analysis.key.as_ref();
+    MixSummary {
+        bpm: grid.map(|g| g.bpm),
+        steady: grid.is_some_and(|g| g.steady),
+        on_grid: grid.map(|g| g.on_grid),
+        key: key.map(|k| format!("{} {}", k.tonic, k.scale)),
+        camelot: key.map(|k| k.camelot.clone()),
+        key_strength: key.map(|k| k.strength),
+        loudness: analysis.loudness,
+        first_downbeat: analysis.downbeats.first().copied(),
+        downbeat_confidence: analysis.downbeat_confidence,
+        bars: analysis.downbeats.len(),
+        phrases: analysis.phrases.len(),
+        sections: analysis.sections.clone(),
+        seconds: analysis.seconds,
+    }
+}
+
+/// Where `id` stands for mixing, but for its being analysed right now,
+/// which only the worker knows.
+fn state_of(conn: &mut SqliteConnection, id: i64) -> Result<MixState> {
+    if let Some(track) = stored(conn, id)? {
+        return Ok(MixState::Analysed { summary: summary(&track) });
+    }
+    #[derive(QueryableByName)]
+    struct Place {
+        #[diesel(sql_type = Text)]
+        reason: String,
+        #[diesel(sql_type = BigInt)]
+        ahead: i64,
+    }
+    let place = diesel::sql_query(
+        "SELECT q.reason AS reason,
+           (SELECT COUNT(*) FROM mix_queue o
+            WHERE o.priority < q.priority OR (o.priority = q.priority AND o.rowid < q.rowid)) AS ahead
+         FROM mix_queue q WHERE q.track_id = ?",
+    )
+    .bind::<BigInt, _>(id)
+    .get_result::<Place>(conn)
+    .optional()?;
+    if let Some(place) = place {
+        return Ok(MixState::Queued { reason: place.reason, ahead: place.ahead as usize });
+    }
+    #[derive(QueryableByName)]
+    struct Failed {
+        #[diesel(sql_type = Nullable<Text>)]
+        reason: Option<String>,
+    }
+    let failed = diesel::sql_query("SELECT reason FROM mix_failures WHERE track_id = ?")
+        .bind::<BigInt, _>(id)
+        .get_result::<Failed>(conn)
+        .optional()?;
+    Ok(match failed {
+        Some(failed) => MixState::Failed { reason: failed.reason.unwrap_or_default() },
+        None => MixState::Unasked,
+    })
 }
 
 /// `id`'s current mix analysis, if it has one.
@@ -479,6 +541,8 @@ pub struct MixService {
     /// hub last rebuilt it for them, and the signal that a burst added some.
     spaced: AtomicUsize,
     settled: tokio::sync::Notify,
+    /// What the workers have now, or are about to.
+    analysing: Mutex<HashSet<i64>>,
     /// Each track as it is recorded, and why not when it failed, for whoever
     /// is waiting on one.
     finished: tokio::sync::broadcast::Sender<(i64, std::result::Result<(), String>)>,
@@ -510,6 +574,7 @@ impl MixService {
             liked_since: Default::default(),
             spaced: AtomicUsize::new(0),
             settled: tokio::sync::Notify::new(),
+            analysing: Default::default(),
             finished: tokio::sync::broadcast::channel(256).0,
             log,
         }
@@ -624,6 +689,28 @@ impl MixService {
             self.bell.ring();
         }
         Ok(queued)
+    }
+
+    /// Where `id` stands for mixing.
+    pub async fn state(&self, id: i64) -> Result<MixState> {
+        if self.analysing.lock().unwrap_or_else(|e| e.into_inner()).contains(&id) {
+            return Ok(MixState::Analysing);
+        }
+        let db_path = self.paths.db_path.clone();
+        tokio::task::spawn_blocking(move || state_of(&mut crate::db::open_for_write(&db_path)?, id)).await?
+    }
+
+    /// The tempo and key of those of `ids` that have them.
+    pub async fn briefs(&self, ids: &[i64]) -> Result<Vec<MixBrief>> {
+        let mix = self.mix().await?;
+        Ok(ids
+            .iter()
+            .filter_map(|&id| {
+                let track = mix.track(id)?;
+                let camelot = track.analysis.key.as_ref().map(|k| k.camelot.clone());
+                Some(MixBrief { track_id: id, bpm: track.bpm(), camelot })
+            })
+            .collect())
     }
 
     /// Analyse `id` ahead of everything and wait for it: what stelly-mix
@@ -850,6 +937,7 @@ impl MixService {
                         break;
                     }
                 }
+                *self.analysing.lock().unwrap_or_else(|e| e.into_inner()) = taken.clone();
                 if taken.is_empty() {
                     if let Some(why) = stalled.take() {
                         bail!("waiting for the music providers, {}s: {why}", RETRY_AFTER.as_secs());
@@ -885,6 +973,7 @@ impl MixService {
         for handle in handles {
             let _ = handle.join();
         }
+        self.analysing.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.forget_loaded();
         if spaced > 0 {
             self.spaced.fetch_add(spaced, Ordering::SeqCst);

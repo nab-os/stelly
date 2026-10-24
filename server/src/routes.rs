@@ -95,6 +95,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mix/tracks", post(mix_tracks))
         .route("/api/mix/tracks/{id}", get(mix_track))
         .route("/api/mix/tracks/{id}/analyse", post(mix_track_analyse))
+        .route("/api/mix/state/{id}", get(mix_state))
+        .route("/api/mix/briefs", post(mix_briefs))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
         .route("/api/mix/find", get(mix_find))
@@ -968,6 +970,21 @@ async fn mix_track(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i6
     let mix = state.hub.mix().mix().await?;
     let track = mix.track(id).cloned().ok_or_else(|| Failure::not_found(format!("track {id} has no mix analysis")))?;
     Ok(Json(track))
+}
+
+/// Where a track stands for mixing, and what its analysis found once it has
+/// one: the app's, which has no use for the beats themselves.
+async fn mix_state(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_core::api::MixState> {
+    Ok(Json(state.hub.mix().state(id).await?))
+}
+
+/// The tempo and key of each of a list of tracks that has them.
+async fn mix_briefs(
+    State(state): State<AppState>,
+    _: PlayAuth,
+    Json(body): Json<stelly_core::api::TracksRequest>,
+) -> Reply<Vec<stelly_core::api::MixBrief>> {
+    Ok(Json(state.hub.mix().briefs(&body.ids).await?))
 }
 
 /// A track's mix analysis, made now if it has none: ahead of everything
