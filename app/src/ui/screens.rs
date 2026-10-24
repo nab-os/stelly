@@ -7,6 +7,7 @@
 //! that path, or any other walk, then shows up.
 
 use super::generate::{Generator, PathEnd};
+use super::pipeline::queued_label;
 use super::icons;
 use super::library::{ArtistRows, Library, TracksView, View, ViewToggle};
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
@@ -447,7 +448,7 @@ fn ForMixing(track_id: i64, mix: Signal<Option<Result<MixState, String>>>) -> El
             Some(Ok(MixState::Queued { reason, ahead })) => rsx! {
                 div { class: "mix-wait",
                     p { class: "muted",
-                        "queued, {queued_because(reason)}"
+                        "queued, {queued_label(reason)}"
                         if *ahead > 0 { ", {ahead} before it" }
                     }
                     button { onclick: analyse_now, "Analyse now" }
@@ -473,15 +474,6 @@ fn ForMixing(track_id: i64, mix: Signal<Option<Result<MixState, String>>>) -> El
 fn brief_label(brief: &MixBrief) -> String {
     let bpm = brief.bpm.map(|bpm| format!("{bpm:.0}"));
     [bpm, brief.camelot.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ")
-}
-
-fn queued_because(reason: &str) -> &'static str {
-    match reason {
-        "asked" => "asked for",
-        "liked" => "liked",
-        "selection" => "in a selection",
-        _ => "played through",
-    }
 }
 
 fn mix_facts(summary: &MixSummary) -> Element {

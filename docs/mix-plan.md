@@ -67,7 +67,7 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
 | 3.1 | Mix types of its own in `stelly-core`, so the app never links stelly-mix, and a track's mix summary from the server | `core/src/api.rs`, `server/src/routes.rs` | S | #179 |
 | 3.2 | Track details: BPM and whether it sits on a grid, Camelot key and strength, first downbeat, bars, phrases, sections, over the excerpt's tempo and key; queued or analysing while it is not there yet | `app/` | M | #180 |
 | 3.3 | BPM and key in album track lists | `app/` | S | #181 |
-| 3.4 | Pipeline controls: the queue, what it is on and why each track is in it, the selection box, stop | `app/`, `server/src/routes.rs` | M | |
+| 3.4 | Pipeline controls: the queue, what it is on and why each track is in it, the selection box, stop | `app/`, `server/src/routes.rs` | M | #182 |
 
 ## Phase 4: stelly-mix opens on what was found
 

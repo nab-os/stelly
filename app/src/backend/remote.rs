@@ -5,7 +5,7 @@
 //! to download before it can generate. Audio does not proxy.
 
 use crate::api::{
-    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, MixBrief, MixState,
+    ApiError, BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, MixBrief, MixQueue, MixSelect, MixState,
     OrderRequest, PairingGrant, PipelineStatus, Scope, SpaceIndex, SpaceInfo, SpaceSearch,
     SpaceSort, Stage, Step, Target, TrackMeta, TracksRequest, User, Word,
 };
@@ -651,6 +651,25 @@ impl Remote {
     /// Where a track stands for mixing, and what its analysis found.
     pub async fn mix_state(&self, track_id: i64) -> Result<MixState> {
         self.get(&format!("/api/mix/state/{track_id}")).await
+    }
+
+    /// The mix queue: what waits and why, and the selection last asked for.
+    pub async fn mix_queue(&self) -> Result<MixQueue> {
+        self.get("/api/mix/queue").await
+    }
+
+    /// Queue a selection for its mix analysis, written as `server-analyse`
+    /// takes it. Wants `admin`.
+    pub async fn mix_select(&self, selection: &str) -> Result<()> {
+        let _: serde_json::Value = self.post("/api/mix/select", &MixSelect { selection: selection.to_string() }).await?;
+        Ok(())
+    }
+
+    /// Call the running selection off; what was queued for another reason
+    /// stays. Wants `admin`.
+    pub async fn mix_stop(&self) -> Result<()> {
+        let _: serde_json::Value = self.post("/api/mix/analyse/stop", &()).await?;
+        Ok(())
     }
 
     /// The tempo and key of each of `ids` that has been analysed for mixing.

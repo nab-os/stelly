@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use stelly_core::logbuffer::LogBuffer;
-use stelly_core::api::{GenerateRequest, MixBrief, MixState, MixSummary, Recipe, Target};
+use stelly_core::api::{GenerateRequest, MixBrief, MixQueue, MixQueued, MixState, MixSummary, Recipe, Target};
 use stelly_mix::api::{JobStatus, Selection, Stats};
 use stelly_mix::library::Track;
 use stelly_mix::mix::Mix;
@@ -305,6 +305,75 @@ fn state_of(conn: &mut SqliteConnection, id: i64) -> Result<MixState> {
     Ok(match failed {
         Some(failed) => MixState::Failed { reason: failed.reason.unwrap_or_default() },
         None => MixState::Unasked,
+    })
+}
+
+/// How many to list after those being analysed.
+const NEXT_SHOWN: usize = 8;
+
+/// The queue's counts and first tracks, those in `analysing` apart.
+fn queue_of(conn: &mut SqliteConnection, analysing: &[i64]) -> Result<MixQueue> {
+    #[derive(QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type = Integer)]
+        priority: i32,
+        #[diesel(sql_type = BigInt)]
+        n: i64,
+    }
+    #[derive(QueryableByName)]
+    struct Named {
+        #[diesel(sql_type = BigInt)]
+        id: i64,
+        #[diesel(sql_type = Text)]
+        title: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        artist: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        reason: Option<String>,
+    }
+    let list = analysing.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    // Those being analysed are still queued until done, and listed apart.
+    let waiting: Vec<Waiting> = diesel::sql_query(format!(
+        "SELECT priority, COUNT(*) AS n FROM mix_queue WHERE track_id NOT IN ({list}) GROUP BY priority ORDER BY priority"
+    ))
+    .load(conn)?;
+    let named = |rows: Vec<Named>| -> Vec<MixQueued> {
+        rows.into_iter()
+            .map(|row| MixQueued {
+                track_id: row.id,
+                title: row.title,
+                artist: row.artist.unwrap_or_default(),
+                reason: row.reason.unwrap_or_default(),
+            })
+            .collect()
+    };
+    let columns = "t.id AS id, t.title AS title, a.name AS artist, q.reason AS reason";
+    let from = "FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id";
+    let now: Vec<Named> =
+        diesel::sql_query(format!("SELECT {columns} {from} LEFT JOIN mix_queue q ON q.track_id = t.id WHERE t.id IN ({list})")).load(conn)?;
+    let next: Vec<Named> = diesel::sql_query(format!(
+        "SELECT {columns} {from} JOIN mix_queue q ON q.track_id = t.id
+         WHERE t.id NOT IN ({list}) ORDER BY q.priority, q.rowid LIMIT {NEXT_SHOWN}"
+    ))
+    .load(conn)?;
+    #[derive(QueryableByName)]
+    struct Totals {
+        #[diesel(sql_type = BigInt)]
+        analysed: i64,
+        #[diesel(sql_type = BigInt)]
+        failed: i64,
+    }
+    let totals: Totals = diesel::sql_query(format!(
+        "SELECT (SELECT COUNT(*) FROM mix WHERE version = {VERSION}) AS analysed, (SELECT COUNT(*) FROM mix_failures) AS failed"
+    ))
+    .get_result(conn)?;
+    Ok(MixQueue {
+        waiting: waiting.into_iter().map(|w| (Reason::of(w.priority).as_str().to_string(), w.n as usize)).collect(),
+        analysing: named(now),
+        next: named(next),
+        analysed: totals.analysed as usize,
+        failed: totals.failed as usize,
+        ..Default::default()
     })
 }
 
@@ -698,6 +767,18 @@ impl MixService {
         }
         let db_path = self.paths.db_path.clone();
         tokio::task::spawn_blocking(move || state_of(&mut crate::db::open_for_write(&db_path)?, id)).await?
+    }
+
+    /// The queue as the pipeline controls show it.
+    pub async fn queue(&self) -> Result<MixQueue> {
+        let analysing: Vec<i64> = self.analysing.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
+        let status = self.status();
+        let db_path = self.paths.db_path.clone();
+        let mut queue = tokio::task::spawn_blocking(move || queue_of(&mut crate::db::open_for_write(&db_path)?, &analysing)).await??;
+        queue.selection = status.selection;
+        queue.selection_running = status.running;
+        queue.last = status.last;
+        Ok(queue)
     }
 
     /// The tempo and key of those of `ids` that have them.

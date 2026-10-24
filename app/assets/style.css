@@ -1403,6 +1403,13 @@ span.path-end {
 }
 .server-form .pair-actions, .server-confirm .pair-actions { align-items: center; }
 .server-form .pair-hint { flex: 1; }
+
+/* Its full height, whatever the log below takes: a panel may shrink. */
+.mix-queue { flex: none; }
+/* The mix queue's selection box, as wide as the panel lets it. */
+.mix-select { display: flex; gap: 8px; align-items: center; }
+.mix-select input { flex: 1; }
+.mix-next .row .title { flex: 1; }
 .server-confirm { border-left: 3px solid var(--danger); }
 
 /* The pipeline as steps down a line, each with its own count and state. */

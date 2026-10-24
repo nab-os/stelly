@@ -445,6 +445,43 @@ pub enum MixState {
     Unasked,
 }
 
+/// One track in the mix queue, as the pipeline controls list it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixQueued {
+    pub track_id: i64,
+    pub title: String,
+    pub artist: String,
+    /// "asked", "liked", "selection" or "played".
+    pub reason: String,
+}
+
+/// The mix queue, for the pipeline controls.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MixQueue {
+    /// Tracks waiting, per reason, most urgent first.
+    pub waiting: Vec<(String, usize)>,
+    /// What the workers have now, or are about to.
+    pub analysing: Vec<MixQueued>,
+    /// The next few after them.
+    pub next: Vec<MixQueued>,
+    /// Tracks with a current mix analysis.
+    pub analysed: usize,
+    pub failed: usize,
+    /// The selection last asked for, while it runs and after.
+    pub selection: Option<String>,
+    pub selection_running: bool,
+    /// Its last line: a track done, or how it ended.
+    pub last: Option<String>,
+}
+
+/// A selection of tracks to analyse for mixing, written as stelly-mix's
+/// `server-analyse` takes it: `album/<id>`, `artist-name/Lun?n=30`,
+/// `mood/dark rolling techno?n=200`…
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MixSelect {
+    pub selection: String,
+}
+
 /// A track's tempo and key, for a list of tracks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MixBrief {

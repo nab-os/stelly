@@ -97,6 +97,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mix/tracks/{id}/analyse", post(mix_track_analyse))
         .route("/api/mix/state/{id}", get(mix_state))
         .route("/api/mix/briefs", post(mix_briefs))
+        .route("/api/mix/queue", get(mix_queue))
+        .route("/api/mix/select", post(mix_select))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
         .route("/api/mix/find", get(mix_find))
@@ -976,6 +978,23 @@ async fn mix_track(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i6
 /// one: the app's, which has no use for the beats themselves.
 async fn mix_state(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_core::api::MixState> {
     Ok(Json(state.hub.mix().state(id).await?))
+}
+
+/// The mix queue, for the pipeline controls.
+async fn mix_queue(State(state): State<AppState>, _: PlayAuth) -> Reply<stelly_core::api::MixQueue> {
+    Ok(Json(state.hub.mix().queue().await?))
+}
+
+/// A selection to analyse for mixing, written as text, as the app's box and
+/// `server-analyse` take it, rather than as stelly-mix's type.
+async fn mix_select(
+    State(state): State<AppState>,
+    _: AdminAuth,
+    Json(body): Json<stelly_core::api::MixSelect>,
+) -> Reply<stelly_mix::api::JobStatus> {
+    let selection: stelly_mix::api::Selection = body.selection.trim().parse().map_err(Failure::unprocessable)?;
+    state.hub.mix().start(selection).map_err(|err| Failure::conflict(format!("{err:#}")))?;
+    Ok(Json(state.hub.mix().status()))
 }
 
 /// The tempo and key of each of a list of tracks that has them.
