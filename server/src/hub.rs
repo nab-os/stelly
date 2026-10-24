@@ -91,6 +91,11 @@ pub struct Hub {
     space: Arc<SpaceService>,
 }
 
+/// The space rebuilt for the mix queue's tracks at most this often. A
+/// rebuild of 160,000 tracks is about 75s on 32 cores, then every client
+/// fetches the space again.
+const MIX_REBUILD_EVERY: Duration = Duration::from_secs(30 * 60);
+
 // ------------------------------------------------------------------- jobs
 
 #[derive(Default)]
@@ -777,6 +782,36 @@ impl Hub {
         self.drain().await
     }
 
+    /// Dedupe, build-space and layout next, unless a build-space is
+    /// already to come: what was analysed since reaches the map.
+    pub async fn pipeline_rebuild(&self) -> Result<()> {
+        {
+            let mut queue = self.pipeline.queue.lock().unwrap();
+            if !queue.stages.contains(&Stage::BuildSpace) {
+                queue.rebuild_next();
+            }
+        }
+        self.corpus.clear();
+        self.drain().await
+    }
+
+    /// Rebuild the space for what the mix queue analysed, after each burst
+    /// that gave it tracks, but no more often than `MIX_REBUILD_EVERY`: a
+    /// rebuild has every client fetch the space again.
+    pub fn show_mix_finds(self: &Arc<Self>) {
+        let hub = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let spaced = hub.mix.spaced().await;
+                hub.log.push(format!("mix: {spaced} tracks new to the space, rebuilding it"));
+                if let Err(err) = hub.pipeline_rebuild().await {
+                    hub.log.push(format!("mix: rebuilding the space failed: {err:#}"));
+                }
+                tokio::time::sleep(MIX_REBUILD_EVERY).await;
+            }
+        });
+    }
+
     /// Run the queue until it empties, unless it already is being run.
     async fn drain(&self) -> Result<()> {
         let first = {
@@ -797,6 +832,7 @@ impl Hub {
         let paths = self.paths.clone();
         let space = self.space.clone();
         let corpus = self.corpus.clone();
+        let mix = self.mix.clone();
 
         job.cancel.store(false, Ordering::SeqCst);
 
@@ -821,6 +857,9 @@ impl Hub {
                 })
                 .await;
                 corpus.clear();
+                if stage == Stage::Dedupe {
+                    mix.reread().await;
+                }
 
                 // Build-space is nearly always followed by layout, and telling
                 // clients after both would have them fetch the space twice for

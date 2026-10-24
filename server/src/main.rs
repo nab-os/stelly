@@ -443,6 +443,7 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
         if let Err(err) = state.hub.mix().serve() {
             eprintln!("the mix queue is not served: {err:#}");
         }
+        state.hub.show_mix_finds();
 
         if releases_every > 0 {
             let every = std::time::Duration::from_secs(releases_every * 60 * 60);

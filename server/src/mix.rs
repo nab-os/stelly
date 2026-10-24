@@ -21,7 +21,7 @@ use anyhow::{bail, Context, Result};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Integer, Nullable, Text};
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 use stelly_core::logbuffer::LogBuffer;
@@ -455,6 +455,10 @@ pub struct MixService {
     bell: Arc<Bell>,
     /// Set by `stop`: the worker drops what selections queued.
     drop_selections: AtomicBool,
+    /// Tracks the queue gave the space their excerpt's analysis since the
+    /// hub last rebuilt it for them, and the signal that a burst added some.
+    spaced: AtomicUsize,
+    settled: tokio::sync::Notify,
     log: Arc<LogBuffer>,
 }
 
@@ -468,6 +472,8 @@ impl MixService {
             cancel: Default::default(),
             bell: Default::default(),
             drop_selections: AtomicBool::new(false),
+            spaced: AtomicUsize::new(0),
+            settled: tokio::sync::Notify::new(),
             log,
         }
     }
@@ -490,6 +496,12 @@ impl MixService {
     /// What was added is read in on the next ask.
     fn forget_loaded(&self) {
         *self.loaded.blocking_write() = None;
+    }
+
+    /// The same, from async code: after a dedupe, which moves analyses
+    /// from the tracks it merges to the ones it keeps.
+    pub async fn reread(&self) {
+        *self.loaded.write().await = None;
     }
 
     pub fn status(&self) -> JobStatus {
@@ -577,6 +589,18 @@ impl MixService {
         Ok(queued)
     }
 
+    /// Until a burst has given the space tracks it does not show yet;
+    /// answers how many, since the last time this answered.
+    pub async fn spaced(&self) -> usize {
+        loop {
+            let spaced = self.spaced.swap(0, Ordering::SeqCst);
+            if spaced > 0 {
+                return spaced;
+            }
+            self.settled.notified().await;
+        }
+    }
+
     /// Start the worker that drains the queue, for as long as the server
     /// runs: it looks when something is queued, and now and then anyway.
     pub fn serve(self: &Arc<Self>) -> Result<()> {
@@ -616,6 +640,7 @@ impl MixService {
         let handles = start_workers(&self.paths, workers, &feed, report, &job)?;
         let mut taken = HashSet::new();
         let mut unread = 0;
+        let mut spaced = 0;
         let drained = (|| -> Result<()> {
             loop {
                 self.drop_if_stopped(&mut conn, Some((&feed, &mut taken)))?;
@@ -635,6 +660,7 @@ impl MixService {
                 };
                 taken.remove(&id);
                 let recorded = record(&mut conn, id, &name, outcome, &job)?;
+                spaced += recorded.spaced as usize;
                 dequeue(&mut conn, id)?;
                 self.tell(id, &recorded);
                 unread += 1;
@@ -649,6 +675,10 @@ impl MixService {
             let _ = handle.join();
         }
         self.forget_loaded();
+        if spaced > 0 {
+            self.spaced.fetch_add(spaced, Ordering::SeqCst);
+            self.settled.notify_one();
+        }
         drained?;
         self.finish_if_idle();
         Ok(())
