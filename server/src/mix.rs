@@ -342,12 +342,15 @@ pub fn liked_tracks(conn: &mut SqliteConnection, since: i64) -> Result<Vec<Liked
         analysed: bool,
     }
     let rows: Vec<Row> = diesel::sql_query(format!(
-        "SELECT x.track_id AS track_id, t.title AS title, a.name AS artist,
+        "SELECT x.track_id AS track_id, COALESCE(t.title, MAX(x.title)) AS title, COALESCE(a.name, MAX(x.artist)) AS artist,
            MAX(x.liked_at) AS liked_at, GROUP_CONCAT(DISTINCT u.name) AS by,
            EXISTS (SELECT 1 FROM mix m WHERE m.track_id = x.track_id AND m.version = {VERSION}) AS analysed
-         FROM (SELECT CAST(l.ref_id AS INTEGER) AS track_id, l.liked_at, l.user_id FROM likes l WHERE l.kind = 'track'
+         FROM (SELECT CAST(l.ref_id AS INTEGER) AS track_id, l.liked_at, l.user_id,
+                 -- As it was when liked, for a track not catalogued.
+                 json_extract(l.item_json, '$.title') AS title, json_extract(l.item_json, '$.artist') AS artist
+               FROM likes l WHERE l.kind = 'track'
                UNION ALL
-               SELECT t.id, l.liked_at, l.user_id FROM likes l JOIN tracks t ON t.album_id = l.ref_id WHERE l.kind = 'album') x
+               SELECT t.id, l.liked_at, l.user_id, NULL, NULL FROM likes l JOIN tracks t ON t.album_id = l.ref_id WHERE l.kind = 'album') x
          LEFT JOIN users u ON u.id = x.user_id
          LEFT JOIN tracks t ON t.id = x.track_id
          LEFT JOIN artists a ON a.id = t.artist_id
@@ -1635,7 +1638,8 @@ mod tests {
         diesel::connection::SimpleConnection::batch_execute(
             conn,
             "INSERT INTO likes (user_id, kind, ref_id, liked_at) VALUES
-               (1, 'track', '1', 10), (2, 'track', '1', 30), (1, 'album', 'a', 20), (1, 'track', '5', 1), (1, 'artist', '9', 40);",
+               (1, 'track', '1', 10), (2, 'track', '1', 30), (1, 'album', 'a', 20), (1, 'track', '5', 1), (1, 'artist', '9', 40);
+             INSERT INTO likes (user_id, kind, ref_id, item_json, liked_at) VALUES (2, 'track', '77', '{\"title\":\"Elsewhere\",\"artist\":\"Nobody\"}', 15);",
         )
         .unwrap();
         let liked = liked_tracks(conn, 5).unwrap();
@@ -1644,7 +1648,10 @@ mod tests {
         assert_eq!((liked[0].track_id, liked[0].title.as_str(), liked[0].liked_at, liked[0].analysed), (1, "One", 30, true));
         assert_eq!(first, ["lou", "sasha"]);
         // The album's tracks, at the album's date; 5 is from before `since`.
-        assert_eq!(liked[1..].iter().map(|l| (l.track_id, l.liked_at, l.analysed)).collect::<Vec<_>>(), [(3, 20, false), (4, 20, false)]);
+        assert_eq!(liked[1..3].iter().map(|l| (l.track_id, l.liked_at, l.analysed)).collect::<Vec<_>>(), [(3, 20, false), (4, 20, false)]);
+        // Not catalogued: named as it was when liked.
+        assert_eq!((liked[3].track_id, liked[3].title.as_str(), liked[3].artist.as_str()), (77, "Elsewhere", "Nobody"));
+        assert_eq!(liked.len(), 4);
     }
 
     #[test]
