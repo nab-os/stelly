@@ -24,9 +24,9 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
   | Priority | Why it is there | Pace |
   |---|---|---|
   | asked | stelly-mix or the app wants it now, and waits | at once, ahead of all |
-  | liked | a track or album liked; an artist liked is its top tracks | every worker |
+  | liked | a track or album liked in the last day | every worker |
   | selection | `server-analyse` and the pipeline controls' box | every worker |
-  | played | listened through, see below | one worker, when nothing else waits |
+  | played | listened through, see below; older likes, and an artist's, its 20 catalogued tracks nearest the likes | one worker, when nothing else waits |
 
   Played tracks are the slow, passive growth of the library: one at a time,
   behind everything else, and only those with no mix row yet.
@@ -57,7 +57,7 @@ Paths are `stelly` unless the row names `mix` (stelly-mix).
 |---|---|---|---|---|
 | 2.1 | `listens`, recorded from the session: opened on a new current track, closed with what was listened and how it ended | `schema.sql`, `server/src/playback.rs` | M | #175 |
 | 2.2 | A play-through queues the track at `played`, run one at a time when nothing else waits | `server/src/playback.rs`, `mix.rs` | S | #176 |
-| 2.3 | A like queues at `liked`: a track, an album's tracks, an artist's top tracks; the likes from before this queued once | `server/src/likes.rs`, `routes.rs` | S | |
+| 2.3 | Each like queued once, newest first: a track or album liked in the last day at `liked`, older ones and artists' 20 catalogued tracks at `played`; with no provider answering, the queue waits rather than failing everything | `server/src/mix.rs`, `hub.rs`, `provider.rs` | S | #177 |
 | 2.4 | `POST /api/mix/tracks/{id}/analyse`: queued at `asked`, answers when it is done | `server/src/routes.rs`, `mix.rs` | S | |
 
 ## Phase 3: the app shows it

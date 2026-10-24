@@ -134,6 +134,16 @@ CREATE TABLE IF NOT EXISTS mix_queue (
 
 CREATE INDEX IF NOT EXISTS idx_mix_queue_order ON mix_queue(priority);
 
+-- The likes whose tracks have been queued for their mix analysis, each once,
+-- whoever liked it.
+CREATE TABLE IF NOT EXISTS mix_liked (
+    -- 'track' | 'album' | 'artist', as in `likes`.
+    kind       TEXT NOT NULL,
+    ref_id     TEXT NOT NULL,
+    queued_at  TEXT NOT NULL,
+    PRIMARY KEY (kind, ref_id)
+);
+
 -- Every track played, one row each once it stopped being the one playing,
 -- kept raw for whatever is wanted of it later. See server/src/listens.rs.
 CREATE TABLE IF NOT EXISTS listens (

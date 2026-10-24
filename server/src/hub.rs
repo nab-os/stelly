@@ -522,7 +522,9 @@ impl Hub {
             other => anyhow::bail!("unknown kind of like {other:?}"),
         };
         let id = id.to_string();
-        self.db.write(move |conn| likes::record(conn, user_id, &id, &item, likes::now())).await.map(|_| ())
+        self.db.write(move |conn| likes::record(conn, user_id, &id, &item, likes::now())).await?;
+        self.mix.queue_likes();
+        Ok(())
     }
 
     pub async fn favorite_remove(&self, kind: &str, id: &str, user_id: i64) -> Result<()> {

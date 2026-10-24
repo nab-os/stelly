@@ -462,6 +462,9 @@ pub struct MixService {
     bell: Arc<Bell>,
     /// Set by `stop`: the worker drops what selections queued.
     drop_selections: AtomicBool,
+    /// Likes are being queued, and whether to look again once that is done.
+    liking: Arc<AtomicBool>,
+    liked_since: Arc<AtomicBool>,
     /// Tracks the queue gave the space their excerpt's analysis since the
     /// hub last rebuilt it for them, and the signal that a burst added some.
     spaced: AtomicUsize,
@@ -479,6 +482,8 @@ impl MixService {
             cancel: Default::default(),
             bell: Default::default(),
             drop_selections: AtomicBool::new(false),
+            liking: Default::default(),
+            liked_since: Default::default(),
             spaced: AtomicUsize::new(0),
             settled: tokio::sync::Notify::new(),
             log,
@@ -596,6 +601,96 @@ impl MixService {
         Ok(queued)
     }
 
+    /// Queue the tracks of every like not queued yet, newest first, on a
+    /// thread of its own: a track or album not catalogued is, first. Called
+    /// at start, for those from before this or added from the command
+    /// line, and after each like.
+    pub fn queue_likes(self: &Arc<Self>) {
+        self.liked_since.store(true, Ordering::SeqCst);
+        if self.liking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let service = self.clone();
+        let spawned = std::thread::Builder::new().name("stelly-mix-likes".into()).spawn(move || loop {
+            while service.liked_since.swap(false, Ordering::SeqCst) {
+                if let Err(err) = service.queue_likes_now() {
+                    service.log.push(format!("mix: queueing likes: {err:#}"));
+                }
+            }
+            service.liking.store(false, Ordering::SeqCst);
+            // A like that came between the last look and the flag going down.
+            if !service.liked_since.load(Ordering::SeqCst) || service.liking.swap(true, Ordering::SeqCst) {
+                break;
+            }
+        });
+        if let Err(err) = spawned {
+            self.liking.store(false, Ordering::SeqCst);
+            self.log.push(format!("mix: queueing likes: {err:#}"));
+        }
+    }
+
+    fn queue_likes_now(&self) -> Result<()> {
+        let log = self.log.clone();
+        let job = Job::new(move |line: &str| log.push(format!("mix: {line}")), Arc::new(AtomicBool::new(false)));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let conn = &mut crate::db::open_for_write(&self.paths.db_path)?;
+        let likes = unqueued_likes(conn)?;
+        if likes.is_empty() {
+            return Ok(());
+        }
+        let mut client = Provider::from_env(&self.paths.env_dir, &self.paths.db_path).bulk();
+        let now = crate::likes::now();
+        let (mut liked, mut later) = (HashSet::new(), HashSet::new());
+        for like in likes {
+            let ids = match like.kind.as_str() {
+                "track" | "album" => {
+                    let target = match like.kind.as_str() {
+                        "track" => like.ref_id.parse().map(Target::Track).ok(),
+                        _ => Some(Target::Album(like.ref_id.clone())),
+                    };
+                    match target {
+                        Some(target) => runtime.block_on(crate::crawl::catalogue_target(conn, &mut client, &target, &job)),
+                        None => Ok(Vec::new()),
+                    }
+                }
+                "artist" => like.ref_id.parse().map_or(Ok(Vec::new()), |artist| artist_tracks(conn, artist)),
+                _ => Ok(Vec::new()),
+            };
+            // One that cannot be catalogued is told once, not tried at
+            // every start.
+            let ids = ids.unwrap_or_else(|err| {
+                job.log(format!("liked {} {}: {err:#}", like.kind, like.ref_id));
+                Vec::new()
+            });
+            // A like just made is what stelly-mix opens on; older ones, and
+            // every artist's, fill in behind everything else.
+            let reason = match like.kind.as_str() {
+                "artist" => Reason::Played,
+                _ if now - like.liked_at <= RECENT_LIKE => Reason::Liked,
+                _ => Reason::Played,
+            };
+            let queued = enqueue(conn, &ids, reason)?;
+            let any = !queued.is_empty();
+            match reason {
+                Reason::Liked => liked.extend(queued),
+                _ => later.extend(queued),
+            }
+            diesel::sql_query("INSERT OR IGNORE INTO mix_liked (kind, ref_id, queued_at) VALUES (?, ?, ?)")
+                .bind::<Text, _>(&like.kind)
+                .bind::<Text, _>(&like.ref_id)
+                .bind::<Text, _>(crate::db::utc_now())
+                .execute(conn)?;
+            if any {
+                self.bell.ring();
+            }
+        }
+        if !liked.is_empty() || !later.is_empty() {
+            let later = later.difference(&liked).count();
+            job.log(format!("{} liked tracks queued, and {later} behind everything else", liked.len()));
+        }
+        Ok(())
+    }
+
     /// Until a burst has given the space tracks it does not show yet;
     /// answers how many, since the last time this answered.
     pub async fn spaced(&self) -> usize {
@@ -657,10 +752,13 @@ impl MixService {
         let mut spaced = 0;
         // Whether to start again with other workers, once what they have is done.
         let mut again = false;
+        // Why the audio cannot be had, when it cannot: nothing more is handed
+        // out, and the queue waits to try again.
+        let mut stalled: Option<String> = None;
         let drained = (|| -> Result<bool> {
             loop {
                 self.drop_if_stopped(&mut conn, Some((&feed, &mut taken)))?;
-                if feed.len() < workers && !again {
+                if feed.len() < workers && !again && stalled.is_none() {
                     for queued in claim(&mut conn, workers - feed.len(), &taken)? {
                         let reason = Reason::of(queued.priority);
                         match reason {
@@ -682,6 +780,9 @@ impl MixService {
                     }
                 }
                 if taken.is_empty() {
+                    if let Some(why) = stalled.take() {
+                        bail!("waiting for the music providers, {}s: {why}", RETRY_AFTER.as_secs());
+                    }
                     return Ok(!again);
                 }
                 let (id, name, outcome) = match results.recv_timeout(Duration::from_secs(2)) {
@@ -690,6 +791,14 @@ impl MixService {
                     Err(mpsc::RecvTimeoutError::Disconnected) => bail!("the mix workers stopped"),
                 };
                 taken.remove(&id);
+                if outcome.unreachable {
+                    // Back to the queue, and so is what was handed out.
+                    for id in feed.drop_where(|_| true) {
+                        taken.remove(&id);
+                    }
+                    stalled = outcome.mix.err();
+                    continue;
+                }
                 let recorded = record(&mut conn, id, &name, outcome, &job)?;
                 spaced += recorded.spaced as usize;
                 dequeue(&mut conn, id)?;
@@ -767,6 +876,49 @@ impl MixService {
     }
 }
 
+/// Liked within this, in seconds, a like goes ahead of selections: one just
+/// made, or made while the server was down. Older, from before the queue or
+/// imported, it waits with the played tracks: an account's favourites are
+/// thousands of tracks, days of analysis.
+const RECENT_LIKE: i64 = 24 * 60 * 60;
+/// The tracks an artist's like queues, of theirs already catalogued.
+const ARTIST_TRACKS: i64 = 20;
+
+#[derive(QueryableByName)]
+struct Like {
+    #[diesel(sql_type = Text)]
+    kind: String,
+    #[diesel(sql_type = Text)]
+    ref_id: String,
+    #[diesel(sql_type = BigInt)]
+    liked_at: i64,
+}
+
+/// The family's likes whose tracks were not queued yet, newest first.
+fn unqueued_likes(conn: &mut SqliteConnection) -> Result<Vec<Like>> {
+    Ok(diesel::sql_query(
+        "SELECT l.kind AS kind, l.ref_id AS ref_id, MAX(l.liked_at) AS liked_at FROM likes l
+         WHERE NOT EXISTS (SELECT 1 FROM mix_liked q WHERE q.kind = l.kind AND q.ref_id = l.ref_id)
+         GROUP BY l.kind, l.ref_id
+         ORDER BY liked_at DESC",
+    )
+    .load(conn)?)
+}
+
+/// An artist's catalogued tracks, those nearest the family's likes first.
+fn artist_tracks(conn: &mut SqliteConnection, artist: i64) -> Result<Vec<i64>> {
+    #[derive(QueryableByName)]
+    struct Id {
+        #[diesel(sql_type = BigInt)]
+        id: i64,
+    }
+    let ids: Vec<Id> = diesel::sql_query("SELECT id FROM tracks WHERE artist_id = ? ORDER BY seed_distance, id LIMIT ?")
+        .bind::<BigInt, _>(artist)
+        .bind::<BigInt, _>(ARTIST_TRACKS)
+        .load(conn)?;
+    Ok(ids.into_iter().map(|row| row.id).collect())
+}
+
 /// After a failure to drain, how long before trying again.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How often the worker looks at the queue unasked, for what was queued by
@@ -805,6 +957,27 @@ impl Work {
 struct Outcome {
     mix: std::result::Result<Track, String>,
     features: Option<std::result::Result<(Descriptors, Vec<f32>), String>>,
+    /// The audio could not be had for now, which says nothing of the track:
+    /// it stays queued rather than failed.
+    unreachable: bool,
+}
+
+impl Outcome {
+    fn failed(err: impl std::fmt::Display) -> Self {
+        Outcome { mix: Err(err.to_string()), features: None, unreachable: false }
+    }
+}
+
+/// Whether fetching failed for want of anyone to fetch from: no provider
+/// answering, or the network not there or too slow, rather than anything
+/// about the track.
+async fn unreachable(client: &Provider, err: &anyhow::Error) -> bool {
+    let network = err.chain().any(|cause| {
+        cause.downcast_ref::<reqwest::Error>().is_some_and(|e| e.is_connect() || e.is_timeout())
+            // A provider's own deadline, `Provider::first`'s.
+            || cause.to_string().contains("did not answer in")
+    });
+    network || !client.answering_any().await
 }
 
 /// Tracks handed to the workers, which wait for more until it is closed.
@@ -886,20 +1059,25 @@ fn start_workers(paths: &Paths, n: usize, feed: &Arc<Feed>, report: mpsc::Sender
                 }
                 let Some(work) = feed.take() else { break };
                 let name = format!("{} - {}", work.item.artist, work.item.title);
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Outcome> {
-                    let (bytes, mime) = runtime.block_on(download(&client, &http, work.id))?;
-                    let pcm = audio::decode_any(bytes, mime.as_deref())?;
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Outcome {
+                    let (bytes, mime) = match runtime.block_on(download(&client, &http, work.id)) {
+                        Ok(downloaded) => downloaded,
+                        Err(err) => {
+                            let unreachable = runtime.block_on(unreachable(&client, &err));
+                            return Outcome { unreachable, ..Outcome::failed(format!("{err:#}")) };
+                        }
+                    };
+                    let pcm = match audio::decode_any(bytes, mime.as_deref()) {
+                        Ok(pcm) => pcm,
+                        Err(err) => return Outcome::failed(format!("{err:#}")),
+                    };
                     let origin = Origin { source: source.clone(), item: work.item.clone() };
                     let mix = stelly_mix::library::index_origin_pcm(&pcm, origin, &stelly_mix::Options::default(), &mut encoder)
                         .map_err(|err| format!("{err:#}"));
                     let features = work.needs_features.then(|| excerpt_features(&pcm, &mut encoder).map_err(|err| format!("{err:#}")));
-                    Ok(Outcome { mix, features })
+                    Outcome { mix, features, unreachable: false }
                 }));
-                let outcome = match outcome {
-                    Ok(Ok(outcome)) => outcome,
-                    Ok(Err(err)) => Outcome { mix: Err(format!("{err:#}")), features: None },
-                    Err(_) => Outcome { mix: Err("the analysis panicked".to_string()), features: None },
-                };
+                let outcome = outcome.unwrap_or_else(|_| Outcome::failed("the analysis panicked"));
                 if report.send((work.id, name, outcome)).is_err() {
                     break;
                 }
@@ -1073,6 +1251,43 @@ mod tests {
             .unwrap();
         assert_eq!(order(conn, &[]), [(2, Reason::Selection)]);
         assert_eq!(queued(conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn each_like_is_queued_once_newest_first() {
+        let conn = &mut database("likes");
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
+             INSERT INTO users VALUES (1, 'one', ''), (2, 'two', '');",
+        )
+        .unwrap();
+        crate::likes::ensure_schema(conn).unwrap();
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            "INSERT INTO likes (user_id, kind, ref_id, liked_at) VALUES
+               (1, 'track', '1', 10), (2, 'track', '1', 30), (1, 'album', 'a', 20), (1, 'artist', '9', 5);
+             INSERT INTO mix_liked (kind, ref_id, queued_at) VALUES ('album', 'a', '');",
+        )
+        .unwrap();
+        let likes: Vec<(String, String, i64)> = unqueued_likes(conn).unwrap().into_iter().map(|l| (l.kind, l.ref_id, l.liked_at)).collect();
+        // Liked by two, once, as of the later.
+        assert_eq!(likes, [("track".into(), "1".into(), 30), ("artist".into(), "9".into(), 5)]);
+    }
+
+    #[test]
+    fn an_artists_like_is_their_tracks_nearest_the_likes() {
+        let conn = &mut database("artist");
+        let mut values: Vec<String> = (10..40).map(|id| format!("({id}, 't', 9, {})", 40 - id)).collect();
+        values.push("(99, 'other', 8, 0)".into());
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            &format!("INSERT INTO tracks (id, title, artist_id, seed_distance) VALUES {};", values.join(", ")),
+        )
+        .unwrap();
+        let ids = artist_tracks(conn, 9).unwrap();
+        assert_eq!(ids.len(), ARTIST_TRACKS as usize);
+        assert_eq!(ids[..3], [39, 38, 37]);
     }
 
     #[test]

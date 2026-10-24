@@ -448,6 +448,7 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
             eprintln!("the mix queue is not served: {err:#}");
         }
         state.hub.show_mix_finds();
+        state.hub.mix().queue_likes();
 
         if releases_every > 0 {
             let every = std::time::Duration::from_secs(releases_every * 60 * 60);
