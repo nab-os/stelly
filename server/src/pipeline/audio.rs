@@ -253,11 +253,16 @@ pub fn decode_any(bytes: Vec<u8>, mime_type: Option<&str>) -> Result<Pcm> {
 /// The excerpt of a whole track, centred as `fetch_excerpt` centres it,
 /// packed for the cache.
 pub fn excerpt_of_whole(bytes: Vec<u8>, mime_type: Option<&str>) -> Result<Vec<u8>> {
-    let pcm = decode_any(bytes, mime_type)?;
+    Ok(pack(&excerpt_of(&decode_any(bytes, mime_type)?)))
+}
+
+/// The excerpt of a whole track's samples, centred as `fetch_excerpt`
+/// centres it.
+pub fn excerpt_of(pcm: &Pcm) -> Pcm {
     let seconds = pcm.seconds().round() as i64;
     let start = (excerpt_start(Some(seconds)) * pcm.rate as f64) as usize;
     let end = (start + (EXCERPT_SECONDS * pcm.rate as f64) as usize).min(pcm.samples.len());
-    Ok(pack(&Pcm { samples: pcm.samples[start.min(end)..end].to_vec(), rate: pcm.rate }))
+    Pcm { samples: pcm.samples[start.min(end)..end].to_vec(), rate: pcm.rate }
 }
 
 fn pack(pcm: &Pcm) -> Vec<u8> {

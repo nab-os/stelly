@@ -8,8 +8,13 @@
 //! what is asked, an album, an artist, a track's neighbours in the space or a
 //! slice of it, never on the whole catalogue by default: a full track is ten
 //! times the download and the CPU of an excerpt.
+//!
+//! A whole track holds the excerpt too: a track the space has no current
+//! analysis of gets one from the same samples, rather than a second download
+//! when `analyse` comes to it.
 
-use crate::pipeline::{models, Job, Paths};
+use crate::pipeline::descriptors::Descriptors;
+use crate::pipeline::{analyse, audio, models, Job, Paths};
 use crate::provider::{Provider, Quality};
 use crate::space::SpaceService;
 use anyhow::{bail, Context, Result};
@@ -204,6 +209,9 @@ struct Pending {
     artist: Option<String>,
     #[diesel(sql_type = Nullable<BigInt>)]
     duration: Option<i64>,
+    /// No current `features` row: the space wants the excerpt too.
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    needs_features: bool,
 }
 
 /// Of `ids`, those with no current mix analysis, nor a failure unless
@@ -214,11 +222,14 @@ fn pending(conn: &mut SqliteConnection, ids: &[i64], retry_failed: bool) -> Resu
         let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
         let failed = if retry_failed { "" } else { "AND NOT EXISTS (SELECT 1 FROM mix_failures f WHERE f.track_id = t.id)" };
         let query = format!(
-            "SELECT t.id AS id, t.title AS title, a.name AS artist, t.duration AS duration
+            "SELECT t.id AS id, t.title AS title, a.name AS artist, t.duration AS duration,
+               NOT EXISTS (SELECT 1 FROM features f WHERE f.track_id = t.id
+                           AND f.extractor_version = '{features}') AS needs_features
              FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id
              WHERE t.id IN ({list})
                AND NOT EXISTS (SELECT 1 FROM mix m WHERE m.track_id = t.id AND m.version = {VERSION})
-               {failed}"
+               {failed}",
+            features = analyse::VERSION,
         );
         out.extend(diesel::sql_query(query).load::<Pending>(conn)?);
     }
@@ -373,9 +384,14 @@ impl MixService {
 struct Work {
     id: i64,
     item: Item,
+    needs_features: bool,
 }
 
-type Outcome = std::result::Result<Track, String>;
+/// The mix analysis, and the space's of the excerpt when it was wanted.
+struct Outcome {
+    mix: std::result::Result<Track, String>,
+    features: Option<std::result::Result<(Descriptors, Vec<f32>), String>>,
+}
 
 /// Mix-analyse `ids`, those not done already; blocking, on worker threads of
 /// its own, each with its own ONNX session and gateway client. Only the
@@ -394,7 +410,8 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
         .block_on(models::ensure(&paths.model_dir, &[models::CLAP_AUDIO], job))?;
 
     let workers = if options.workers > 0 { options.workers } else { default_workers() }.min(todo.len());
-    job.log(format!("mix-analysing {} tracks, {workers} workers", todo.len()));
+    let unanalysed = todo.iter().filter(|p| p.needs_features).count();
+    job.log(format!("mix-analysing {} tracks, {unanalysed} new to the space, {workers} workers", todo.len()));
     let queue: VecDeque<Work> = todo
         .into_iter()
         .map(|p| Work {
@@ -405,6 +422,7 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
                 title: p.title,
                 seconds: p.duration.map(|d| d as f64),
             },
+            needs_features: p.needs_features,
         })
         .collect();
     let queue = Arc::new(Mutex::new(queue));
@@ -431,16 +449,19 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
                 }
                 let Some(work) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { break };
                 let name = format!("{} - {}", work.item.artist, work.item.title);
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Track> {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Outcome> {
                     let (bytes, mime) = runtime.block_on(download(&client, &http, work.id))?;
-                    let pcm = crate::pipeline::audio::decode_any(bytes, mime.as_deref())?;
+                    let pcm = audio::decode_any(bytes, mime.as_deref())?;
                     let origin = Origin { source: source.clone(), item: work.item.clone() };
-                    stelly_mix::library::index_origin_pcm(&pcm, origin, &stelly_mix::Options::default(), &mut encoder)
+                    let mix = stelly_mix::library::index_origin_pcm(&pcm, origin, &stelly_mix::Options::default(), &mut encoder)
+                        .map_err(|err| format!("{err:#}"));
+                    let features = work.needs_features.then(|| excerpt_features(&pcm, &mut encoder).map_err(|err| format!("{err:#}")));
+                    Ok(Outcome { mix, features })
                 }));
                 let outcome = match outcome {
-                    Ok(Ok(track)) => Ok(track),
-                    Ok(Err(err)) => Err(format!("{err:#}")),
-                    Err(_) => Err("the analysis panicked".to_string()),
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(err)) => Outcome { mix: Err(format!("{err:#}")), features: None },
+                    Err(_) => Outcome { mix: Err("the analysis panicked".to_string()), features: None },
                 };
                 if report.send((work.id, name, outcome)).is_err() {
                     break;
@@ -451,12 +472,28 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
     }
     drop(report);
 
+    let mut spaced = 0;
     for (id, name, outcome) in results {
-        match outcome {
+        // The excerpt's analysis stands on its own: a track whose phrases
+        // could not be found can still join the space.
+        let joined = match &outcome.features {
+            Some(Ok((descriptors, clap))) => {
+                analyse::store(&mut conn, id, descriptors, clap)?;
+                spaced += 1;
+                ", and its excerpt for the space"
+            }
+            Some(Err(error)) => {
+                analyse::record_failure(&mut conn, id, error)?;
+                job.log(format!("{name}: excerpt for the space: {error}"));
+                ""
+            }
+            None => "",
+        };
+        match outcome.mix {
             Ok(track) => {
                 store(&mut conn, id, &track)?;
                 stats.done += 1;
-                job.log(format!("[{}/{}] {name}: {} phrases", stats.done + stats.failed, stats.total, track.segments.len()));
+                job.log(format!("[{}/{}] {name}: {} phrases{joined}", stats.done + stats.failed, stats.total, track.segments.len()));
             }
             Err(error) => {
                 record_failure(&mut conn, id, &error)?;
@@ -469,8 +506,18 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
     for handle in handles {
         let _ = handle.join();
     }
-    job.log(format!("mix-analysed {} tracks, {} failed", stats.done, stats.failed));
+    job.log(format!("mix-analysed {} tracks, {} failed; {spaced} new to the space", stats.done, stats.failed));
     Ok(stats)
+}
+
+/// What `analyse` makes of the excerpt, cut from the samples already here.
+fn excerpt_features(pcm: &audio::Pcm, encoder: &mut stelly_audio::clap::AudioEncoder) -> Result<(Descriptors, Vec<f32>)> {
+    let excerpt = audio::excerpt_of(pcm);
+    let seconds = excerpt.seconds();
+    if seconds < audio::MIN_EXCERPT_SECONDS {
+        bail!("excerpt of only {seconds:.1}s of audio");
+    }
+    analyse::analyse_pcm(encoder, &excerpt)
 }
 
 /// The whole track, lossy, and what format it is in.
