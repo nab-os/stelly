@@ -98,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mix/state/{id}", get(mix_state))
         .route("/api/mix/briefs", post(mix_briefs))
         .route("/api/mix/queue", get(mix_queue))
+        .route("/api/mix/liked", get(mix_liked))
         .route("/api/mix/select", post(mix_select))
         .route("/api/mix/next/{id}", get(mix_next))
         .route("/api/mix/set", post(mix_set))
@@ -978,6 +979,19 @@ async fn mix_track(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i6
 /// one: the app's, which has no use for the beats themselves.
 async fn mix_state(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<stelly_core::api::MixState> {
     Ok(Json(state.hub.mix().state(id).await?))
+}
+
+#[derive(Deserialize)]
+struct SinceQuery {
+    /// Unix seconds; everything when absent.
+    #[serde(default)]
+    since: i64,
+}
+
+/// The family's liked tracks, and their liked albums' tracks, newest first:
+/// what stelly-mix opens on.
+async fn mix_liked(State(state): State<AppState>, _: PlayAuth, Query(query): Query<SinceQuery>) -> Reply<Vec<crate::mix::LikedTrack>> {
+    Ok(Json(state.hub.mix().liked(query.since).await?))
 }
 
 /// The mix queue, for the pipeline controls.

@@ -308,6 +308,57 @@ fn state_of(conn: &mut SqliteConnection, id: i64) -> Result<MixState> {
     })
 }
 
+/// A track the family liked, or one of an album it liked, for stelly-mix to
+/// open on: when, by whom, and whether its mix analysis is there yet. Plain
+/// JSON rather than a stelly-mix type, so neither side waits on the other's
+/// release to read it.
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct LikedTrack {
+    pub track_id: i64,
+    /// Unix seconds; the latest, when several liked it.
+    pub liked_at: i64,
+    /// Who liked it, by name.
+    pub by: Vec<String>,
+    pub analysed: bool,
+}
+
+/// What the family liked after `since`, newest first.
+pub fn liked_tracks(conn: &mut SqliteConnection, since: i64) -> Result<Vec<LikedTrack>> {
+    #[derive(QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = BigInt)]
+        track_id: i64,
+        #[diesel(sql_type = BigInt)]
+        liked_at: i64,
+        #[diesel(sql_type = Nullable<Text>)]
+        by: Option<String>,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        analysed: bool,
+    }
+    let rows: Vec<Row> = diesel::sql_query(format!(
+        "SELECT x.track_id AS track_id, MAX(x.liked_at) AS liked_at, GROUP_CONCAT(DISTINCT u.name) AS by,
+           EXISTS (SELECT 1 FROM mix m WHERE m.track_id = x.track_id AND m.version = {VERSION}) AS analysed
+         FROM (SELECT CAST(l.ref_id AS INTEGER) AS track_id, l.liked_at, l.user_id FROM likes l WHERE l.kind = 'track'
+               UNION ALL
+               SELECT t.id, l.liked_at, l.user_id FROM likes l JOIN tracks t ON t.album_id = l.ref_id WHERE l.kind = 'album') x
+         LEFT JOIN users u ON u.id = x.user_id
+         WHERE x.liked_at > ?
+         GROUP BY x.track_id
+         ORDER BY liked_at DESC, x.track_id"
+    ))
+    .bind::<BigInt, _>(since)
+    .load(conn)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| LikedTrack {
+            track_id: row.track_id,
+            liked_at: row.liked_at,
+            by: row.by.map(|by| by.split(',').map(str::to_string).collect()).unwrap_or_default(),
+            analysed: row.analysed,
+        })
+        .collect())
+}
+
 /// How many to list after those being analysed.
 const NEXT_SHOWN: usize = 8;
 
@@ -767,6 +818,12 @@ impl MixService {
         }
         let db_path = self.paths.db_path.clone();
         tokio::task::spawn_blocking(move || state_of(&mut crate::db::open_for_write(&db_path)?, id)).await?
+    }
+
+    /// What the family liked after `since`, newest first.
+    pub async fn liked(&self, since: i64) -> Result<Vec<LikedTrack>> {
+        let db_path = self.paths.db_path.clone();
+        tokio::task::spawn_blocking(move || liked_tracks(&mut crate::db::open_for_write(&db_path)?, since)).await?
     }
 
     /// The queue as the pipeline controls show it.
@@ -1548,6 +1605,35 @@ mod tests {
         let ids = artist_tracks(conn, 9).unwrap();
         assert_eq!(ids.len(), ARTIST_TRACKS as usize);
         assert_eq!(ids[..3], [39, 38, 37]);
+    }
+
+    #[test]
+    fn liked_tracks_are_the_familys_newest_first_albums_whole() {
+        let conn = &mut database("liked");
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            &format!(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
+                 INSERT INTO users VALUES (1, 'sasha', ''), (2, 'lou', '');
+                 UPDATE tracks SET album_id = 'a' WHERE id IN (3, 4);
+                 INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (1, {VERSION}, '{{}}', '');"
+            ),
+        )
+        .unwrap();
+        crate::likes::ensure_schema(conn).unwrap();
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            "INSERT INTO likes (user_id, kind, ref_id, liked_at) VALUES
+               (1, 'track', '1', 10), (2, 'track', '1', 30), (1, 'album', 'a', 20), (1, 'track', '5', 1), (1, 'artist', '9', 40);",
+        )
+        .unwrap();
+        let liked = liked_tracks(conn, 5).unwrap();
+        let mut first = liked[0].by.clone();
+        first.sort();
+        assert_eq!((liked[0].track_id, liked[0].liked_at, liked[0].analysed), (1, 30, true));
+        assert_eq!(first, ["lou", "sasha"]);
+        // The album's tracks, at the album's date; 5 is from before `since`.
+        assert_eq!(liked[1..].iter().map(|l| (l.track_id, l.liked_at, l.analysed)).collect::<Vec<_>>(), [(3, 20, false), (4, 20, false)]);
     }
 
     #[test]
