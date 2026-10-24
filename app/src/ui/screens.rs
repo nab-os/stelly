@@ -16,7 +16,7 @@ use super::{
     album_link, artist_link, open_remote_track, row_keys, space_mark, Blocklist, Cover, LocalIds, MapView,
     Pipeline, Selection, SpaceReach,
 };
-use crate::api::{PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
+use crate::api::{MixState, MixSummary, PipelineStatus, Progress, Stage, Target, MIN_TRACK_SECONDS};
 use crate::backend::backend;
 use crate::catalogue::{Credit, ReleaseKind, RemoteAlbum, RemoteArtist, RemoteTrack};
 use dioxus::core::spawn_forever;
@@ -208,6 +208,12 @@ fn fact(label: &str, value: Option<String>) -> Element {
     }
 }
 
+/// Seconds to a tenth, "1:04.9": where a downbeat or a section falls.
+fn clock_tenths(seconds: f64) -> String {
+    let tenths = (seconds.max(0.0) * 10.0).round() as i64;
+    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
+}
+
 fn clock(seconds: i64) -> String {
     if seconds >= 3600 {
         format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
@@ -240,6 +246,13 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
     // The space's own row: genre, tempo, where the crawl found it, where it
     // sits on the map. None of it travels on a Qobuz track.
     let meta = if in_space { super::space_row(track.id) } else { None };
+    // The whole track analysed for mixing, once it has been: its tempo and
+    // key over the space's, which are of a 90s excerpt.
+    let mix = use_mix_state(track.id);
+    let mixed = match &*mix.read() {
+        Some(Ok(MixState::Analysed { summary })) => Some(summary.clone()),
+        _ => None,
+    };
 
     // Looking at a track the space holds makes it the one in hand, for the
     // generate panel and the map, however the page was reached.
@@ -343,7 +356,8 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("Duration", track.duration.filter(|d| *d > 0).map(clock))}
                 {fact("Released", track.released.clone())}
                 {fact("Genre", meta.as_ref().map(|m| m.genre.clone()))}
-                {fact("Tempo", meta.as_ref().and_then(|m| m.bpm).map(|bpm| format!("{bpm:.0} bpm")))}
+                {fact("Tempo", mixed.as_ref().and_then(|m| m.bpm).or_else(|| meta.as_ref().and_then(|m| m.bpm).map(f64::from)).map(|bpm| format!("{bpm:.0} bpm")))}
+                {fact("Key", mixed.as_ref().and_then(|m| Some(format!("{} · {}", m.key.as_ref()?, m.camelot.as_ref()?))))}
                 {fact("ISRC", track.isrc.clone().or_else(|| meta.as_ref().and_then(|m| m.isrc.clone())))}
                 {fact("Quality", Some(quality.to_string()))}
                 {fact("Streamable", Some(if track.streamable { "yes" } else { "not here" }.to_string()))}
@@ -353,6 +367,8 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                 {fact("Track id", Some(track.id.to_string()))}
                 {fact("Album id", track.album_id.clone())}
             }
+
+            ForMixing { track_id: track.id, mix }
 
             if in_space && generator.can_steer() {
                 Described { key: "{track.id}", track_id: track.id }
@@ -382,6 +398,110 @@ pub fn TrackScreen(track: RemoteTrack) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Where a track stands for mixing, asked again every few seconds while it
+/// waits its turn or is being analysed. The screen is keyed by the track, so
+/// another track starts afresh.
+fn use_mix_state(track_id: i64) -> Signal<Option<Result<MixState, String>>> {
+    let mut state = use_signal(|| None);
+    use_future(move || async move {
+        loop {
+            let fetched = backend().mix_state(track_id).await.map_err(|err| format!("{err:#}"));
+            let waiting = matches!(fetched, Ok(MixState::Queued { .. } | MixState::Analysing));
+            state.set(Some(fetched));
+            if !waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
+    state
+}
+
+/// The whole track as stelly-mix hears it: tempo and grid, key, loudness,
+/// bars, phrases and sections. A track not analysed yet says where it stands,
+/// with a button to have it done now.
+#[component]
+fn ForMixing(track_id: i64, mix: Signal<Option<Result<MixState, String>>>) -> Element {
+    let analyse_now = move |_| {
+        mix.set(Some(Ok(MixState::Analysing)));
+        spawn(async move {
+            let done = match backend().mix_analyse(track_id).await {
+                Ok(()) => backend().mix_state(track_id).await,
+                Err(err) => Err(err),
+            };
+            mix.set(Some(done.map_err(|err| format!("{err:#}"))));
+        });
+    };
+    rsx! {
+        h3 { class: "shelf-head", "For mixing" }
+        match &*mix.read() {
+            None => rsx! { p { class: "muted", "…" } },
+            Some(Err(err)) => rsx! { p { class: "muted", "{err}" } },
+            Some(Ok(MixState::Analysed { summary })) => mix_facts(summary),
+            Some(Ok(MixState::Analysing)) => rsx! { p { class: "muted", "analysing the whole track…" } },
+            Some(Ok(MixState::Queued { reason, ahead })) => rsx! {
+                div { class: "mix-wait",
+                    p { class: "muted",
+                        "queued, {queued_because(reason)}"
+                        if *ahead > 0 { ", {ahead} before it" }
+                    }
+                    button { onclick: analyse_now, "Analyse now" }
+                }
+            },
+            Some(Ok(MixState::Failed { reason })) => rsx! {
+                div { class: "mix-wait",
+                    p { class: "muted", "could not be analysed: {reason}" }
+                    button { onclick: analyse_now, "Try again" }
+                }
+            },
+            Some(Ok(MixState::Unasked)) => rsx! {
+                div { class: "mix-wait",
+                    p { class: "muted", "not analysed yet: liking it or playing it through queues it" }
+                    button { onclick: analyse_now, "Analyse now" }
+                }
+            },
+        }
+    }
+}
+
+fn queued_because(reason: &str) -> &'static str {
+    match reason {
+        "asked" => "asked for",
+        "liked" => "liked",
+        "selection" => "in a selection",
+        _ => "played through",
+    }
+}
+
+fn mix_facts(summary: &MixSummary) -> Element {
+    let tempo = summary.bpm.map(|bpm| match (summary.steady, summary.on_grid) {
+        (true, _) => format!("{bpm:.1} bpm, on a grid"),
+        (false, Some(on)) => format!("{bpm:.1} bpm, drifting ({:.0}% of beats on the grid)", on * 100.0),
+        (false, None) => format!("{bpm:.1} bpm, drifting"),
+    });
+    let key = summary.key.as_ref().map(|key| match (&summary.camelot, summary.key_strength) {
+        (Some(camelot), Some(strength)) => format!("{camelot} · {key}, strength {strength:.2}"),
+        (Some(camelot), None) => format!("{camelot} · {key}"),
+        _ => key.clone(),
+    });
+    let downbeat = summary.first_downbeat.map(|at| match summary.downbeat_confidence < 0.2 {
+        true => format!("{}, unsure", clock_tenths(at)),
+        false => clock_tenths(at),
+    });
+    let shape = (summary.bars > 0).then(|| format!("{} bars, {} phrases of eight", summary.bars, summary.phrases));
+    let sections = summary.sections.iter().map(|&at| clock_tenths(at)).collect::<Vec<_>>().join(", ");
+    rsx! {
+        dl { class: "facts",
+            {fact("Tempo", tempo)}
+            {fact("Key", key)}
+            {fact("Loudness", summary.loudness.map(|lufs| format!("{lufs:.1} LUFS")))}
+            {fact("First downbeat", downbeat)}
+            {fact("Structure", shape)}
+            {fact("Sections", Some(sections))}
         }
     }
 }

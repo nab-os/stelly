@@ -854,6 +854,11 @@ button.adding:disabled {
 
 .page-foot { margin-top: 10px; }
 
+/* A track not analysed for mixing yet: where it stands, and the button to
+   have it done now, on one line. */
+.mix-wait { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.mix-wait p { margin: 0; }
+
 /* Folded to a few lines by default, faded out where it is cut. */
 .bio {
   max-height: 4.6em;
