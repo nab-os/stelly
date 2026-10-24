@@ -40,6 +40,7 @@ mod space;
 use stelly_core::schema;
 mod stages;
 mod text;
+mod tuning;
 
 use anyhow::{Context, Result};
 use argh::FromArgs;

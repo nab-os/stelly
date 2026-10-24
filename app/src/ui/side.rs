@@ -46,15 +46,32 @@ pub(crate) fn title_for(id: i64) -> String {
     space_row_or_glimpse(id).map(|track| track.title).unwrap_or_else(|| id.to_string())
 }
 
+/// Keep the weights for this account, so its other devices, and this one
+/// next time, start from them. Only what differs from the defaults goes.
+fn save_tuning(
+    weights: HashMap<String, f32>,
+    defaults: HashMap<String, f32>,
+    mut failure: Signal<Option<String>>,
+) {
+    let tuning = super::tuning_of(&weights, &defaults);
+    spawn(async move {
+        match backend().set_tuning(&tuning).await {
+            Ok(()) => failure.set(None),
+            Err(err) => failure.set(Some(format!("Not saved for your other devices: {}", super::generate::failure(&err)))),
+        }
+    });
+}
+
 /// How results are shaped, in settings: how many tracks, how hard radio
 /// pushes away from artists it has used, a path's pace, and the weights the
 /// distances are measured with, collapsed since most sessions never touch
-/// them.
+/// them. The weights are the account's, kept on the server.
 #[component]
 pub fn GenerateRow() -> Element {
     let generator = use_context::<Generator>();
     let mut weights = use_context::<Weights>().0;
     let mut expanded = use_signal(|| false);
+    let save_failed = use_signal(|| None::<String>);
 
     let blocks = use_context::<Space>().info.read().blocks.clone();
     let defaults: HashMap<String, f32> =
@@ -139,7 +156,7 @@ pub fn GenerateRow() -> Element {
 
                 if expanded() {
                     p { class: "muted",
-                        "Reshapes distances from the next result on. Map positions are fixed until the layout step is re-run."
+                        "Reshapes distances from the next result on, on all your devices. Map positions are fixed until the layout step is re-run."
                     }
                     div { class: "actions",
                         span { class: "spacer" }
@@ -147,12 +164,19 @@ pub fn GenerateRow() -> Element {
                             class: "chip",
                             title: "back to the weights the space was built with",
                             disabled: !weights_changed,
-                            onclick: move |_| {
-                                weights.set(defaults.clone());
-                                generator.invalidate();
+                            onclick: {
+                                let defaults = defaults.clone();
+                                move |_| {
+                                    weights.set(defaults.clone());
+                                    generator.invalidate();
+                                    save_tuning(defaults.clone(), defaults.clone(), save_failed);
+                                }
                             },
                             "reset"
                         }
+                    }
+                    if let Some(message) = save_failed() {
+                        p { class: "error", "{message}" }
                     }
                     for name in block_names {
                         div { class: "slider", key: "{name}",
@@ -173,6 +197,11 @@ pub fn GenerateRow() -> Element {
                                             generator.invalidate();
                                         }
                                     }
+                                },
+                                // Once let go, not on every step of the drag.
+                                onchange: {
+                                    let defaults = defaults.clone();
+                                    move |_| save_tuning(weights.peek().clone(), defaults.clone(), save_failed)
                                 },
                             }
                             span { class: "muted",

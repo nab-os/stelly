@@ -642,6 +642,19 @@ impl Remote {
 
     /// A track of the space in words, the ones it sounds like most next to
     /// the rest of the space, best first.
+    /// This account's "tune the space" weights, empty for the defaults.
+    pub async fn tuning(&self) -> Result<std::collections::HashMap<String, f32>> {
+        self.get("/api/tuning").await
+    }
+
+    /// Keep them for this account, on every device. Empty is a reset.
+    pub async fn set_tuning(&self, weights: &std::collections::HashMap<String, f32>) -> Result<()> {
+        let path = "/api/tuning";
+        let request = self.http.put(self.url(path)).json(weights).timeout(REQUEST_TIMEOUT);
+        self.exchange("PUT", path, request).await?;
+        Ok(())
+    }
+
     pub async fn describe(&self, track_id: i64) -> Result<Vec<Word>> {
         self.get(&format!("/api/space/describe/{track_id}")).await
     }

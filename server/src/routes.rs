@@ -23,6 +23,7 @@ use stelly_core::api::{
 use stelly_core::session::{Command, Session};
 use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 use tokio_stream::wrappers::ReceiverStream;
@@ -90,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/space/generate", post(space_generate))
         .route("/api/space/order", post(space_order))
         .route("/api/space/describe/{id}", get(space_describe))
+        .route("/api/tuning", get(tuning).put(set_tuning))
         .route("/api/mix/status", get(mix_status))
         .route("/api/mix/library", get(mix_library))
         .route("/api/mix/tracks", post(mix_tracks))
@@ -526,6 +528,21 @@ async fn favorite_add(
     Path((kind, id)): Path<(String, String)>,
 ) -> Reply<serde_json::Value> {
     state.hub.favorite_add(&kind, &id, device.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// The asking user's weights on the space's blocks; nobody else's.
+async fn tuning(State(state): State<AppState>, PlayAuth(device): PlayAuth) -> Reply<HashMap<String, f32>> {
+    Ok(Json(state.hub.tuning(device.user_id).await?))
+}
+
+/// Keep them, the whole set as the client has it. None is back to defaults.
+async fn set_tuning(
+    State(state): State<AppState>,
+    PlayAuth(device): PlayAuth,
+    Json(weights): Json<HashMap<String, f32>>,
+) -> Reply<serde_json::Value> {
+    state.hub.set_tuning(device.user_id, weights).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
