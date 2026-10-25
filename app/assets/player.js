@@ -97,6 +97,13 @@
     navigator.mediaSession.setActionHandler("nexttrack", () => {
       dioxus.send({ type: "transport", action: "next" });
     });
+    // A seek moves the session's position, which every device follows, so
+    // it goes through Rust like the seek line's. WebKitGTK passes MPRIS's
+    // relative Seek on as an absolute time, which nothing here can undo.
+    navigator.mediaSession.setActionHandler("seekto", (details) => {
+      if (!Number.isFinite(details.seekTime)) return;
+      dioxus.send({ type: "transport", action: "seek", position: Math.max(0, details.seekTime) });
+    });
   }
 
   audio.addEventListener("ended", () => dioxus.send({ type: "ended" }));
