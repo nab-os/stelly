@@ -7,6 +7,7 @@ pub mod catalogue;
 pub mod logbuffer;
 pub mod recording;
 pub mod session;
+pub mod vectors;
 
 #[cfg(feature = "engine")]
 pub mod db;

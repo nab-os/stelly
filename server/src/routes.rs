@@ -127,6 +127,7 @@ pub fn router(state: AppState) -> Router {
                 .route("/api/space/index", get(space_index))
                 .route("/api/space/points", get(space_points))
                 .route("/api/space/points/meta", get(space_points_meta))
+                .route("/api/space/vectors", get(space_vectors))
                 .with_state(state),
         )
 }
@@ -701,6 +702,13 @@ async fn space_index(State(state): State<AppState>, _: PlayAuth, headers: Header
 async fn space_points(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
     let derived = state.hub.space().derived().ok_or_else(not_built)?;
     Ok(prepared(&headers, &derived.points))
+}
+
+/// Every track with its row of the space, for stelly-explorer. Seconds to
+/// build the first time after a change, from then on what is held.
+async fn space_vectors(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
+    let body = on_space(&state, |space| space.vectors()).await?;
+    Ok(prepared(&headers, &body))
 }
 
 #[derive(Deserialize)]
