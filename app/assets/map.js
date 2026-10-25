@@ -470,6 +470,10 @@
   const toScreen = (i) => [screenX(i), screenY(i)];
 
   const pointRadius = (scale) => Math.max(1.5, Math.min(4, scale * 0.08));
+  // With every point drawn there is no thinning to make room, so each is a
+  // pixel or so until zoomed well in: at "fit" a full catalogue at the
+  // normal size is one overlapping smear.
+  const everyDotRadius = (scale) => Math.max(0.5, Math.min(2, scale * 0.012));
 
   // Grouping, kept a night sky. The screen is cut into BIN-pixel bins, and a
   // bin crowded enough that its stars would cover COVERAGE of it is thinned
@@ -709,7 +713,8 @@
 
     if (grid && n > 0) {
       const { side: gside, start, order } = grid;
-      const k = stampFor(pointRadius(view.scale) * dpr, dim ? 0.18 : 0.8);
+      const radius = everyDot ? everyDotRadius(view.scale) : pointRadius(view.scale);
+      const k = stampFor(radius * dpr, dim ? 0.18 : 0.8);
       const { side, cov, rowFrom, rowTo, off } = k;
 
       // Layout-space extent of the buffer, widened by one stamp so a point
