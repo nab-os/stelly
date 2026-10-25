@@ -23,6 +23,7 @@ use stelly_core::db::Catalog;
 use stelly_core::engine::Engine;
 use stelly_core::map;
 use stelly_core::paths::Constraints;
+use stelly_core::vectors::{quantise, Key, VectorBlock, Vectors, VectorsHead};
 
 /// How long a graph path may take before the wider corridor is given up on
 /// for the even path. Most get through the first corridor in tens of
@@ -54,6 +55,10 @@ struct Loaded {
     /// background after the load. The words never change while the server
     /// runs, so the corpus is all it depends on.
     baseline: OnceLock<Vec<(f32, f32)>>,
+    /// `/api/space/vectors`, once an explorer has asked, for the stamp it was
+    /// built at. Only stelly-explorer asks, so it is built then rather than
+    /// in `derive`, which every hidden artist waits on.
+    vectors: Mutex<Option<Arc<Prepared>>>,
 }
 
 /// The words a track can be described with, and their CLAP text embeddings,
@@ -151,6 +156,7 @@ impl SpaceService {
             derived: RwLock::new(Arc::new(derived)),
             blocking: Mutex::new(()),
             baseline: OnceLock::new(),
+            vectors: Mutex::new(None),
         };
         let loaded = Arc::new(loaded);
         // Under the lock `set_vocabulary` reads the load through, so
@@ -223,6 +229,29 @@ impl SpaceService {
             in_space: derived.in_space,
             on_map: derived.on_map,
         }
+    }
+
+    /// Every visible track with its row of the space, see `stelly_core::vectors`.
+    /// Built under the lock, so explorers asking at once wait for one build
+    /// rather than each making their own.
+    pub fn vectors(&self) -> Option<Arc<Prepared>> {
+        let loaded = self.loaded()?;
+        let stamp = loaded.derived().index.stamp.clone();
+        let tag = stelly_core::api::space_tag(&stamp, "vectors");
+        let mut slot = loaded.vectors.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(body) = slot.as_ref().filter(|body| body.tag == tag) {
+            return Some(body.clone());
+        }
+        // Without them every track is drawn keyless, which is no reason to
+        // send nothing.
+        let keys = read_keys(&self.db_path).unwrap_or_else(|err| {
+            eprintln!("vectors: reading the keys failed: {err:#}");
+            HashMap::new()
+        });
+        let vectors = vectors(&loaded.engine, &keys, &stamp);
+        let body = Arc::new(Prepared::new(&stamp, "vectors", "application/octet-stream", vectors.encode()));
+        *slot = Some(body.clone());
+        Some(body)
     }
 
     pub fn derived(&self) -> Option<Arc<Derived>> {
@@ -432,6 +461,82 @@ fn derive(catalog: &Catalog, built_at: &str) -> Derived {
         in_space,
         on_map,
     }
+}
+
+/// Each analysed track's key and how sure the analyser was of it, from what
+/// `analyse` stored. The space keeps the key only as a direction on the
+/// circle of fifths, normalised past reading back.
+fn read_keys(db_path: &std::path::Path) -> Result<HashMap<i64, (u8, u8)>> {
+    use diesel::prelude::*;
+    use stelly_core::schema::features;
+    let mut conn = crate::db::connect(db_path, Duration::from_secs(5))?;
+    let rows: Vec<(i64, Option<String>)> = features::table
+        .filter(features::descriptors_json.is_not_null())
+        .select((features::track_id, features::descriptors_json))
+        .load(&mut conn)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, json)| {
+            let descriptors: serde_json::Value = serde_json::from_str(&json?).ok()?;
+            let key = Key::parse(descriptors.get("key")?.as_str()?, descriptors.get("scale").and_then(|v| v.as_str()))?;
+            let strength = descriptors.get("key_strength").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            Some((id, (Key::encode(Some(key)), (strength.clamp(0.0, 1.0) * 255.0).round() as u8)))
+        })
+        .collect())
+}
+
+/// The visible tracks, in catalogue order, which is the space's row order.
+fn vectors(engine: &Engine, keys: &HashMap<i64, (u8, u8)>, stamp: &str) -> Vectors {
+    let catalog = engine.catalog();
+    let space = &engine.space;
+    let rows: Vec<usize> = catalog.visible().collect();
+    let dims = space.manifest.n_dims;
+
+    let mut genres: Vec<String> = Vec::new();
+    let mut genre_of: HashMap<&str, u16> = HashMap::new();
+    let mut v = Vectors {
+        head: VectorsHead {
+            stamp: stamp.to_string(),
+            n: rows.len(),
+            dims,
+            blocks: space
+                .manifest
+                .blocks
+                .iter()
+                .map(|b| VectorBlock {
+                    name: b.name.clone(),
+                    start: b.start,
+                    end: b.end,
+                    columns: b.columns.clone(),
+                    default_weight: b.default_weight,
+                })
+                .collect(),
+            genres: Vec::new(),
+        },
+        rows: Vec::with_capacity(rows.len() * dims),
+        ..Vectors::default()
+    };
+    for &i in &rows {
+        let track = catalog.get(i);
+        v.ids.push(track.track_id);
+        v.xy.push([track.x.unwrap_or(f32::NAN), track.y.unwrap_or(f32::NAN)]);
+        let genre = *genre_of.entry(track.genre.as_str()).or_insert_with(|| {
+            genres.push(track.genre.clone());
+            (genres.len() - 1) as u16
+        });
+        v.genre.push(genre);
+        v.artist.push(track.artist_id);
+        v.rows.extend(space.row(i).iter().map(|x| quantise(*x)));
+        v.bpm.push(track.bpm.unwrap_or(f32::NAN));
+        let (key, strength) = keys.get(&track.track_id).copied().unwrap_or((Key::NONE, 0));
+        v.key.push(key);
+        v.key_strength.push(strength);
+        v.titles.push(track.title.clone());
+        v.artists.push(track.artist.clone());
+        v.albums.push(track.album.clone());
+    }
+    v.head.genres = genres;
+    v
 }
 
 /// The albums and artists behind the tracks matching every term somewhere in
