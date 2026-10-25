@@ -128,6 +128,7 @@ pub fn router(state: AppState) -> Router {
                 .route("/api/space/points", get(space_points))
                 .route("/api/space/points/meta", get(space_points_meta))
                 .route("/api/space/vectors", get(space_vectors))
+                .route("/api/mix/phrases", get(mix_phrases))
                 .with_state(state),
         )
 }
@@ -708,6 +709,14 @@ async fn space_points(State(state): State<AppState>, _: PlayAuth, headers: Heade
 /// build the first time after a change, from then on what is held.
 async fn space_vectors(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
     let body = on_space(&state, |space| space.vectors()).await?;
+    Ok(prepared(&headers, &body))
+}
+
+/// Each mix-analysed track's phrases as points of the space, for
+/// stelly-explorer to draw a track as the path its phrases take.
+async fn mix_phrases(State(state): State<AppState>, _: PlayAuth, headers: HeaderMap) -> Result<Response, Failure> {
+    let mix = state.hub.mix().mix().await?;
+    let body = on_space(&state, move |space| space.phrases(&mix)).await?;
     Ok(prepared(&headers, &body))
 }
 
