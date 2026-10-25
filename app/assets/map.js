@@ -55,7 +55,7 @@
   const cloud = {
     canvas: null, ctx: null, img: null, bgRow: null,
     w: 0, h: 0, offX: 0, offY: 0,
-    scale: 0, dpr: 0, dim: false, valid: false,
+    scale: 0, dpr: 0, dim: false, everyDot: false, valid: false,
   };
 
   // Groups standing in for dense patches of points, rebuilt with the cloud;
@@ -697,6 +697,8 @@
     for (let y = 0; y < ch; y++) d.set(cloud.bgRow, y * rowBytes);
 
     const dim = route.length > 0;
+    // Set by Rust from the map's "every dot" chip: no thinning, no groups.
+    const everyDot = window.stellyEveryDot === true;
     const S = view.scale * dpr;
     const offX = view.offsetX * dpr + mx;
     const offY = view.offsetY * dpr + my;
@@ -819,7 +821,7 @@
         const count = to - from;
         if (count === 0) continue;
         const crowding = crowd[b] / least;
-        if (crowding < 1 || count < least) {
+        if (everyDot || crowding < 1 || count < least) {
           for (let q = from; q < to; q++) stampPoint(binOrder[q]);
           continue;
         }
@@ -866,6 +868,7 @@
     cloud.scale = view.scale;
     cloud.dpr = dpr;
     cloud.dim = dim;
+    cloud.everyDot = everyDot;
     cloud.valid = true;
     builtAt = performance.now();
 
@@ -898,6 +901,7 @@
     if (!cloud.valid) return true;
     if (cloud.dpr !== ratio()) return true;
     if (cloud.dim !== (route.length > 0)) return true;
+    if (cloud.everyDot !== (window.stellyEveryDot === true)) return true;
     if (cloud.scale !== view.scale) return true;
     return !cloudCovers();
   }
@@ -1543,6 +1547,13 @@
   };
 
   // Rust calls this when a path is built. Ids only, tiny payload.
+  // Rust has set `window.stellyEveryDot`. Rebuilt on the next frame rather
+  // than once the map is idle, it is a click on the map itself.
+  window.stellySetEveryDot = () => {
+    cloud.valid = false;
+    schedule();
+  };
+
   window.stellySetRoute = (trackIds) => {
     routeIds = trackIds;
     route = trackIds.map((id) => byId.get(id)).filter((i) => i !== undefined);
