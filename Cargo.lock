@@ -5981,7 +5981,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stelly"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -6019,7 +6019,7 @@ dependencies = [
 
 [[package]]
 name = "stelly-core"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -6066,7 +6066,7 @@ dependencies = [
 
 [[package]]
 name = "stelly-server"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "anyhow",
  "argh",
