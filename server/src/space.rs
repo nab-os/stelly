@@ -23,7 +23,9 @@ use stelly_core::db::Catalog;
 use stelly_core::engine::Engine;
 use stelly_core::map;
 use stelly_core::paths::Constraints;
+use stelly_core::phrases::{self, Phrases, PhrasesHead};
 use stelly_core::vectors::{quantise, Key, VectorBlock, Vectors, VectorsHead};
+use stelly_mix::mix::Mix;
 
 /// How long a graph path may take before the wider corridor is given up on
 /// for the even path. Most get through the first corridor in tens of
@@ -59,6 +61,9 @@ struct Loaded {
     /// built at. Only stelly-explorer asks, so it is built then rather than
     /// in `derive`, which every hidden artist waits on.
     vectors: Mutex<Option<Arc<Prepared>>>,
+    /// `/api/mix/phrases`, once an explorer has asked, for the stamp and mix
+    /// library it was built from.
+    phrases: Mutex<Option<Arc<Prepared>>>,
 }
 
 /// The words a track can be described with, and their CLAP text embeddings,
@@ -157,6 +162,7 @@ impl SpaceService {
             blocking: Mutex::new(()),
             baseline: OnceLock::new(),
             vectors: Mutex::new(None),
+            phrases: Mutex::new(None),
         };
         let loaded = Arc::new(loaded);
         // Under the lock `set_vocabulary` reads the load through, so
@@ -250,6 +256,34 @@ impl SpaceService {
         });
         let vectors = vectors(&loaded.engine, &keys, &stamp);
         let body = Arc::new(Prepared::new(&stamp, "vectors", "application/octet-stream", vectors.encode()));
+        *slot = Some(body.clone());
+        Some(body)
+    }
+
+    /// Every mix-analysed track of the space with its phrases, see
+    /// `stelly_core::phrases`. Built when first asked after the space or the
+    /// mix library changed, under the lock, so explorers asking at once wait
+    /// for one build. `None` with no space, or no semantic block to put the
+    /// phrases in.
+    pub fn phrases(&self, mix: &Arc<Mix>) -> Option<Arc<Prepared>> {
+        let loaded = self.loaded()?;
+        let stamp = loaded.derived().index.stamp.clone();
+        // The mix library is replaced whole when it changes: where this one
+        // sits, and how many it holds, say which it is.
+        let name = format!("phrases-{:x}-{}", Arc::as_ptr(mix) as usize, mix.len());
+        let tag = stelly_core::api::space_tag(&stamp, &name);
+        let mut slot = loaded.phrases.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(body) = slot.as_ref().filter(|body| body.tag == tag) {
+            return Some(body.clone());
+        }
+        let built = match phrase_rows(&loaded.engine, mix, &self.data_dir, &stamp) {
+            Ok(built) => built,
+            Err(err) => {
+                eprintln!("phrases: {err:#}");
+                return None;
+            }
+        };
+        let body = Arc::new(Prepared::new(&stamp, &name, "application/octet-stream", built.encode()));
         *slot = Some(body.clone());
         Some(body)
     }
@@ -485,6 +519,58 @@ fn read_keys(db_path: &std::path::Path) -> Result<HashMap<i64, (u8, u8)>> {
         .collect())
 }
 
+/// Each visible track the mix library holds, by id, with its phrases' starts
+/// and their sounds put into the semantic block. Hundreds of thousands of
+/// phrases through a 512-wide PCA: shared over the cores.
+fn phrase_rows(engine: &Engine, mix: &Mix, data_dir: &std::path::Path, stamp: &str) -> Result<Phrases> {
+    use anyhow::Context;
+    let space = &engine.space;
+    let block = space.manifest.blocks.iter().find(|b| b.name == "semantic").context("the space has no semantic block")?;
+    let (mean, components) = space.semantic_pca(data_dir)?;
+    let dims = block.end - block.start;
+    anyhow::ensure!(components.len() == dims * mean.len(), "semantic_pca.bin does not fit the semantic block, rebuild the space");
+
+    let catalog = engine.catalog();
+    let visible: HashSet<i64> = catalog.visible().map(|i| catalog.get(i).track_id).collect();
+    let mut ids: Vec<i64> = mix.summaries().into_iter().map(|s| s.id).filter(|id| visible.contains(id)).collect();
+    ids.sort_unstable();
+
+    let one = |id: i64| -> Option<(i64, Vec<f32>, Vec<i8>)> {
+        let track = mix.track(id)?;
+        let mut starts = Vec::with_capacity(track.segments.len());
+        let mut rows = Vec::with_capacity(track.segments.len() * dims);
+        for segment in track.segments.iter().take(u16::MAX as usize) {
+            if segment.embedding.len() != mean.len() {
+                continue;
+            }
+            starts.push(segment.start as f32);
+            let row = phrases::semantic(&segment.embedding, &mean, &components, &block.mean, &block.std);
+            rows.extend(row.iter().map(|x| quantise(*x)));
+        }
+        (!starts.is_empty()).then_some((id, starts, rows))
+    };
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+    let chunk = ids.len().div_ceil(threads).max(1);
+    let built: Vec<(i64, Vec<f32>, Vec<i8>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ids.chunks(chunk).map(|part| scope.spawn(move || part.iter().filter_map(|id| one(*id)).collect::<Vec<_>>())).collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+
+    let mut out = Phrases {
+        head: PhrasesHead { stamp: stamp.to_string(), block: block.name.clone(), start: block.start, dims, ..Default::default() },
+        ..Phrases::default()
+    };
+    for (id, starts, rows) in built {
+        out.ids.push(id);
+        out.counts.push(starts.len() as u16);
+        out.starts.extend(starts);
+        out.rows.extend(rows);
+    }
+    out.head.tracks = out.ids.len();
+    out.head.phrases = out.starts.len();
+    Ok(out)
+}
+
 /// The visible tracks, in catalogue order, which is the space's row order.
 fn vectors(engine: &Engine, keys: &HashMap<i64, (u8, u8)>, stamp: &str) -> Vectors {
     let catalog = engine.catalog();
@@ -603,6 +689,32 @@ fn groups(haystacks: &[Haystack], catalog: &Catalog, terms: &[String]) -> (Vec<S
 #[cfg(test)]
 mod tests {
     use super::Haystack;
+
+    /// A phrase that sounds exactly like its track's excerpt is the track's
+    /// own semantic block: the phrases go through what `build-space` did.
+    /// Over a built space, `STELLY_DATA_DIR`, the demo corpus's will do.
+    #[test]
+    #[ignore = "needs a built space"]
+    fn a_phrase_like_its_track_is_its_track_s_semantic_block() {
+        let data_dir = std::path::PathBuf::from(std::env::var("STELLY_DATA_DIR").expect("STELLY_DATA_DIR"));
+        let engine = stelly_core::engine::Engine::load(&data_dir, &data_dir.join("stelly.db")).unwrap();
+        let space = &engine.space;
+        let block = space.manifest.blocks.iter().find(|b| b.name == "semantic").unwrap();
+        let (mean, components) = space.semantic_pca(&data_dir).unwrap();
+        let catalog = engine.catalog();
+        let clap = catalog.clap.as_ref().expect("CLAP embeddings");
+        let d = catalog.clap_dims;
+        let mut worst = 0f32;
+        for i in 0..catalog.len() {
+            let row = stelly_core::phrases::semantic(&clap[i * d..(i + 1) * d], &mean, &components, &block.mean, &block.std);
+            let stored = &space.row(i)[block.start..block.end];
+            for (a, b) in row.iter().zip(stored) {
+                worst = worst.max((a - b).abs());
+            }
+        }
+        assert!(catalog.len() > 0);
+        assert!(worst < 1e-3, "off by {worst}");
+    }
 
     impl Haystack {
         fn contains(&self, term: &str) -> bool {

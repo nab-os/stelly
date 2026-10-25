@@ -6,6 +6,7 @@ pub mod api;
 pub mod catalogue;
 pub mod logbuffer;
 pub mod recording;
+pub mod phrases;
 pub mod session;
 pub mod vectors;
 
