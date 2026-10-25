@@ -299,7 +299,11 @@ fn MapCard() -> Element {
             // Peeked: the card is for whatever is selected when it is
             // clicked, and must not be drawn again when that changes.
             onclick: move |_| {
-                if let Some(id) = *selected.peek() {
+                // Copied out first: in an `if let` the peek's guard lives to
+                // the end of the block, and `open_track` sets the selection,
+                // which panics on a signal still borrowed.
+                let id = *selected.peek();
+                if let Some(id) = id {
                     map.close();
                     crate::ui::open_track(library, selected, id);
                 }
