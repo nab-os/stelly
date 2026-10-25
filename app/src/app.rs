@@ -653,6 +653,12 @@ fn Shell() -> Element {
     });
     use_context_provider(|| SpaceReach(space_reach));
 
+    // Renders applied while the window is off screen, without which the
+    // session, the media keys and the notification wait for it to come back.
+    use_hook(|| {
+        document::eval(include_str!("../assets/offscreen.js"));
+    });
+
     crate::ui::use_transport(player);
     crate::ui::use_session(player);
 

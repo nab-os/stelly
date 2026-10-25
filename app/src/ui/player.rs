@@ -1336,13 +1336,15 @@ pub fn use_transport(player: Player) {
                 }
                 // A mouse's side buttons and a keyboard's media keys both
                 // arrive as `previoustrack`/`nexttrack` MediaSession actions,
-                // not as clicks on the transport bar, see `player.js`.
-                // They mean "change track", which only the queue knows how
-                // to do, so this is the one message type that does not just
+                // not as clicks on the transport bar, see `player.js`, and
+                // the system's seeks as `seekto`. They mean "change track" or
+                // "move the session", which only the session knows how to
+                // do, so this is the one message type that does not just
                 // mirror the `<audio>` element's own state.
                 Some("transport") => match message.get("action").and_then(|v| v.as_str()) {
                     Some("previous") => step(player, -1),
                     Some("next") => step(player, 1),
+                    Some("seek") => seek(player, number("position")),
                     _ => {}
                 },
                 _ => {}
