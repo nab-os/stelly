@@ -1025,6 +1025,16 @@ fn Shell() -> Element {
 
     let map = MapView { map_open, map_route };
 
+    // Left where map.js reads it on every rebuild of the cloud, so it holds
+    // whether the points are read before this runs or after.
+    let mut every_dot = use_signal(|| crate::ui::prefs::Prefs::load().every_dot);
+    use_effect(move || {
+        let on = every_dot();
+        document::eval(&format!(
+            "window.stellyEveryDot = {on}; window.stellySetEveryDot && window.stellySetEveryDot();"
+        ));
+    });
+
     // Once, after the first render: the window has the app in it now.
     use_effect(|| crate::timings::mark("shell-rendered", ""));
 
@@ -1055,6 +1065,20 @@ fn Shell() -> Element {
                                 onclick: move |_| map_route.set(false),
                                 "showing a route ×"
                             }
+                        }
+                        button {
+                            class: if every_dot() { "chip active map-every-dot" } else { "chip map-every-dot" },
+                            title: if every_dot() {
+                                "group crowded patches again"
+                            } else {
+                                "draw every track, without thinning crowded patches"
+                            },
+                            onclick: move |_| {
+                                let on = !every_dot();
+                                every_dot.set(on);
+                                crate::ui::prefs::update(|prefs| prefs.every_dot = on);
+                            },
+                            "every dot"
                         }
                     }
 

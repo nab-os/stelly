@@ -33,6 +33,9 @@ pub struct Prefs {
     /// The tour has been through once, finished or skipped. Missing from a
     /// file written before there was a tour, and so shown once to everyone.
     pub toured: bool,
+    /// The map draws every point, rather than thinning crowded patches into
+    /// glowing groups.
+    pub every_dot: bool,
 }
 
 impl Prefs {
