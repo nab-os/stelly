@@ -72,6 +72,10 @@
   // stars a crowded patch keeps. Fixed so the sky does not twinkle between
   // rebuilds, and so zooming in only ever adds stars to those already shown.
   let rank = new Float32Array(0);
+  // Where each genre gathers, named on the map; see `findRegions`. Found once
+  // per load of the points, in layout space, so a pan or a zoom only places
+  // them again.
+  let regions = [];
 
   function rankOf(id) {
     let h = Math.imul((id % 4294967296) | 0, 0x9e3779b1) ^ ((id / 4294967296) | 0);
@@ -146,7 +150,184 @@
     rank = new Float32Array(n);
     for (let i = 0; i < n; i++) rank[i] = rankOf(ids[i]);
     buildGrid();
+    findRegions();
     cloud.valid = false;
+  }
+
+  // ---------------------------------------------------------------- regions
+  //
+  // A genre is named where it is densest and where it is most of what is
+  // there, which can be more than one place: the layout scatters a genre in
+  // islands as often as it gathers it in one. The layout is cut into a coarse
+  // grid, each genre's counts are summed over 3x3 cells, and a cell that is a
+  // local peak of that, held mostly by the genre, is a region; the strongest
+  // keeps its place and weaker peaks too close to it are dropped. The name
+  // sits on the mean of the genre's points around the peak, not the cell's
+  // corner.
+
+  function findRegions() {
+    regions = [];
+    const names = meta.genres || [];
+    const ng = names.length;
+    if (n === 0 || ng === 0) return;
+
+    const S = 40;
+    // Few enough that a stray handful is never named, scaled with the corpus
+    // so a big one is not covered in names of specks.
+    const least = Math.max(10, n / 2000);
+    // How much of a window the genre has to hold to be named there.
+    const share = 0.4;
+    // How far apart two regions of one genre have to be, in cells.
+    const apart = 5;
+    // How much denser than the genre is on average a region has to be: its
+    // strongest a little, any other clearly. A genre spread evenly over the
+    // map gathers nowhere and is not named; one that fills half of it still
+    // is, once.
+    const first = 1.5;
+    const more = 3;
+
+    const b = meta.bounds;
+    const cellW = (Math.max(b.max_x - b.min_x, 1e-6) * 1.0001) / S;
+    const cellH = (Math.max(b.max_y - b.min_y, 1e-6) * 1.0001) / S;
+    const cellX = (x) => Math.min(S - 1, Math.max(0, ((x - b.min_x) / cellW) | 0));
+    const cellY = (y) => Math.min(S - 1, Math.max(0, ((y - b.min_y) / cellH) | 0));
+
+    // A genre's cells are contiguous, `count[g * cells + c]`, so summing one
+    // genre's windows walks one slice.
+    const cells = S * S;
+    const count = new Float32Array(cells * ng);
+    const total = new Float32Array(cells);
+    const size = new Float32Array(ng);
+    for (let i = 0; i < n; i++) {
+      const c = cellY(xy[i * 2 + 1]) * S + cellX(xy[i * 2]);
+      count[genre[i] * cells + c]++;
+      total[c]++;
+      size[genre[i]]++;
+    }
+    let occupied = 0;
+    for (let c = 0; c < cells; c++) if (total[c] > 0) occupied++;
+
+    // Sums over each cell's 3x3 window, as a row pass then a column pass.
+    const across = new Float32Array(cells);
+    const box = (from, at, out) => {
+      for (let y = 0; y < S; y++) {
+        for (let x = 0; x < S; x++) {
+          const c = at + y * S + x;
+          across[y * S + x] = from[c] + (x > 0 ? from[c - 1] : 0) + (x < S - 1 ? from[c + 1] : 0);
+        }
+      }
+      for (let c = 0; c < cells; c++) {
+        out[c] = across[c] + (c >= S ? across[c - S] : 0) + (c < cells - S ? across[c + S] : 0);
+      }
+    };
+    const around = new Float32Array(cells);
+    box(total, 0, around);
+
+    const peaks = [];
+    const mine = new Float32Array(cells);
+    for (let g = 0; g < ng; g++) {
+      // Too few to reach `least` anywhere: most genres, on a big catalogue.
+      if (!names[g] || size[g] < least) continue;
+      box(count, g * cells, mine);
+      const candidates = [];
+      for (let c = 0; c < cells; c++) {
+        const v = mine[c];
+        if (v < least || v < around[c] * share) continue;
+        const cx = c % S, cy = (c / S) | 0;
+        let top = true;
+        for (let y = Math.max(0, cy - 2); y <= Math.min(S - 1, cy + 2) && top; y++) {
+          for (let x = Math.max(0, cx - 2); x <= Math.min(S - 1, cx + 2); x++) {
+            const k = y * S + x;
+            // Ties go to the lower cell, so a plateau is named once.
+            if (mine[k] > v || (mine[k] === v && k < c)) { top = false; break; }
+          }
+        }
+        if (top) candidates.push({ c, cx, cy, weight: v });
+      }
+      candidates.sort((p, q) => q.weight - p.weight);
+      // What a 3x3 window would hold were the genre spread over every cell
+      // that has points.
+      const even = (9 * size[g]) / occupied;
+      const kept = [];
+      for (const p of candidates) {
+        if (p.weight < even * (kept.length === 0 ? first : more)) continue;
+        if (kept.every((q) => Math.max(Math.abs(p.cx - q.cx), Math.abs(p.cy - q.cy)) >= apart)) kept.push(p);
+      }
+      for (const p of kept) peaks.push({ genre: g, cx: p.cx, cy: p.cy, weight: p.weight, sx: 0, sy: 0, m: 0 });
+    }
+    if (peaks.length === 0) return;
+
+    const byGenre = new Map();
+    for (const p of peaks) {
+      if (!byGenre.has(p.genre)) byGenre.set(p.genre, []);
+      byGenre.get(p.genre).push(p);
+    }
+    for (let i = 0; i < n; i++) {
+      const list = byGenre.get(genre[i]);
+      if (!list) continue;
+      const x = xy[i * 2], y = xy[i * 2 + 1];
+      const cx = cellX(x), cy = cellY(y);
+      for (const p of list) {
+        if (Math.abs(cx - p.cx) <= 1 && Math.abs(cy - p.cy) <= 1) {
+          p.sx += x;
+          p.sy += y;
+          p.m++;
+        }
+      }
+    }
+    regions = peaks
+      .filter((p) => p.m > 0)
+      .map((p) => ({ x: p.sx / p.m, y: p.sy / p.m, genre: p.genre, weight: p.weight, name: names[p.genre], width: 0 }))
+      .sort((p, q) => q.weight - p.weight);
+  }
+
+  /// Name the regions on screen, strongest first, each only where it does not
+  /// run into one already named, so the overview names the big genres and
+  /// zooming in makes room for the rest. Tens of words, so the canvas API is
+  /// fine here, every frame.
+  function drawRegions(dim) {
+    if (regions.length === 0) return;
+    if (!background) readBackground();
+    ctx.save();
+    ctx.font = "600 12px system-ui, -apple-system, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.globalAlpha = dim ? 0.45 : 1;
+    const halo = `rgb(${background[0]},${background[1]},${background[2]})`;
+    const dot = 3;
+    const gap = 6;
+    const taken = [];
+    for (const r of regions) {
+      if (taken.length >= 40) break;
+      if (!r.width) r.width = ctx.measureText(r.name).width;
+      const x = r.x * view.scale + view.offsetX;
+      const y = r.y * view.scale + view.offsetY;
+      const w = dot * 2 + gap + r.width;
+      const x0 = x - w / 2, x1 = x + w / 2, y0 = y - 9, y1 = y + 9;
+      if (x0 < 4 || y0 < 4 || x1 > width - 4 || y1 > height - 4) continue;
+      if (taken.some((t) => x0 < t.x1 + 8 && x1 > t.x0 - 8 && y0 < t.y1 + 4 && y1 > t.y0 - 4)) continue;
+      // Two islands of one genre that a zoom out has run together are one
+      // place on screen, and named once.
+      if (taken.some((t) => t.genre === r.genre && Math.hypot(t.x - x, t.y - y) < 160)) continue;
+      taken.push({ x0, x1, y0, y1, x, y, genre: r.genre });
+
+      ctx.beginPath();
+      ctx.arc(x0 + dot, y, dot + 2, 0, TAU);
+      ctx.fillStyle = halo;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x0 + dot, y, dot, 0, TAU);
+      ctx.fillStyle = PALETTE[r.genre % PALETTE.length];
+      ctx.fill();
+
+      const tx = x0 + dot * 2 + gap;
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = halo;
+      ctx.strokeText(r.name, tx, y);
+      ctx.fillStyle = "#e5e7ef";
+      ctx.fillText(r.name, tx, y);
+    }
+    ctx.restore();
   }
 
   // ------------------------------------------------------------------- grid
@@ -797,6 +978,9 @@
     if (cloudStale()) rebuildWhenIdle();
 
     const dim = route.length > 0;
+
+    // Under the route and the markers, which are about one track and win.
+    drawRegions(dim);
 
     // The route's own points stay at full strength while the rest is dimmed.
     // A handful of points, so the normal canvas API is fine here.
