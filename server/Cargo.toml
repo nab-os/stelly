@@ -14,7 +14,7 @@ stelly-core = { workspace = true, features = ["engine"] }
 anyhow.workspace = true
 # Mixing: a whole track's beats, bars, phrases and phrase embeddings, and the
 # ways from one track into another.
-stelly-mix = { git = "https://github.com/nab-os/stelly-mix", tag = "v0.4.0" }
+stelly-mix = { git = "https://github.com/nab-os/stelly-mix", tag = "v0.6.0" }
 # The music provider, through the protocol every provider answers.
 stelly-provider = { workspace = true, features = ["async"] }
 argh = "0.1.19"
