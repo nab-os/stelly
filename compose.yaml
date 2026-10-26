@@ -101,7 +101,7 @@ services:
   # sign-in is browser.json in its volume, from `stelly-ytmusic login` on a
   # machine with a browser, copied in as above.
   ytmusic:
-    image: stellymusic/stelly-ytmusic:v0.3.0
+    image: stellymusic/stelly-ytmusic:v0.3.1
     environment:
       PUBLIC_URL: ${YTMUSIC_PUBLIC_URL:?set YTMUSIC_PUBLIC_URL in .env, how devices reach port 7712}
     env_file:
