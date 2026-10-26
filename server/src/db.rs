@@ -54,7 +54,8 @@ struct Found {
 /// The catalogue from before providers, which kept each item as Qobuz
 /// described it in `qobuz_json`: that is the provider's own shape, so it
 /// becomes `legacy_json`, for `import` to convert, beside an empty
-/// `meta_json`. Albums gain their cover.
+/// `meta_json`. Albums gain their cover, and mix analyses their drops'
+/// version.
 fn migrate(conn: &mut SqliteConnection) -> Result<()> {
     if has_column(conn, "features", "essentia_json")? {
         conn.batch_execute("DROP TABLE features")
@@ -71,6 +72,10 @@ fn migrate(conn: &mut SqliteConnection) -> Result<()> {
     }
     if has_column(conn, "albums", "title")? && !has_column(conn, "albums", "image")? {
         conn.batch_execute("ALTER TABLE albums ADD COLUMN image TEXT")?;
+    }
+    // Mix analyses from before drops: none of them has any.
+    if has_column(conn, "mix", "version")? && !has_column(conn, "mix", "drops")? {
+        conn.batch_execute("ALTER TABLE mix ADD COLUMN drops INTEGER")?;
     }
     Ok(())
 }
@@ -485,6 +490,22 @@ mod tests {
     use crate::provider::{RemoteAlbum, RemoteTrack};
     use crate::{crawl, stages};
     use std::path::PathBuf;
+
+    #[test]
+    fn mix_analyses_from_before_drops_gain_their_column() {
+        let dir = scratch("mix-drops");
+        let mut conn = connect(&dir.join("stelly.db"), Duration::from_secs(1)).unwrap();
+        conn.batch_execute(
+            "CREATE TABLE mix (track_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, entry_json TEXT NOT NULL, analysed_at TEXT NOT NULL);
+             INSERT INTO mix VALUES (1, 1, '{}', '');",
+        )
+        .unwrap();
+        ensure_schema(&mut conn).unwrap();
+        assert!(has_column(&mut conn, "mix", "drops").unwrap());
+        // Kept, with none.
+        let found = diesel::sql_query("SELECT COUNT(*) AS n FROM mix WHERE drops IS NULL").get_result::<Found>(&mut conn).unwrap();
+        assert_eq!(found.n, 1);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("stelly-db-{name}-{}", std::process::id()));

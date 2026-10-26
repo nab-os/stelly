@@ -110,7 +110,11 @@ CREATE TABLE IF NOT EXISTS mix (
     -- stelly_mix::library::VERSION; rows with another are redone.
     version      INTEGER NOT NULL,
     entry_json   TEXT NOT NULL,
-    analysed_at  TEXT NOT NULL
+    analysed_at  TEXT NOT NULL,
+    -- stelly_mix::drops::VERSION the entry's drops were found by, null when
+    -- it has none; rows with another have them found again, from the audio
+    -- and the beats already here, nothing else redone.
+    drops        INTEGER
 );
 
 -- Tracks the mix analysis failed on, apart from `failures`, which stops

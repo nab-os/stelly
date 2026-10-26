@@ -204,8 +204,9 @@ waiting its turn behind a backlog.
 
 Beside the space's 90s excerpts, the server holds what
 [stelly-mix](https://github.com/nab-os/stelly-mix) makes of whole tracks:
-their beats, bars, eight-bar phrases and each phrase's CLAP embedding, which
-is what mixing from one track into another is chosen and rendered from. A
+their beats, bars, eight-bar phrases, drops and each phrase's CLAP
+embedding, which is what mixing from one track into another is chosen and
+rendered from. A
 whole track is ten times an excerpt's download and CPU, so it is analysed on
 what is asked, never the whole catalogue:
 
@@ -225,7 +226,10 @@ An admin device can start the same with `POST /api/mix/analyse`
 `stelly-mix server-analyse "artist-name/Lun"` sends it), follow it with
 `GET /api/mix/analyse` and stop it with `POST /api/mix/analyse/stop`. The
 whole track comes as MP3 320 through the gateway and is dropped once
-analysed; the analysis goes in the `mix` table.
+analysed; the analysis goes in the `mix` table. A track analysed before
+drops, or by an older way of finding them, counts as not done: selected,
+liked or played through, it is queued again, and only its drops are found,
+from the audio and the beats it has. A download each, no CLAP.
 
 Clients read it with `play` devices: `/api/mix/library`, `/api/mix/tracks`
 (several at once, for a client mirroring the library), `/api/mix/next/<id>`,

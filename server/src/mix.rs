@@ -33,6 +33,9 @@ use stelly_mix::source::{Item, Origin};
 
 /// What a stored row was made with; rows with another are redone.
 pub const VERSION: u32 = stelly_mix::library::VERSION;
+/// An analysis is current with drops found by this version too; one with
+/// none, or older ones, is queued again for them alone.
+const DROPS: u32 = stelly_mix::drops::VERSION;
 /// Neighbours of each seed, unless asked otherwise.
 pub const AROUND: usize = stelly_mix::api::AROUND;
 /// The most tracks a playlist brings in.
@@ -214,8 +217,8 @@ struct Pending {
     needs_features: bool,
 }
 
-/// Of `ids`, those with no current mix analysis, nor a failure unless
-/// `retry_failed`, in the order asked.
+/// Of `ids`, those with no current mix analysis, or no current drops in it,
+/// nor a failure unless `retry_failed`, in the order asked.
 fn pending(conn: &mut SqliteConnection, ids: &[i64], retry_failed: bool) -> Result<Vec<Pending>> {
     let mut out = Vec::new();
     for chunk in ids.chunks(500) {
@@ -225,7 +228,7 @@ fn pending(conn: &mut SqliteConnection, ids: &[i64], retry_failed: bool) -> Resu
             "SELECT {columns}
              FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id
              WHERE t.id IN ({list})
-               AND NOT EXISTS (SELECT 1 FROM mix m WHERE m.track_id = t.id AND m.version = {VERSION})
+               AND NOT EXISTS (SELECT 1 FROM mix m WHERE m.track_id = t.id AND m.version = {VERSION} AND m.drops = {DROPS})
                {failed}",
             columns = pending_columns(),
         );
@@ -453,14 +456,15 @@ fn stored(conn: &mut SqliteConnection, id: i64) -> Result<Option<Track>> {
 
 fn store(conn: &mut SqliteConnection, id: i64, track: &Track) -> Result<()> {
     diesel::sql_query(
-        "INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO mix (track_id, version, entry_json, analysed_at, drops) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(track_id) DO UPDATE SET version = excluded.version,
-           entry_json = excluded.entry_json, analysed_at = excluded.analysed_at",
+           entry_json = excluded.entry_json, analysed_at = excluded.analysed_at, drops = excluded.drops",
     )
     .bind::<BigInt, _>(id)
     .bind::<Integer, _>(VERSION as i32)
     .bind::<Text, _>(serde_json::to_string(track)?)
     .bind::<Text, _>(crate::db::utc_now())
+    .bind::<Nullable<Integer>, _>(track.analysis.drops.as_ref().map(|d| d.version as i32))
     .execute(conn)?;
     diesel::sql_query("DELETE FROM mix_failures WHERE track_id = ?").bind::<BigInt, _>(id).execute(conn)?;
     Ok(())
@@ -572,7 +576,7 @@ fn claim(conn: &mut SqliteConnection, n: usize, taken: &HashSet<i64>) -> Result<
     // Analysed some other way since, or gone from the catalogue.
     diesel::sql_query(format!(
         "DELETE FROM mix_queue
-         WHERE track_id IN (SELECT track_id FROM mix WHERE version = {VERSION})
+         WHERE track_id IN (SELECT track_id FROM mix WHERE version = {VERSION} AND drops = {DROPS})
             OR NOT EXISTS (SELECT 1 FROM tracks t WHERE t.id = mix_queue.track_id)"
     ))
     .execute(conn)?;
@@ -1076,13 +1080,13 @@ impl MixService {
                             Reason::Played if !taken.is_empty() => {}
                             Reason::Played => {
                                 taken.insert(queued.track.id);
-                                feed.push(Work::of(queued.track, reason));
+                                feed.push(Work::of(queued.track, reason, &mut conn)?);
                                 continue;
                             }
                             _ if urgent == 0 => again = true,
                             _ => {
                                 taken.insert(queued.track.id);
-                                feed.push(Work::of(queued.track, reason));
+                                feed.push(Work::of(queued.track, reason, &mut conn)?);
                                 continue;
                             }
                         }
@@ -1252,11 +1256,16 @@ struct Work {
     item: Item,
     needs_features: bool,
     reason: Reason,
+    /// Its analysis, when it has a current one and only its drops are
+    /// wanting: they are found from the audio and its beats, and nothing
+    /// else is redone.
+    analysed: Option<Track>,
 }
 
 impl Work {
-    fn of(p: Pending, reason: Reason) -> Self {
-        Work {
+    fn of(p: Pending, reason: Reason, conn: &mut SqliteConnection) -> Result<Self> {
+        let analysed = stored(conn, p.id)?;
+        Ok(Work {
             id: p.id,
             item: Item {
                 id: p.id.to_string(),
@@ -1266,7 +1275,8 @@ impl Work {
             },
             needs_features: p.needs_features,
             reason,
-        }
+            analysed,
+        })
     }
 }
 
@@ -1378,7 +1388,8 @@ fn start_workers(paths: &Paths, n: usize, feed: &Arc<Feed>, report: mpsc::Sender
                 if job.cancelled() {
                     break;
                 }
-                let Some(work) = feed.take() else { break };
+                let Some(mut work) = feed.take() else { break };
+                let analysed = work.analysed.take();
                 let name = format!("{} - {}", work.item.artist, work.item.title);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Outcome {
                     let (bytes, mime) = match runtime.block_on(download(&client, &http, work.id)) {
@@ -1392,9 +1403,17 @@ fn start_workers(paths: &Paths, n: usize, feed: &Arc<Feed>, report: mpsc::Sender
                         Ok(pcm) => pcm,
                         Err(err) => return Outcome::failed(format!("{err:#}")),
                     };
-                    let origin = Origin { source: source.clone(), item: work.item.clone() };
-                    let mix = stelly_mix::library::index_origin_pcm(&pcm, origin, &stelly_mix::Options::default(), &mut encoder)
-                        .map_err(|err| format!("{err:#}"));
+                    let mix = match analysed {
+                        Some(mut track) => {
+                            track.analysis.drops = Some(stelly_mix::drops::of(&pcm, &track.analysis));
+                            Ok(track)
+                        }
+                        None => {
+                            let origin = Origin { source: source.clone(), item: work.item.clone() };
+                            stelly_mix::library::index_origin_pcm(&pcm, origin, &stelly_mix::Options::default(), &mut encoder)
+                                .map_err(|err| format!("{err:#}"))
+                        }
+                    };
                     let features = work.needs_features.then(|| excerpt_features(&pcm, &mut encoder).map_err(|err| format!("{err:#}")));
                     Outcome { mix, features, unreachable: false }
                 }));
@@ -1437,7 +1456,8 @@ fn record(conn: &mut SqliteConnection, id: i64, name: &str, outcome: Outcome, jo
         Ok(track) => {
             store(conn, id, &track)?;
             let joined = if spaced { ", and its excerpt for the space" } else { "" };
-            Recorded { ok: true, line: format!("{name}: {} phrases{joined}", track.segments.len()), spaced }
+            let drops = track.analysis.drops.as_ref().map_or(0, |d| d.at.len());
+            Recorded { ok: true, line: format!("{name}: {} phrases, {drops} drops{joined}", track.segments.len()), spaced }
         }
         Err(error) => {
             record_failure(conn, id, &error)?;
@@ -1466,7 +1486,8 @@ pub fn run(paths: &Paths, ids: &[i64], options: &Options, job: &Job) -> Result<S
     let workers = if options.workers > 0 { options.workers } else { default_workers() }.min(todo.len());
     let unanalysed = todo.iter().filter(|p| p.needs_features).count();
     job.log(format!("mix-analysing {} tracks, {unanalysed} new to the space, {workers} workers", todo.len()));
-    let feed = Feed::new(todo.into_iter().map(|p| Work::of(p, Reason::Selection)).collect());
+    let work = todo.into_iter().map(|p| Work::of(p, Reason::Selection, &mut conn)).collect::<Result<Vec<_>>>()?;
+    let feed = Feed::new(work);
     feed.close();
     let (report, results) = mpsc::channel();
     let handles = start_workers(paths, workers, &feed, report, job)?;
@@ -1558,7 +1579,7 @@ mod tests {
         diesel::connection::SimpleConnection::batch_execute(
             conn,
             &format!(
-                "INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (1, {VERSION}, '{{}}', ''), (2, 0, '{{}}', '');
+                "INSERT INTO mix (track_id, version, entry_json, analysed_at, drops) VALUES (1, {VERSION}, '{{}}', '', {DROPS}), (2, 0, '{{}}', '', NULL);
                  INSERT INTO mix_failures (track_id, reason) VALUES (3, 'no audio');"
             ),
         )
@@ -1567,11 +1588,28 @@ mod tests {
         assert_eq!(enqueue(conn, &[1, 2, 3, 4, 5], Reason::Selection).unwrap(), [2, 4, 5]);
         diesel::sql_query("DELETE FROM tracks WHERE id = 5").execute(conn).unwrap();
         // And 4 analysed some other way since it was queued.
-        diesel::sql_query(format!("INSERT INTO mix (track_id, version, entry_json, analysed_at) VALUES (4, {VERSION}, '{{}}', '')"))
+        diesel::sql_query(format!("INSERT INTO mix (track_id, version, entry_json, analysed_at, drops) VALUES (4, {VERSION}, '{{}}', '', {DROPS})"))
             .execute(conn)
             .unwrap();
         assert_eq!(order(conn, &[]), [(2, Reason::Selection)]);
         assert_eq!(queued(conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn analysed_without_current_drops_is_queued_for_them() {
+        let conn = &mut database("drops");
+        diesel::connection::SimpleConnection::batch_execute(
+            conn,
+            &format!(
+                "INSERT INTO mix (track_id, version, entry_json, analysed_at, drops)
+                 VALUES (1, {VERSION}, '{{}}', '', {DROPS}), (2, {VERSION}, '{{}}', '', NULL), (3, {VERSION}, '{{}}', '', {old});",
+                old = DROPS - 1
+            ),
+        )
+        .unwrap();
+        // 1 has them; 2 has none, 3 older ones.
+        assert_eq!(enqueue(conn, &[1, 2, 3], Reason::Played).unwrap(), [2, 3]);
+        assert_eq!(order(conn, &[]), [(2, Reason::Played), (3, Reason::Played)]);
     }
 
     #[test]
