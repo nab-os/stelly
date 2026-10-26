@@ -4,7 +4,7 @@ resolver = "2"
 
 # One version for every crate, bumped here.
 [workspace.package]
-version = "2.4.1"
+version = "2.5.0"
 edition = "2021"
 
 # Versions only. Features that one crate needs stay in that crate's manifest,
