@@ -198,23 +198,44 @@ pub fn store(conn: &mut SqliteConnection, listen: &Listen) -> Result<()> {
     Ok(())
 }
 
+/// Tries a listen gets, a minute apart, while the database stays locked.
+const LISTEN_TRIES: u32 = 10;
+
 /// Store every listen the sessions end, as they end, off their locks; a
-/// track played through is queued for its mix analysis, behind the rest.
+/// track played through is queued for its mix analysis, behind the rest. A
+/// listen that finds the database locked is tried again, rather than lost.
 pub fn record(db_path: std::path::PathBuf, mut listens: tokio::sync::mpsc::UnboundedReceiver<Listen>, mix: Arc<MixService>) {
     tokio::spawn(async move {
         while let Some(listen) = listens.recv().await {
             let (db_path, mix) = (db_path.clone(), mix.clone());
-            let stored = tokio::task::spawn_blocking(move || {
-                store(&mut crate::db::open_for_write(&db_path)?, &listen)?;
-                if listen.played_through() {
-                    mix.enqueue(&[listen.track_id], Reason::Played)?;
+            tokio::spawn(async move {
+                // Stored once, whichever try the queueing takes.
+                let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                for tried in 1..=LISTEN_TRIES {
+                    let (db_path, mix, listen, done) = (db_path.clone(), mix.clone(), listen.clone(), done.clone());
+                    let stored = tokio::task::spawn_blocking(move || {
+                        use std::sync::atomic::Ordering;
+                        if !done.load(Ordering::SeqCst) {
+                            store(&mut crate::db::open_for_write(&db_path)?, &listen)?;
+                            done.store(true, Ordering::SeqCst);
+                        }
+                        if listen.played_through() {
+                            mix.enqueue(&[listen.track_id], Reason::Played)?;
+                        }
+                        anyhow::Ok(())
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|stored| stored);
+                    match stored {
+                        Ok(()) => return,
+                        Err(err) if tried < LISTEN_TRIES && format!("{err:#}").contains("locked") => {
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        }
+                        Err(err) => return eprintln!("a listen was not recorded: {err:#}"),
+                    }
                 }
-                anyhow::Ok(())
-            })
-            .await;
-            if let Ok(Err(err)) | Err(err) = stored.map_err(anyhow::Error::from) {
-                eprintln!("a listen was not recorded: {err:#}");
-            }
+            });
         }
     });
 }

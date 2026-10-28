@@ -102,7 +102,111 @@ pub fn connect(db_path: &Path, busy: Duration) -> Result<SqliteConnection> {
     // the last few commits, not corrupt it. A write a request makes, a new
     // provider item's id, no longer waits on the disk.
     conn.batch_execute(&format!("PRAGMA busy_timeout = {}; PRAGMA synchronous = NORMAL;", busy.as_millis()))?;
+    conn.set_instrumentation(Held::default());
     Ok(conn)
+}
+
+/// How long a statement may run, or a transaction hold the write lock,
+/// before it is logged: a request waits `REQUEST_WAIT` at most, a stage 30s.
+const HELD_TOO_LONG: Duration = Duration::from_secs(2);
+
+/// Says which statement ran long, or which transaction held the write lock
+/// long, and on which thread, whose name is the stage's: when requests fail
+/// on "database is locked", what they waited behind.
+struct Held {
+    too_long: Duration,
+    /// Where a line goes: stderr, the server's log.
+    report: fn(String),
+    statement: Option<Instant>,
+    /// Since when this connection's transaction has been open, whether it
+    /// has written yet, and its first statements.
+    transaction: Option<(Instant, bool, Vec<String>)>,
+}
+
+/// A statement as a line of the log.
+fn sql_line(query: &dyn diesel::connection::DebugQuery) -> String {
+    let sql = query.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+    match sql.char_indices().nth(240) {
+        Some((at, _)) => format!("{}…", &sql[..at]),
+        None => sql,
+    }
+}
+
+fn writes(sql: &str) -> bool {
+    let first = sql.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    matches!(first.as_str(), "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "CREATE" | "ALTER" | "DROP")
+        || sql.to_ascii_uppercase().starts_with("BEGIN IMMEDIATE")
+}
+
+fn thread_name() -> String {
+    std::thread::current().name().unwrap_or("unnamed").to_string()
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Held { too_long: HELD_TOO_LONG, report: |line| eprintln!("{line}"), statement: None, transaction: None }
+    }
+}
+
+impl Held {
+    fn begin(&mut self) {
+        self.transaction.get_or_insert_with(|| (Instant::now(), false, Vec::new()));
+    }
+
+    fn end(&mut self) {
+        if let Some((since, wrote, statements)) = self.transaction.take() {
+            let held = since.elapsed();
+            if wrote && held >= self.too_long {
+                (self.report)(format!(
+                    "database: a transaction on {} held the write lock {:.1}s: {}",
+                    thread_name(),
+                    held.as_secs_f64(),
+                    statements.join(" ; ")
+                ));
+            }
+        }
+    }
+}
+
+impl diesel::connection::Instrumentation for Held {
+    fn on_connection_event(&mut self, event: diesel::connection::InstrumentationEvent<'_>) {
+        use diesel::connection::InstrumentationEvent as Event;
+        match event {
+            Event::StartQuery { query, .. } => {
+                self.statement = Some(Instant::now());
+                let sql = sql_line(query);
+                let upper = sql.to_ascii_uppercase();
+                if upper.starts_with("BEGIN") {
+                    self.begin();
+                }
+                if let Some((_, wrote, statements)) = &mut self.transaction {
+                    *wrote |= writes(&sql);
+                    if statements.len() < 4 {
+                        statements.push(sql);
+                    }
+                }
+            }
+            Event::FinishQuery { query, error, .. } => {
+                let took = self.statement.take().map(|at| at.elapsed()).unwrap_or_default();
+                let sql = sql_line(query);
+                if took >= self.too_long {
+                    let kind = if writes(&sql) { "write" } else { "read" };
+                    let failed = error.map(|e| format!(", and failed: {e}")).unwrap_or_default();
+                    (self.report)(format!("database: a {kind} on {} took {:.1}s{failed}: {sql}", thread_name(), took.as_secs_f64()));
+                }
+                // A batch can open and close one itself: its last statement
+                // says whether it is still open.
+                let last = sql.split(';').map(str::trim).filter(|s| !s.is_empty()).next_back().unwrap_or("");
+                let last = last.to_ascii_uppercase();
+                if last.starts_with("COMMIT") || last.starts_with("ROLLBACK") || last.starts_with("END") {
+                    self.end();
+                }
+            }
+            Event::BeginTransaction { .. } => self.begin(),
+            Event::CommitTransaction { .. } | Event::RollbackTransaction { .. } => self.end(),
+            _ => {}
+        }
+    }
 }
 
 // ------------------------------------------------------------ for requests
@@ -485,6 +589,51 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static HEARD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    #[test]
+    fn a_long_hold_of_the_write_lock_is_named() {
+        let dir = std::env::temp_dir().join(format!("stelly-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut conn = connect(&dir.join("held.db"), Duration::from_secs(1)).unwrap();
+        conn.set_instrumentation(Held {
+            too_long: Duration::from_millis(100),
+            report: |line| HEARD.lock().unwrap().push(line),
+            ..Held::default()
+        });
+        conn.batch_execute("CREATE TABLE t (v INTEGER)").unwrap();
+
+        // Quick, or only reading: nothing to say.
+        conn.batch_execute("BEGIN IMMEDIATE; INSERT INTO t VALUES (1); COMMIT;").unwrap();
+        conn.transaction(|conn| {
+            diesel::sql_query("SELECT 1").execute(conn)?;
+            std::thread::sleep(Duration::from_millis(150));
+            diesel::QueryResult::Ok(())
+        })
+        .unwrap();
+        assert!(HEARD.lock().unwrap().is_empty(), "{:?}", HEARD.lock().unwrap());
+
+        // A write held open across slow work.
+        conn.transaction(|conn| {
+            diesel::sql_query("INSERT INTO t VALUES (2)").execute(conn)?;
+            std::thread::sleep(Duration::from_millis(150));
+            diesel::QueryResult::Ok(())
+        })
+        .unwrap();
+        // A slow statement.
+        diesel::sql_query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3000000) SELECT COUNT(*) FROM n")
+            .execute(&mut conn)
+            .unwrap();
+
+        let heard = HEARD.lock().unwrap().clone();
+        assert_eq!(heard.len(), 2, "{heard:?}");
+        assert!(heard[0].starts_with("database: a transaction on ") && heard[0].contains("held the write lock"), "{}", heard[0]);
+        assert!(heard[0].contains("INSERT INTO t VALUES (2)"), "{}", heard[0]);
+        assert!(heard[1].starts_with("database: a read on ") && heard[1].contains("WITH RECURSIVE"), "{}", heard[1]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::pipeline::analyse;
     use crate::pipeline::descriptors::Descriptors;
     use crate::provider::{RemoteAlbum, RemoteTrack};
