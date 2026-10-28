@@ -30,6 +30,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.KeyEvent
+import android.view.View
+import android.widget.FrameLayout
 import android.widget.Toast
 import java.io.File
 import java.net.URL
@@ -50,6 +52,24 @@ class MainActivity : WryActivity() {
     // whenever the session is not playing.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         return Playback.volumeKey(event) || super.dispatchKeyEvent(event)
+    }
+
+    // Where wry puts its webview.
+    override fun setContentView(view: View) {
+        super.setContentView(OnScreen(this).apply { addView(view) })
+    }
+}
+
+// Chromium stops a page's timers and network once it is hidden and silent:
+// another device playing, this one paused, or between two tracks. Every
+// render waits on the page, see assets/offscreen.js, and Rust polls nothing
+// until it is through, so the notification's buttons and the session stream
+// waited with it until the app was in front again. So off screen the page is
+// still told its window shows. Without the playback service Android freezes
+// the whole process anyway.
+private class OnScreen(context: Context) : FrameLayout(context) {
+    override fun dispatchWindowVisibilityChanged(visibility: Int) {
+        super.dispatchWindowVisibilityChanged(View.VISIBLE)
     }
 }
 
