@@ -43,7 +43,8 @@ services:
 
     # The music, through the providers below, most preferred first; each
     # wants the shared STELLY_PROVIDER_TOKEN, from .env. Keep the Qobuz
-    # gateway among them: a catalogue from before 2.0 is its.
+    # gateway among them: a catalogue from before 2.0 is its. A key from
+    # lrclib.net/developers, STELLY_LRCLIB_KEY in .env, speeds the lyrics up.
     environment:
       STELLY_PROVIDERS: http://qobuz:7710,http://ytmusic:7712
     env_file:

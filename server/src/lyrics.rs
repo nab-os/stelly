@@ -6,9 +6,10 @@
 //! when a track is instrumental, which is worth as much: such a track has no
 //! language, rather than an unknown one.
 //!
-//! One request a second, the space's own tracks before the rest, and longer
+//! One request at a time, the space's own tracks before the rest, and longer
 //! pauses whenever LRCLIB says it is busy, which it often is: a whole library
-//! takes days, and nobody waits on it. A track LRCLIB knew nothing of is asked
+//! takes days, and nobody waits on it. A key registered with LRCLIB, in
+//! `STELLY_LRCLIB_KEY`, makes that hours. A track LRCLIB knew nothing of is asked
 //! again after `RECHECK_DAYS`, by when someone may have added it.
 //!
 //! So a library is better started from a dump of LRCLIB's database, `import`,
@@ -29,8 +30,15 @@ use stelly_core::api::Lyrics;
 use stelly_core::logbuffer::LogBuffer;
 
 const API: &str = "https://lrclib.net/api/get";
-/// Between two requests.
-const PACE: Duration = Duration::from_secs(1);
+/// Between two requests: under the ~90 a minute LRCLIB allows a client that
+/// names itself.
+const PACE: Duration = Duration::from_millis(750);
+/// The same with a registered key, which it allows ~6,000 a minute: still one
+/// at a time, as it asks, after the shortest pause it suggests.
+const PACE_KEYED: Duration = Duration::from_millis(200);
+/// Where a registered server-side application's key is set, in the
+/// environment or the .env beside the provider's settings.
+pub const KEY: &str = "STELLY_LRCLIB_KEY";
 /// After a busy answer that says not how long to wait, doubling up to
 /// `BUSY_MAX` while it stays busy.
 const BUSY_FIRST: Duration = Duration::from_secs(30);
@@ -47,8 +55,18 @@ const SUNG: &str = "lyrics";
 const INSTRUMENTAL: &str = "instrumental";
 const NONE: &str = "none";
 
-/// Look up every track that needs it, for as long as the server runs.
-pub async fn watch(db_path: PathBuf, log: Arc<LogBuffer>) {
+/// The registered key, from the environment over the .env in `env_dir`.
+pub fn key(env_dir: &Path) -> Option<String> {
+    std::env::var(KEY)
+        .ok()
+        .or_else(|| stelly_provider::config::parse_env(&env_dir.join(".env")).get(KEY).cloned())
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+/// Look up every track that needs it, for as long as the server runs, with
+/// the registered `key` if there is one.
+pub async fn watch(db_path: PathBuf, mut key: Option<String>, log: Arc<LogBuffer>) {
     let client = match reqwest::Client::builder()
         .user_agent(concat!("Stelly/", env!("CARGO_PKG_VERSION"), " (https://github.com/nab-os/stelly-releases)"))
         .timeout(TIMEOUT)
@@ -59,6 +77,9 @@ pub async fn watch(db_path: PathBuf, log: Arc<LogBuffer>) {
     };
     // Behind the start's own work.
     tokio::time::sleep(Duration::from_secs(120)).await;
+    if key.is_some() {
+        log.push("lyrics: looking up with the registered key");
+    }
 
     let mut busy = BUSY_FIRST;
     loop {
@@ -80,7 +101,7 @@ pub async fn watch(db_path: PathBuf, log: Arc<LogBuffer>) {
         let mut found = 0;
         for track in &batch {
             let outcome = loop {
-                match lookup(&client, track).await {
+                match lookup(&client, API, track, key.as_deref()).await {
                     Ok(outcome) => {
                         busy = BUSY_FIRST;
                         break Some(outcome);
@@ -89,6 +110,11 @@ pub async fn watch(db_path: PathBuf, log: Arc<LogBuffer>) {
                     Err(Lookup::Busy(None)) => {
                         tokio::time::sleep(jittered(busy)).await;
                         busy = (busy * 2).min(BUSY_MAX);
+                    }
+                    // A key revoked or mistyped: the lookups go on without it.
+                    Err(Lookup::Refused) => {
+                        log.push(format!("lyrics: LRCLIB refused the key in {KEY}, going on without it"));
+                        key = None;
                     }
                     Err(Lookup::Failed(err)) => {
                         log.push(format!("lyrics: LRCLIB unreachable, trying again later: {err:#}"));
@@ -107,7 +133,7 @@ pub async fn watch(db_path: PathBuf, log: Arc<LogBuffer>) {
             if let Ok(Err(err)) = tokio::task::spawn_blocking(stored).await {
                 log.push(format!("lyrics: storing track {id} failed: {err:#}"));
             }
-            tokio::time::sleep(PACE).await;
+            tokio::time::sleep(if key.is_some() { PACE_KEYED } else { PACE }).await;
         }
         log.push(format!("lyrics: {} tracks looked up, {found} with lyrics", batch.len()));
     }
@@ -176,6 +202,8 @@ struct Outcome {
 enum Lookup {
     /// Asked to come back later, after this long when it says.
     Busy(Option<Duration>),
+    /// The key is not one it knows.
+    Refused,
     Failed(anyhow::Error),
 }
 
@@ -187,7 +215,7 @@ struct Found {
     plain_lyrics: Option<String>,
 }
 
-async fn lookup(client: &reqwest::Client, track: &Pending) -> Result<Outcome, Lookup> {
+async fn lookup(client: &reqwest::Client, api: &str, track: &Pending, key: Option<&str>) -> Result<Outcome, Lookup> {
     // The album and the duration narrow the match, when there are any.
     let mut query = vec![("track_name", track.title.clone()), ("artist_name", track.artist.clone())];
     if let Some(album) = &track.album {
@@ -196,8 +224,15 @@ async fn lookup(client: &reqwest::Client, track: &Pending) -> Result<Outcome, Lo
     if let Some(duration) = track.duration {
         query.push(("duration", duration.to_string()));
     }
-    let response = client.get(API).query(&query).send().await.map_err(|err| Lookup::Failed(err.into()))?;
+    let mut request = client.get(api).query(&query);
+    if let Some(key) = key {
+        request = request.header("Lrclib-Api-Key", key);
+    }
+    let response = request.send().await.map_err(|err| Lookup::Failed(err.into()))?;
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED && key.is_some() {
+        return Err(Lookup::Refused);
+    }
     if matches!(status.as_u16(), 429 | 502 | 503 | 504) {
         // Which LRCLIB asks to be honoured, on pain of a ban.
         let after = response
@@ -653,6 +688,47 @@ mod tests {
         // Again, from what was unpacked: only what found nothing is matched.
         let again = import(&db_path, &gz, &Job::stderr()).unwrap();
         assert_eq!(again.tracks, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_key_goes_in_its_header_and_a_refused_one_is_told_apart() {
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        // Instrumental for the good key, nothing without one, 401 otherwise.
+        let app = axum::Router::new().route(
+            "/api/get",
+            axum::routing::get(|headers: HeaderMap| async move {
+                match headers.get("Lrclib-Api-Key").and_then(|v| v.to_str().ok()) {
+                    Some("good") => axum::Json(serde_json::json!({ "instrumental": true })).into_response(),
+                    Some(_) => StatusCode::UNAUTHORIZED.into_response(),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}/api/get", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let client = reqwest::Client::new();
+        let track = Pending { id: 1, title: "Interlude".into(), artist: "Heuss".into(), album: None, duration: Some(90) };
+        assert!(matches!(lookup(&client, &api, &track, Some("good")).await, Ok(Outcome { status: INSTRUMENTAL, .. })));
+        assert!(matches!(lookup(&client, &api, &track, None).await, Ok(Outcome { status: NONE, .. })));
+        assert!(matches!(lookup(&client, &api, &track, Some("revoked")).await, Err(Lookup::Refused)));
+    }
+
+    #[test]
+    fn the_key_is_read_from_the_env_file_when_not_set() {
+        let dir = std::env::temp_dir().join(format!("stelly-lyrics-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The environment wins over the file; neither set here.
+        if std::env::var(KEY).is_err() {
+            assert_eq!(key(&dir), None);
+            std::fs::write(dir.join(".env"), format!("{KEY}=\"abc123\"\n")).unwrap();
+            assert_eq!(key(&dir).as_deref(), Some("abc123"));
+            std::fs::write(dir.join(".env"), format!("{KEY}=  \n")).unwrap();
+            assert_eq!(key(&dir), None);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

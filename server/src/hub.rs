@@ -427,7 +427,8 @@ impl Hub {
     /// Look up the space's tracks' lyrics on LRCLIB, for the language they
     /// are sung in, for the life of the server. See `lyrics`.
     pub async fn watch_lyrics(self: Arc<Self>) {
-        crate::lyrics::watch(self.db_path.clone(), self.log.clone()).await
+        let key = crate::lyrics::key(&self.env_dir);
+        crate::lyrics::watch(self.db_path.clone(), key, self.log.clone()).await
     }
 
     /// What is known of a track's lyrics.

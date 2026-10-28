@@ -245,11 +245,17 @@ build wants `clang` and `libclang-dev` besides the rest.
 While it runs, `serve` asks [LRCLIB](https://lrclib.net), an open lyrics
 database, for each analysed track's lyrics by its title and artist, and its
 album and duration where it has them, the user's own library first, and
-keeps the language they are in, as `whatlang` tells it, never the lyrics: a
-request a second, as long a pause as LRCLIB asks for while it is busy, so a
-big library takes days. LRCLIB also says when a track is instrumental. A
-track it has nothing for is asked again after 90 days. `serve --no-lyrics`
-turns it off, and sends nothing to lrclib.net.
+keeps the language they are in, as `whatlang` tells it, never the lyrics:
+one request at a time, about 80 a minute, and as long a pause as LRCLIB asks
+for while it is busy, so a big library takes days. LRCLIB also says when a
+track is instrumental. A track it has nothing for is asked again after 90
+days. `serve --no-lyrics` turns it off, and sends nothing to lrclib.net.
+
+A key registered as a server-side application in LRCLIB's
+[developer portal](https://lrclib.net/developers), set as `STELLY_LRCLIB_KEY`
+in the environment or the `.env` beside the provider settings, raises that to
+a few a second, hours for a big library. A key LRCLIB refuses is dropped, with
+a line in the log, and the lookups go on without it.
 
 A whole library is quicker from a dump of LRCLIB's database, from
 [lrclib.net/db-dumps](https://lrclib.net/db-dumps): about 48 GB gzipped, and
