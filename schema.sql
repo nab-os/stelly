@@ -130,6 +130,11 @@ CREATE TABLE IF NOT EXISTS mix (
     drops        INTEGER
 );
 
+-- What is up to date, without reading the rows: `drops` sits after
+-- `entry_json`, so filtering on it from the table walks every entry's
+-- overflow pages, seconds under the write lock for each mix queue claim.
+CREATE INDEX IF NOT EXISTS idx_mix_current ON mix(version, drops);
+
 -- Tracks the mix analysis failed on, apart from `failures`, which stops
 -- `analyse` retrying: a track can fail one and not the other.
 CREATE TABLE IF NOT EXISTS mix_failures (
