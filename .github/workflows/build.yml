@@ -448,15 +448,21 @@ jobs:
     # Off, or build-push-action drops a .dockerbuild artifact into the run and
     # the release job has one more thing to filter out. The summary it feeds
     # is not worth an artifact nobody downloads.
+    #
+    # DEV: a build of main or of a pull request from this repository's own
+    # branches, pushed to GHCR alone as `main` or `pr-<n>`, and `sha-<commit>`,
+    # so a server can run it before it is released. Never a fork's: its
+    # GITHUB_TOKEN cannot push, and its code is nobody's to publish here.
     env:
       DOCKER_BUILD_RECORD_UPLOAD: false
+      DEV: ${{ github.ref_type != 'tag' && github.event_name != 'workflow_dispatch' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
 
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
 
-      # Both gated on the tag: a pull request from a fork cannot read
-      # DOCKERHUB_TOKEN, and nothing below it pushes anyway.
+      # Docker Hub on a tag alone: a pull request from a fork cannot read
+      # DOCKERHUB_TOKEN, and only releases go there. GHCR for dev builds too.
       - name: Log in to Docker Hub
         if: github.ref_type == 'tag'
         uses: docker/login-action@v3
@@ -465,7 +471,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Log in to GHCR
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || env.DEV == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -477,22 +483,24 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
+          # GHCR first: on a dev build it is the only one, and the smoke test
+          # runs the first name.
           images: |
-            docker.io/stellymusic/stelly
-            ghcr.io/${{ github.repository_owner }}/stelly-server
+            name=ghcr.io/${{ github.repository_owner }}/stelly-server
+            name=docker.io/stellymusic/stelly,enable=${{ github.ref_type == 'tag' }}
           # `type=ref` first and unconditionally: it is what publishes the
           # `v`-prefixed name the README and compose.yaml pin to. The semver
           # patterns below add the unprefixed `0.6.1` and `0.6`, and only
           # started firing at v0.6.1, type=semver declines a tag with no
           # patch component, which every release up to v0.6 was.
           #
-          # branch and pr matter even though neither is ever pushed: with no
-          # tag at all the build produces an unnamed image, and the smoke test
-          # below has nothing to run.
+          # branch and pr are what a dev build is pulled by, and name the
+          # image the smoke test runs; sha pins one build of them.
           tags: |
             type=ref,event=tag
             type=ref,event=branch
             type=ref,event=pr
+            type=sha,enable=${{ env.DEV == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
@@ -505,7 +513,9 @@ jobs:
           platforms: linux/amd64
           # A second arch here would only build under emulation, which for
           # ort and the bundled SQLite is most of an hour.
-          push: ${{ github.ref_type == 'tag' }}
+          # A dev build is loaded as well as pushed, so the smoke test runs
+          # the image built here.
+          push: ${{ github.ref_type == 'tag' || env.DEV == 'true' }}
           load: ${{ github.ref_type != 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
