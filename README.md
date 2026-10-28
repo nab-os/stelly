@@ -425,6 +425,31 @@ version tag and `:latest`, but everything here pins a version, so that pulling
 never silently changes the server underneath a corpus that took hours to build.
 `docker build .` reproduces it when you need to run uncommitted changes.
 
+### Dev builds
+
+Every push to `main`, and every pull request from a branch of this
+repository, also publishes its image to GHCR alone, as
+`ghcr.io/nab-os/stelly-server:main`, `:pr-<number>`, and `:sha-<commit>` for
+one build exactly, never to Docker Hub. To run one, an override beside
+`compose.yaml` keeps the pinned release the default:
+
+```yaml
+# compose.dev.yaml
+services:
+  server:
+    image: ghcr.io/nab-os/stelly-server:pr-206
+```
+
+```sh
+docker compose stop server     # a copy of the database first: a dev build may change it
+docker compose run --rm --entrypoint sh server -c 'cp /data/stelly.db /data/stelly.db.before-dev'
+docker compose -f compose.yaml -f compose.dev.yaml pull server
+docker compose -f compose.yaml -f compose.dev.yaml up -d server
+```
+
+`docker compose up -d server` goes back to the release. A build the release
+cannot read, after a schema change, wants the copy put back first.
+
 The container binds `0.0.0.0` and publishes to `127.0.0.1`, which keeps the
 loopback property above: the bind has to be `0.0.0.0` to be reachable across
 the container boundary at all, so it is the *published* port that is
