@@ -267,6 +267,28 @@ pub struct Word {
     pub score: f32,
 }
 
+/// What a track's lyrics say of it, as LRCLIB has them: the language they are
+/// in, or that it has none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Lyrics {
+    /// Not looked up yet.
+    #[default]
+    Unknown,
+    /// LRCLIB has no lyrics for it.
+    None,
+    Instrumental,
+    Sung {
+        /// ISO 639-3, "fra".
+        language: String,
+        /// In English, "French".
+        name: String,
+        /// Whether the lyrics left no doubt. Only these place a track in the
+        /// space's `language` block.
+        reliable: bool,
+    },
+}
+
 /// What the server's space looks like, small enough to ask for on every start.
 ///
 /// `stamp` changes whenever anything a client caches would: a rebuild, or a

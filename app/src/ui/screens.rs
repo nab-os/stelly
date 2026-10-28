@@ -715,11 +715,24 @@ fn mix_facts(summary: &MixSummary) -> Element {
 /// The words a track sounds like, as CLAP hears it: its audio scored against
 /// a vocabulary, next to how the rest of the space scores. Experimental: the
 /// words are only as good as CLAP's sense of them.
+///
+/// Under them, the language it is sung in, from its lyrics: nothing while
+/// they have not been looked up, or from a server that does not.
 #[component]
 fn Described(track_id: i64) -> Element {
     let mut words = use_signal(|| None::<Result<Vec<crate::api::Word>, String>>);
     use_future(move || async move {
         words.set(Some(backend().describe(track_id).await.map_err(|err| format!("{err:#}"))));
+    });
+    let mut sung = use_signal(|| None::<String>);
+    use_future(move || async move {
+        use crate::api::Lyrics;
+        sung.set(match backend().lyrics(track_id).await {
+            Ok(Lyrics::Sung { name, reliable: true, .. }) => Some(format!("Sung in {name}")),
+            Ok(Lyrics::Sung { name, reliable: false, .. }) => Some(format!("Sung in {name}, probably")),
+            Ok(Lyrics::Instrumental) => Some("Instrumental".into()),
+            _ => None,
+        });
     });
 
     rsx! {
@@ -745,6 +758,9 @@ fn Described(track_id: i64) -> Element {
                     }
                 }
             },
+        }
+        if let Some(sung) = sung() {
+            p { class: "muted", title: "from its lyrics, as LRCLIB has them", "{sung}" }
         }
     }
 }

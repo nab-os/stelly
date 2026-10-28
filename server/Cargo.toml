@@ -50,6 +50,7 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["onig"]
 # The rest of the pipeline, past what stelly-audio does: the PCA's
 # eigensolver.
 nalgebra = "0.35.0"
+whatlang = "0.18.0"
 
 # A stage's worker threads step back behind requests: nice is per thread on
 # Linux only.
