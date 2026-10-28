@@ -674,6 +674,14 @@ fn ForMixing(track_id: i64, mix: Signal<Option<Result<MixState, String>>>) -> El
                 }
             },
         }
+        if super::stelly_mix::installed() {
+            button {
+                class: "chip",
+                title: "its beats, phrases and where to mix it, in stelly-mix",
+                onclick: move |_| super::stelly_mix::open(track_id),
+                "Open in stelly-mix"
+            }
+        }
     }
 }
 

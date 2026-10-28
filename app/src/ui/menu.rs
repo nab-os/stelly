@@ -258,6 +258,7 @@ fn ShelfTrackItems(index: usize) -> Element {
             },
             "Details"
         }
+        OpenInStellyMix { track_id: track.id }
 
         // Only for tracks the space actually holds. The rest of Qobuz has no
         // coordinates, so there is nothing to walk away from.
@@ -495,6 +496,7 @@ fn QueueItems(index: usize) -> Element {
             },
             "Details"
         }
+        OpenInStellyMix { track_id: track.id }
         if !playing {
             button {
                 class: "menu-item",
@@ -673,12 +675,33 @@ fn SpaceTrackItems(track_id: i64) -> Element {
             },
             "Add to queue"
         }
+        OpenInStellyMix { track_id }
 
         // The navigation verbs. These used to fire on their own the moment
         // anything was selected, which is why they are spelled out here:
         // asking for a walk through the space should look like asking.
         div { class: "menu-rule" }
         GenerationItems { track_id }
+    }
+}
+
+/// The track handed to stelly-mix, where stelly-mix is here to take it.
+#[component]
+fn OpenInStellyMix(track_id: i64) -> Element {
+    let mut menu = use_context::<ContextMenu>().0;
+    if !super::stelly_mix::installed() {
+        return rsx! {};
+    }
+    rsx! {
+        button {
+            class: "menu-item",
+            title: "its beats, phrases and where to mix it, in stelly-mix",
+            onclick: move |_| {
+                super::stelly_mix::open(track_id);
+                menu.set(None);
+            },
+            "Open in stelly-mix"
+        }
     }
 }
 
