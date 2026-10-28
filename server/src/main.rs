@@ -184,6 +184,7 @@ pub enum Command {
     Analyse(cli::Analyse),
     MixAnalyse(cli::MixAnalyse),
     Dedupe(cli::Dedupe),
+    LyricsImport(cli::LyricsImport),
     BuildSpace(cli::BuildSpace),
     Layout(cli::Layout),
     Models(cli::Models),

@@ -210,6 +210,17 @@ pub struct Dedupe {
     dry_run: bool,
 }
 
+/// Find the languages the tracks are sung in from a dump of LRCLIB's
+/// database, in minutes, rather than asking its API a track a second.
+#[derive(FromArgs)]
+#[argh(subcommand, name = "lyrics-import")]
+pub struct LyricsImport {
+    /// the dump from https://lrclib.net/db-dumps: as downloaded, .sqlite3.gz,
+    /// which is unpacked next to itself first and needs the room, or unpacked
+    #[argh(positional)]
+    dump: PathBuf,
+}
+
 /// Build the space the map and the paths are drawn in.
 #[derive(FromArgs)]
 #[argh(subcommand, name = "build-space")]
@@ -336,6 +347,14 @@ pub fn run(command: Command, paths: &Paths) -> Result<()> {
                 dry_run: args.dry_run,
             };
             crate::dedupe::run(paths, &options, &Job::stderr()).map(|_| ())
+        }
+        Command::LyricsImport(args) => {
+            let imported = crate::lyrics::import(&paths.db_path, &args.dump, &Job::stderr())?;
+            println!(
+                "{} tracks: {} with lyrics, {} instrumental, {} with nothing; build-space to place them by language",
+                imported.tracks, imported.sung, imported.instrumental, imported.none
+            );
+            Ok(())
         }
         Command::BuildSpace(args) => block(Box::pin(assemble::run(paths, args.weights, &Job::stderr()))),
         Command::Layout(args) => layout_command(args, paths),
