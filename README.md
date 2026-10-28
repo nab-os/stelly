@@ -243,12 +243,29 @@ build wants `clang` and `libclang-dev` besides the rest.
 ### Languages
 
 While it runs, `serve` asks [LRCLIB](https://lrclib.net), an open lyrics
-database, for each analysed track's lyrics by its title, artist, album and
-duration, the user's own library first, and keeps the language they are in,
-as `whatlang` tells it, never the lyrics: a request a second, longer pauses
-while LRCLIB is busy, so a big library takes days. LRCLIB also says when a
-track is instrumental. A track it has nothing for is asked again after 90
-days. `serve --no-lyrics` turns it off, and sends nothing to lrclib.net.
+database, for each analysed track's lyrics by its title and artist, and its
+album and duration where it has them, the user's own library first, and
+keeps the language they are in, as `whatlang` tells it, never the lyrics: a
+request a second, as long a pause as LRCLIB asks for while it is busy, so a
+big library takes days. LRCLIB also says when a track is instrumental. A
+track it has nothing for is asked again after 90 days. `serve --no-lyrics`
+turns it off, and sends nothing to lrclib.net.
+
+A whole library is quicker from a dump of LRCLIB's database, from
+[lrclib.net/db-dumps](https://lrclib.net/db-dumps): about 48 GB gzipped, and
+several times that unpacked, which `lyrics-import` does next to the download
+first. It then matches every analysed track without a language the way the
+API would, in minutes, and the requests are left to what is analysed after:
+
+```sh
+curl -C - -O https://db-dumps.lrclib.net/lrclib-db-dump-20261012T090639Z.sqlite3.gz
+stelly-server lyrics-import lrclib-db-dump-20261012T090639Z.sqlite3.gz
+stelly-server build-space
+```
+
+Run again, it uses what it unpacked and only tries the tracks that found
+nothing. With Docker, the dump goes in a directory of its own, mounted:
+`docker compose run --rm -v /big/disk:/dump server lyrics-import /dump/lrclib-db-dump-….sqlite3.gz`.
 
 `build-space` makes a `language` block of it: a column for each language at
 least 20 tracks are sung in, so two tracks in one language are closer than

@@ -51,6 +51,9 @@ tokenizers = { version = "0.23.2", default-features = false, features = ["onig"]
 # eigensolver.
 nalgebra = "0.35.0"
 whatlang = "0.18.0"
+flate2 = "1"
+collapse = "0.1.2"
+secular = { version = "1.0.1", features = ["bmp", "normalization"] }
 
 # A stage's worker threads step back behind requests: nice is per thread on
 # Linux only.
