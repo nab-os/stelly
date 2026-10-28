@@ -22,6 +22,7 @@ pub mod screens;
 mod search_history;
 pub mod settings;
 pub mod side;
+pub mod stelly_mix;
 #[cfg(all(feature = "desktop", not(feature = "mobile")))]
 mod titlebar;
 pub mod tour;
