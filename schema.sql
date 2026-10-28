@@ -105,6 +105,19 @@ CREATE TABLE IF NOT EXISTS blocked_artists (
 -- Each track's whole-length analysis for mixing, from stelly-mix: its beats,
 -- bars, phrases and each phrase's CLAP embedding, as stelly-mix's library
 -- entry. Beside `features`, the 90s excerpt the space is built from.
+-- What LRCLIB knows of each track's lyrics: the language they are in, never
+-- the lyrics themselves. `status` is 'lyrics', with `language` as whatlang's
+-- ISO 639-3 code and how sure it is, 'instrumental' when LRCLIB says so, or
+-- 'none' when it has nothing, which is asked again later. See lyrics.rs.
+CREATE TABLE IF NOT EXISTS lyrics (
+    track_id    INTEGER PRIMARY KEY REFERENCES tracks(id),
+    status      TEXT NOT NULL,
+    language    TEXT,
+    confidence  REAL,
+    reliable    INTEGER NOT NULL DEFAULT 0,
+    checked_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mix (
     track_id     INTEGER PRIMARY KEY REFERENCES tracks(id),
     -- stelly_mix::library::VERSION; rows with another are redone.

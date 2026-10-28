@@ -424,6 +424,18 @@ impl Hub {
         Ok(())
     }
 
+    /// Look up the space's tracks' lyrics on LRCLIB, for the language they
+    /// are sung in, for the life of the server. See `lyrics`.
+    pub async fn watch_lyrics(self: Arc<Self>) {
+        crate::lyrics::watch(self.db_path.clone(), self.log.clone()).await
+    }
+
+    /// What is known of a track's lyrics.
+    pub async fn lyrics(&self, id: i64) -> Result<stelly_core::api::Lyrics> {
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || crate::lyrics::of(&db_path, id)).await?
+    }
+
     /// `check_releases` every `every`, for the life of the server. The first
     /// check waits a minute, for the space to load and the first requests to
     /// go out ahead of it.

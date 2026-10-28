@@ -30,6 +30,7 @@ mod hub;
 mod legacy;
 mod likes;
 mod listens;
+mod lyrics;
 mod mix;
 mod pipeline;
 mod playback;
@@ -210,6 +211,10 @@ pub struct Serve {
     /// check finds them, 0 to only list them (default 30)
     #[argh(option, default = "30")]
     auto_add_days: u32,
+    /// do not look the tracks' lyrics up on lrclib.net, which sends it their
+    /// titles, artists and albums; the space then has no language
+    #[argh(switch)]
+    no_lyrics: bool,
 }
 
 /// Add, list, rename or remove the people sharing this server.
@@ -406,7 +411,7 @@ fn user(action: UserAction, store: &AuthStore) -> Result<()> {
 }
 
 fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
-    let Serve { bind, releases_every, auto_add_days } = args;
+    let Serve { bind, releases_every, auto_add_days, no_lyrics } = args;
     let address: SocketAddr = bind
         .parse()
         .with_context(|| format!("“{bind}” is not an address:port"))?;
@@ -457,6 +462,10 @@ fn serve(args: Serve, paths: Paths, store: AuthStore) -> Result<()> {
         }
         state.hub.show_mix_finds();
         state.hub.mix().queue_likes();
+
+        if !no_lyrics {
+            tokio::spawn(state.hub.clone().watch_lyrics());
+        }
 
         if releases_every > 0 {
             let every = std::time::Duration::from_secs(releases_every * 60 * 60);

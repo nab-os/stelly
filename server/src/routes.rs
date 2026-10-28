@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use stelly_core::api::{
     BlockedArtist, Corpus, CrawlStatus, Device, GenerateRequest, OrderRequest, PairingGrant,
     PipelineStatus, Recipe, Scope, SpaceInfo, SpaceSearch, SpaceSort, Stage, Step,
-    Target, TrackMeta, TracksRequest, User, Word,
+    Lyrics, Target, TrackMeta, TracksRequest, User, Word,
 };
 use stelly_core::session::{Command, Session};
 use stelly_core::catalogue::{Capabilities, Quality, RemoteAlbum, RemoteArtist, RemotePlaylist, RemoteTrack};
@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/space/generate", post(space_generate))
         .route("/api/space/order", post(space_order))
         .route("/api/space/describe/{id}", get(space_describe))
+        .route("/api/lyrics/{id}", get(track_lyrics))
         .route("/api/tuning", get(tuning).put(set_tuning))
         .route("/api/mix/status", get(mix_status))
         .route("/api/mix/library", get(mix_library))
@@ -813,6 +814,11 @@ async fn space_describe(
     Ok(Json(
         on_space(&state, move |space| space.describe(id, &vocabulary, DESCRIBED_BY)).await?,
     ))
+}
+
+/// The language a track is sung in, as its lyrics tell it.
+async fn track_lyrics(State(state): State<AppState>, _: PlayAuth, Path(id): Path<i64>) -> Reply<Lyrics> {
+    Ok(Json(state.hub.lyrics(id).await?))
 }
 
 #[derive(Deserialize)]

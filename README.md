@@ -240,6 +240,22 @@ at start, given `STELLY_SERVER` and `STELLY_TOKEN`.
 The server builds stelly-mix's renderer, Signalsmith Stretch, from C++: the
 build wants `clang` and `libclang-dev` besides the rest.
 
+### Languages
+
+While it runs, `serve` asks [LRCLIB](https://lrclib.net), an open lyrics
+database, for each analysed track's lyrics by its title, artist, album and
+duration, the user's own library first, and keeps the language they are in,
+as `whatlang` tells it, never the lyrics: a request a second, longer pauses
+while LRCLIB is busy, so a big library takes days. LRCLIB also says when a
+track is instrumental. A track it has nothing for is asked again after 90
+days. `serve --no-lyrics` turns it off, and sends nothing to lrclib.net.
+
+`build-space` makes a `language` block of it: a column for each language at
+least 20 tracks are sung in, so two tracks in one language are closer than
+two in different ones, while an instrumental, a track without lyrics or one
+in a rarer language is no nearer or further from any. Its slider starts at
+0.6. The app's track page says the language, and `/api/lyrics/<id>` does for
+any client.
 
 ### Deduplicating
 

@@ -30,9 +30,15 @@ const N_SEMANTIC_COMPONENTS: usize = 40;
 const STEPS: u64 = 6;
 const PHRASES: u64 = (2 * labels::MOODS.len() + labels::STYLES.len()) as u64;
 
+/// A language needs this many tracks sung in it for a column of its own; a
+/// rarer one leaves its tracks out of the block, as an unknown one does.
+const LANGUAGE_TRACKS: usize = 20;
+/// The most languages the block has columns for, the commonest.
+const MAX_LANGUAGES: usize = 24;
+
 /// Fixed, so the client can rely on it.
-pub const BLOCKS: [&str; 8] = [
-    "tempo", "key", "dynamics", "timbre", "mood", "style", "era", "semantic",
+pub const BLOCKS: [&str; 9] = [
+    "tempo", "key", "dynamics", "timbre", "mood", "style", "era", "semantic", "language",
 ];
 
 pub fn default_weights() -> HashMap<String, f32> {
@@ -45,6 +51,7 @@ pub fn default_weights() -> HashMap<String, f32> {
         ("style", 1.5),
         ("era", 0.3),
         ("semantic", 2.0),
+        ("language", 0.6),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -134,6 +141,35 @@ fn project(rows: &[Vec<f64>], mean: &[f64], components: &[Vec<f64>]) -> Vec<Vec<
         .collect()
 }
 
+/// A column per language sung often enough, `LANGUAGE_TRACKS`, and a one in
+/// the track's own: two tracks in one language are a block's whole length
+/// closer, two in different ones no further than any other pair. A track of
+/// no known language, instrumental, without lyrics or in a rarer one, is all
+/// zeros, which draws it towards nothing.
+fn language_block(rows: &[Row]) -> (Vec<Vec<f64>>, Vec<String>) {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for language in rows.iter().filter_map(|r| r.language.as_deref()) {
+        *counts.entry(language).or_default() += 1;
+    }
+    let mut common: Vec<(&str, usize)> = counts.into_iter().filter(|&(_, n)| n >= LANGUAGE_TRACKS).collect();
+    common.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    common.truncate(MAX_LANGUAGES);
+    let block = rows
+        .iter()
+        .map(|r| common.iter().map(|(code, _)| f64::from(r.language.as_deref() == Some(*code))).collect())
+        .collect();
+    (block, common.into_iter().map(|(code, _)| code.to_string()).collect())
+}
+
+/// A block that is already what `normalise_block` makes, a unit row or none,
+/// whose zeros must stay zeros: z-scored, a track of no language would land
+/// opposite every language at once.
+fn as_is(rows: &[Vec<f64>]) -> (Vec<Vec<f32>>, Vec<f64>, Vec<f64>) {
+    let d = rows.first().map_or(0, |r| r.len());
+    let block = rows.iter().map(|row| row.iter().map(|&v| v as f32).collect()).collect();
+    (block, vec![0.0; d], vec![1.0; d])
+}
+
 /// Z-score each column, then L2-normalise each row. Column scaling stops a
 /// wide-ranged descriptor swamping its neighbours; row normalisation makes
 /// every block count equally before weights, so a 40-d block cannot quietly
@@ -208,6 +244,8 @@ struct Row {
     release_date: Option<String>,
     descriptors: serde_json::Value,
     clap: Vec<f32>,
+    /// What its lyrics are sung in, when they told it reliably.
+    language: Option<String>,
 }
 
 /// Every analysed track not by a blocked artist, in id order. The app also
@@ -235,9 +273,11 @@ fn load_rows(conn: &mut SqliteConnection) -> Result<Vec<Row>> {
             features::clap_f32,
         ))
         .load(conn)?;
+    let mut languages = crate::lyrics::languages(conn)?;
     Ok(stored
         .into_iter()
         .map(|Stored { id, release_date, json, blob }| Row {
+            language: languages.remove(&id),
             id,
             release_date,
             descriptors: json
@@ -414,13 +454,16 @@ fn build(
     job.advance("build-space", 5 + PHRASES, STEPS + PHRASES);
     blocks.push(("semantic", semantic, semantic_names));
 
+    let (language, language_names) = language_block(rows);
+    blocks.push(("language", language, language_names));
+
     // Normalise and lay out, in the fixed order.
     debug_assert!(blocks.iter().map(|b| b.0).eq(BLOCKS));
     let mut matrix = vec![Vec::<f32>::new(); n];
     let mut layout = Vec::new();
     let mut cursor = 0;
     for (name, block, names) in &blocks {
-        let (normalised, mean, std) = normalise_block(block);
+        let (normalised, mean, std) = if *name == "language" { as_is(block) } else { normalise_block(block) };
         let width = normalised.first().map_or(0, |r| r.len());
         for (row, part) in matrix.iter_mut().zip(normalised) {
             row.extend(part);
@@ -510,6 +553,32 @@ mod tests {
         };
         assert!(distance(c, g) < distance(c, f_sharp));
         assert_eq!(key_coordinates(None, None, None), [0.0; 3]);
+    }
+
+    #[test]
+    fn only_common_languages_get_a_column() {
+        let row = |id: i64, language: Option<&str>| Row {
+            id,
+            release_date: None,
+            descriptors: serde_json::Value::Null,
+            clap: Vec::new(),
+            language: language.map(str::to_string),
+        };
+        let mut rows: Vec<Row> = (0..LANGUAGE_TRACKS as i64).map(|i| row(i, Some("fra"))).collect();
+        rows.extend((0..LANGUAGE_TRACKS as i64 + 5).map(|i| row(100 + i, Some("eng"))));
+        rows.push(row(200, Some("isl")));
+        rows.push(row(201, None));
+
+        let (block, names) = language_block(&rows);
+        assert_eq!(names, ["eng", "fra"]);
+        assert_eq!(block[0], [0.0, 1.0]);
+        assert_eq!(block[LANGUAGE_TRACKS], [1.0, 0.0]);
+        // Too rare, and unknown: towards nothing.
+        assert_eq!(block[block.len() - 2], [0.0, 0.0]);
+        assert_eq!(block[block.len() - 1], [0.0, 0.0]);
+        // Laid out as they are, zeros and all.
+        let (laid, _, _) = as_is(&block);
+        assert_eq!(laid[block.len() - 1], [0.0f32, 0.0]);
     }
 
     #[test]

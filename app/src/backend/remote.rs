@@ -659,6 +659,11 @@ impl Remote {
         self.get(&format!("/api/space/describe/{track_id}")).await
     }
 
+    /// The language a track is sung in, from its lyrics.
+    pub async fn lyrics(&self, track_id: i64) -> Result<crate::api::Lyrics> {
+        self.get(&format!("/api/lyrics/{track_id}")).await
+    }
+
     // ------------------------------------------------------------------ mix
 
     /// Where a track stands for mixing, and what its analysis found.
