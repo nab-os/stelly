@@ -13,7 +13,11 @@
 
 use super::generate::{Generator, Mode, PathEnd};
 use super::library::{add_to_space, Library};
-use super::player::{clear_queue, enqueue, move_by, play_at, play_next, play_list, remove_at, Player};
+use super::player::{
+    clear_queue, enqueue, enqueue_album, move_by, play_album, play_album_next, play_at, play_next, play_list,
+    remove_at, Player,
+};
+use crate::session::GroupKind;
 use super::{glimpse, open_remote_track, space_track, Blocklist, LocalIds, MapView, Selection};
 use crate::api::Target;
 use crate::backend::backend;
@@ -315,25 +319,22 @@ fn ShelfAlbumItems(index: usize) -> Element {
     // carry; one helper rather than the same fetch written three times. An
     // album whose page was open lately already has it.
     //
-    // It captures nothing but `Copy` values, the id is re-read from the
+    // It captures nothing but `Copy` values, the album is re-read from the
     // shelf rather than held, which is what lets the same closure be used
-    // from three separate `move` handlers.
-    let with_tracks = move |then: fn(Player, Vec<RemoteTrack>)| {
-        let id = library
-            .shelf
-            .peek()
-            .visible_albums(&blocklist)
-            .get(index)
-            .map(|album| album.id.clone());
-        let Some(id) = id else { return };
-        if let Some(tracks) = library.held_album_tracks(&id) {
-            then(player, tracks);
+    // from three separate `move` handlers. The tracks go in as the album's
+    // group, under its header in the queue.
+    let with_tracks = move |then: fn(Player, Vec<RemoteTrack>, GroupKind)| {
+        let album = library.shelf.peek().visible_albums(&blocklist).get(index).cloned();
+        let Some(album) = album else { return };
+        let group = GroupKind::album(&album);
+        if let Some(tracks) = library.held_album_tracks(&album.id) {
+            then(player, tracks, group);
             return;
         }
 
         spawn_forever(async move {
-            if let Ok(tracks) = backend().album_tracks(&id).await {
-                then(player, tracks);
+            if let Ok(tracks) = backend().album_tracks(&album.id).await {
+                then(player, tracks, group);
             }
         });
     };
@@ -346,7 +347,7 @@ fn ShelfAlbumItems(index: usize) -> Element {
         button {
             class: "menu-item",
             onclick: move |_| {
-                with_tracks(|player, tracks| play_list(player, tracks, 0));
+                with_tracks(|player, tracks, group| play_album(player, tracks, 0, group));
                 menu.set(None);
             },
             "Play now"
@@ -354,7 +355,7 @@ fn ShelfAlbumItems(index: usize) -> Element {
         button {
             class: "menu-item",
             onclick: move |_| {
-                with_tracks(play_next);
+                with_tracks(play_album_next);
                 menu.set(None);
             },
             "Play next"
@@ -362,7 +363,7 @@ fn ShelfAlbumItems(index: usize) -> Element {
         button {
             class: "menu-item",
             onclick: move |_| {
-                with_tracks(enqueue);
+                with_tracks(enqueue_album);
                 menu.set(None);
             },
             "Add to queue"

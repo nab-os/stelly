@@ -341,7 +341,7 @@ mod tests {
         let sessions = Sessions::recording(listens);
         let playback = sessions.of(1);
         let (_receiver, _listening) = playback.connect(&device(1));
-        command(&playback, Op::Load { tracks: tracks(0..3), index: 0 });
+        command(&playback, Op::Load { tracks: tracks(0..3), index: 0, group: None });
         command(&playback, Op::Play);
         command(&playback, Op::Step { delta: 1 });
         let listen = heard.try_recv().unwrap();
@@ -357,7 +357,7 @@ mod tests {
     async fn a_stream_sends_the_queue_only_when_it_changed() {
         let playback = Playback::new();
         let (mut receiver, _listening) = playback.connect(&device(1));
-        command(&playback, Op::Load { tracks: tracks(0..5), index: 0 });
+        command(&playback, Op::Load { tracks: tracks(0..5), index: 0, group: None });
         command(&playback, Op::Pause);
         let mut sent = None;
 
@@ -371,7 +371,7 @@ mod tests {
         assert!(update.same_queue && update.session.queue.is_empty());
         assert_eq!(update.session.position, 4.0);
 
-        command(&playback, Op::Append { tracks: tracks(5..6) });
+        command(&playback, Op::Append { tracks: tracks(5..6), group: None });
         let update = next(&mut receiver, &mut sent, true);
         let splice = update.splice.unwrap();
         assert_eq!((splice.at, splice.removed, splice.tracks), (5, 0, tracks(5..6)));
@@ -382,7 +382,7 @@ mod tests {
     async fn an_app_without_splices_gets_what_it_always_did() {
         let playback = Playback::new();
         let (mut receiver, _listening) = playback.connect(&device(1));
-        command(&playback, Op::Load { tracks: tracks(0..5), index: 0 });
+        command(&playback, Op::Load { tracks: tracks(0..5), index: 0, group: None });
         command(&playback, Op::Pause);
         let mut sent = None;
         next(&mut receiver, &mut sent, false);
@@ -404,7 +404,7 @@ mod tests {
     async fn a_stream_that_missed_a_queue_gets_it_whole() {
         let playback = Playback::new();
         let (mut receiver, _listening) = playback.connect(&device(1));
-        command(&playback, Op::Load { tracks: tracks(0..5), index: 0 });
+        command(&playback, Op::Load { tracks: tracks(0..5), index: 0, group: None });
         let mut sent = None;
         next(&mut receiver, &mut sent, true);
 

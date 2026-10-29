@@ -347,6 +347,7 @@ fn Shell() -> Element {
 
     let player = use_context_provider(|| Player {
         queue: Signal::new(Vec::new()),
+        groups: Signal::new(Vec::new()),
         index: Signal::new(0),
         playing: Signal::new(false),
         position: Signal::new((0.0, 0.0)),
@@ -953,12 +954,7 @@ fn Shell() -> Element {
         // so the route exists on the map only while the map is being used to
         // look at that route.
         let ids: Vec<i64> = if map_route() {
-            generator
-                .result
-                .read()
-                .iter()
-                .map(|s| s.track.track_id)
-                .collect()
+            generator.route.read().clone()
         } else {
             Vec::new()
         };

@@ -14,11 +14,12 @@ pub(crate) async fn export(track_ids: Vec<i64>) -> anyhow::Result<i64> {
     backend().export_playlist(&name, &track_ids).await
 }
 
-/// Save the generated section, reporting how it went where its header is.
-pub(crate) fn export_result(generator: Generator) {
-    let ids: Vec<i64> = generator.result.peek().iter().map(|step| step.track.track_id).collect();
+/// Save a generated group, reporting how it went under its header.
+pub(crate) fn export_group(generator: Generator, group: u64, ids: Vec<i64>) {
+    let mut about = generator.about;
     let mut status = generator.status;
     let mut failed = generator.failed;
+    about.set(Some(group));
     status.set(Some("saving…".into()));
     failed.set(false);
     spawn(async move {

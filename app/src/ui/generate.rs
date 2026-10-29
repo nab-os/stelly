@@ -1,9 +1,11 @@
 //! Making a sequence of tracks out of the space.
 //!
 //! Started from a track's page, the search box or a row's menu, and landed in
-//! the queue as a section of its own, right after what is playing, which can
-//! be rerolled, saved or stopped from its header there. Five modes, because
-//! they differ only in how the sequence is chosen:
+//! the queue as a group of its own, after the generated ones already there or
+//! else after what is playing, which can be rerolled, saved, moved or stopped
+//! from its header there. The group is the session's, so it outlives a
+//! reload. Five modes, because they differ only in how the sequence is
+//! chosen:
 //!   - **neighbours**: the k most similar tracks.
 //!   - **radio**: a greedy walk, pushed away from artists already used.
 //!   - **path**: A to B, shortest route or evenly paced.
@@ -14,10 +16,11 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use crate::backend::backend;
 use super::icons;
-use super::player::{play_list, set_upcoming, Player};
+use super::player::{drop_group, queue_section, Player};
 pub use crate::api::Recipe;
 use crate::api::{GenerateRequest, Step, TrackMeta};
 use crate::catalogue::RemoteTrack;
+use crate::session::GroupKind;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,21 +82,21 @@ impl Mode {
 
 #[derive(Clone, Copy)]
 pub struct Generator {
-    /// Where results go: the queue, as a section of their own.
+    /// Where results go: the queue, as a group of their own.
     player: Player,
     pub mode: Signal<Mode>,
-    /// The tracks of the queue's generated section, as they were placed.
-    /// Rows since removed from the queue simply stop being found there;
-    /// this is what the section's header and the map's route read.
-    pub result: Signal<Vec<Step>>,
-    /// What produced `result`, for its heading. `None` when there is none.
-    pub produced_by: Signal<Option<Recipe>>,
+    /// The tracks the map traces: the last result, or the group whose header
+    /// asked for its map.
+    pub route: Signal<Vec<i64>>,
     /// A walk is running on the server.
     pub busy: Signal<bool>,
-    /// The weights moved since `result` was produced, so the distances behind
-    /// it no longer hold. Kept separate from clearing: the rows stay on
-    /// screen and say they are out of date, rather than vanishing.
-    pub stale: Signal<bool>,
+    /// The group `busy` and `status` are about: one being rerolled or saved.
+    /// `None` for a new result, whose word goes where it was asked for.
+    pub about: Signal<Option<u64>>,
+    /// Generated groups made before the weights last moved, so the distances
+    /// behind them no longer hold. The rows stay, and their header says they
+    /// are out of date, rather than vanishing.
+    pub stale: Signal<HashSet<u64>>,
     /// How many tracks to produce, for the modes that take a count.
     pub count: Signal<usize>,
     /// Similarity subtracted per prior use of an artist, in radio mode.
@@ -123,10 +126,10 @@ impl Generator {
             player,
             // The one mode that works before anything is selected.
             mode: Signal::new(Mode::Mood),
-            result: Signal::new(Vec::new()),
-            produced_by: Signal::new(None),
+            route: Signal::new(Vec::new()),
             busy: Signal::new(false),
-            stale: Signal::new(false),
+            about: Signal::new(None),
+            stale: Signal::new(HashSet::new()),
             count: Signal::new(20),
             // 0.10 measured out as 19.4 distinct artists per 20 tracks
             // against 14.8 unpenalised, for 0.786 similarity against 0.796.
@@ -148,12 +151,19 @@ impl Generator {
         *self.tower.read()
     }
 
-    /// Produce a sequence. Spawned, because the walk is the server's: one
-    /// round trip, the phrase embedded on the way for drift and mood.
+    /// Produce a sequence, queued as a new group.
     pub fn run(self, selected: Option<i64>) {
+        self.produce(selected, None);
+    }
+
+    /// Produce a sequence, in place of the rows still to come of `replace`
+    /// when there is one. Spawned, because the walk is the server's: one
+    /// round trip, the phrase embedded on the way for drift and mood.
+    fn produce(self, selected: Option<i64>, replace: Option<u64>) {
         let mut generator = self;
         generator.status.set(None);
         generator.failed.set(false);
+        generator.about.set(replace);
         generator.busy.set(true);
 
         let count = *self.count.peek();
@@ -223,59 +233,44 @@ impl Generator {
                     .into(),
                 ));
             }
-            if !produced.is_empty() {
-                generator.land(&produced);
+            if let (Some(recipe), false) = (recipe, produced.is_empty()) {
+                generator.land(&produced, recipe, replace);
             }
-            generator.result.set(produced);
-            generator.produced_by.set(recipe);
-            generator.stale.set(false);
+            if let Some(group) = replace {
+                generator.stale.write().remove(&group);
+            }
             generator.busy.set(false);
         });
     }
 
-    /// Put a result in the queue, in place of the section the last one made:
-    /// where that section was, or right after what is playing. Into an empty
+    /// Put a result in the queue as a group, see `Op::Section`. Into an empty
     /// queue it is the queue, and plays.
-    fn land(self, produced: &[Step]) {
+    fn land(self, produced: &[Step], recipe: Recipe, replace: Option<u64>) {
+        let mut generator = self;
         let mut player = self.player;
         let tracks: Vec<RemoteTrack> = produced.iter().map(|step| as_remote(&step.track)).collect();
-        let placement = place(&player.queue.peek(), *player.index.peek(), &self.ids(), tracks);
-        match placement {
-            Placement::Load(tracks) => play_list(player, tracks, 0),
-            Placement::Upcoming(tracks) => set_upcoming(player, tracks),
-        }
-        // The section has to be somewhere to look at.
+        generator.route.set(tracks.iter().map(|track| track.id).collect());
+        queue_section(player, tracks, GroupKind::Generated { recipe }, replace);
+        // The group has to be somewhere to look at.
         player.queue_open.set(true);
     }
 
-    /// The track ids of the generated section.
-    pub(crate) fn ids(&self) -> HashSet<i64> {
-        self.result.peek().iter().map(|step| step.track.track_id).collect()
-    }
-
-    /// Make the section again from what made it. The rows still to come are
+    /// Make a group again from what made it. The rows still to come are
     /// swapped for the new ones; those already played stay where they are.
-    pub fn reroll(self) {
-        if let Some(recipe) = self.produced_by.peek().clone() {
-            self.rerun(&recipe);
-        }
+    pub fn reroll(self, group: u64, recipe: &Recipe) {
+        self.rerun(recipe, Some(group));
     }
 
-    /// Take what is left of the section out of the queue, and forget it.
-    /// What is playing keeps playing, even if the section put it there.
-    pub fn stop(self) {
-        let player = self.player;
-        let old = self.ids();
-        let queue = player.queue.peek().clone();
-        let index = *player.index.peek();
-        if index < queue.len() {
-            let upcoming: Vec<RemoteTrack> =
-                queue[index + 1..].iter().filter(|track| !old.contains(&track.id)).cloned().collect();
-            if index + 1 + upcoming.len() != queue.len() {
-                set_upcoming(player, upcoming);
-            }
+    /// Take what is left of a group out of the queue, and forget it. What is
+    /// playing keeps playing, even if the group put it there.
+    pub fn stop(self, group: u64) {
+        let mut generator = self;
+        drop_group(self.player, group);
+        generator.stale.write().remove(&group);
+        if *generator.about.peek() == Some(group) {
+            generator.status.set(None);
+            generator.failed.set(false);
         }
-        self.clear();
     }
 
     /// Run a mode directly, rather than whichever one the panel happens to be
@@ -333,37 +328,37 @@ impl Generator {
         generator.request(Mode::Drift, seed);
     }
 
-    /// Run a recipe again, restoring the inputs that produced it. Re-running
-    /// "whatever the panel is showing now" would quietly answer a different
-    /// question, since the mode and the selection have both been free to move
-    /// since the result was made.
-    pub fn rerun(self, recipe: &Recipe) {
+    /// Run a recipe again, restoring the inputs that produced it, in place
+    /// of `replace`. Re-running "whatever the panel is showing now" would
+    /// quietly answer a different question, since the mode and the selection
+    /// have both been free to move since the result was made.
+    pub fn rerun(self, recipe: &Recipe, replace: Option<u64>) {
         let mut generator = self;
         match recipe {
             Recipe::Neighbours { seed } => {
                 generator.mode.set(Mode::Neighbours);
-                generator.run(Some(*seed));
+                generator.produce(Some(*seed), replace);
             }
             Recipe::Radio { seed } => {
                 generator.mode.set(Mode::Radio);
-                generator.run(Some(*seed));
+                generator.produce(Some(*seed), replace);
             }
             Recipe::Path { a, b, even } => {
                 generator.mode.set(Mode::Path);
                 generator.from.set(Some(*a));
                 generator.to.set(Some(*b));
                 generator.even.set(*even);
-                generator.run(None);
+                generator.produce(None, replace);
             }
             Recipe::Drift { seed, phrase } => {
                 generator.mode.set(Mode::Drift);
                 generator.phrase.set(phrase.clone());
-                generator.run(Some(*seed));
+                generator.produce(Some(*seed), replace);
             }
             Recipe::Mood { phrase } => {
                 generator.mode.set(Mode::Mood);
                 generator.phrase.set(phrase.clone());
-                generator.run(None);
+                generator.produce(None, replace);
             }
         }
     }
@@ -376,23 +371,21 @@ impl Generator {
         generator.run(None);
     }
 
-    /// The weights moved, so the distances that produced this result no longer
-    /// hold. Say so and keep the rows: silently emptying the list was the old
-    /// behaviour of `clear`, and it read as the app discarding your work.
+    /// The weights moved, so the distances that produced the generated groups
+    /// in the queue no longer hold. Say so and keep the rows: silently
+    /// emptying them would read as the app discarding your work.
     pub fn invalidate(mut self) {
-        if !self.result.peek().is_empty() {
-            self.stale.set(true);
+        let generated: Vec<u64> = self
+            .player
+            .groups
+            .peek()
+            .iter()
+            .filter(|group| matches!(group.kind, GroupKind::Generated { .. }))
+            .map(|group| group.id)
+            .collect();
+        if !generated.is_empty() {
+            self.stale.write().extend(generated);
         }
-    }
-
-    /// Throw the result away. Only for when the user asks, or when the ids in
-    /// it have genuinely stopped existing.
-    pub fn clear(mut self) {
-        self.result.set(Vec::new());
-        self.produced_by.set(None);
-        self.stale.set(false);
-        self.status.set(None);
-        self.failed.set(false);
     }
 }
 
@@ -411,43 +404,6 @@ pub(crate) fn failure(err: &anyhow::Error) -> String {
 pub enum PathEnd {
     A,
     B,
-}
-
-/// Where a result goes in the queue.
-#[derive(Debug, PartialEq)]
-enum Placement {
-    /// The queue was empty: the result becomes it.
-    Load(Vec<RemoteTrack>),
-    /// Everything after what is playing, with the result in it.
-    Upcoming(Vec<RemoteTrack>),
-}
-
-/// Fit `new` into the queue in place of the old section's rows still to
-/// come, `old`: where the first of them was, or straight after what is
-/// playing when none are left. Rows the result repeats are taken from where
-/// they were, so it plays them in its own order, and what is playing is
-/// never queued again behind itself.
-fn place(queue: &[RemoteTrack], index: usize, old: &HashSet<i64>, new: Vec<RemoteTrack>) -> Placement {
-    if queue.is_empty() {
-        return Placement::Load(new);
-    }
-    let index = index.min(queue.len() - 1);
-    let current = queue[index].id;
-    let new: Vec<RemoteTrack> = new.into_iter().filter(|track| track.id != current).collect();
-    let fresh: HashSet<i64> = new.iter().map(|track| track.id).collect();
-    let upcoming = &queue[index + 1..];
-    let at = upcoming.iter().position(|track| old.contains(&track.id)).unwrap_or(0);
-    let keep = |tracks: &[RemoteTrack]| -> Vec<RemoteTrack> {
-        tracks
-            .iter()
-            .filter(|track| !old.contains(&track.id) && !fresh.contains(&track.id))
-            .cloned()
-            .collect()
-    };
-    let mut placed = keep(&upcoming[..at]);
-    placed.extend(new);
-    placed.extend(keep(&upcoming[at..]));
-    Placement::Upcoming(placed)
 }
 
 /// The result's heading. Says what made these rows, because with generation
@@ -505,58 +461,8 @@ pub(crate) fn as_remote(meta: &TrackMeta) -> RemoteTrack {
 
 #[cfg(test)]
 mod tests {
-    use super::{dedup_by_recording, place, Placement};
+    use super::dedup_by_recording;
     use crate::api::{Step, TrackMeta};
-    use crate::catalogue::RemoteTrack;
-    use std::collections::HashSet;
-
-    fn track(id: i64) -> RemoteTrack {
-        super::as_remote(&step(id, None).track)
-    }
-
-    fn ids(placement: Placement) -> Vec<i64> {
-        match placement {
-            Placement::Load(tracks) | Placement::Upcoming(tracks) => tracks.iter().map(|t| t.id).collect(),
-        }
-    }
-
-    #[test]
-    fn an_empty_queue_becomes_the_result() {
-        let placed = place(&[], 0, &HashSet::new(), vec![track(1), track(2)]);
-        assert!(matches!(placed, Placement::Load(_)));
-        assert_eq!(ids(placed), vec![1, 2]);
-    }
-
-    #[test]
-    fn a_first_result_comes_straight_after_what_is_playing() {
-        let queue = [track(1), track(2), track(3)];
-        let placed = place(&queue, 0, &HashSet::new(), vec![track(7), track(8)]);
-        assert_eq!(ids(placed), vec![7, 8, 2, 3]);
-    }
-
-    /// Playing 1, then the user's 2, the old section's 5 and 6 (4 already
-    /// gone), then the user's 9.
-    #[test]
-    fn a_reroll_takes_the_old_sections_place() {
-        let queue = [track(1), track(2), track(5), track(6), track(9)];
-        let old = HashSet::from([4, 5, 6]);
-        let placed = place(&queue, 0, &old, vec![track(7), track(8)]);
-        assert_eq!(ids(placed), vec![2, 7, 8, 9]);
-    }
-
-    #[test]
-    fn what_is_playing_is_not_queued_behind_itself() {
-        let queue = [track(1), track(2)];
-        let placed = place(&queue, 0, &HashSet::new(), vec![track(1), track(3)]);
-        assert_eq!(ids(placed), vec![3, 2]);
-    }
-
-    #[test]
-    fn a_track_already_queued_moves_into_the_section() {
-        let queue = [track(1), track(2), track(3)];
-        let placed = place(&queue, 0, &HashSet::new(), vec![track(3), track(4)]);
-        assert_eq!(ids(placed), vec![3, 4, 2]);
-    }
 
     fn step(track_id: i64, isrc: Option<&str>) -> Step {
         Step {
