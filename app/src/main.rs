@@ -76,17 +76,15 @@ fn main() {
 /// web process under 1.8 s of CPU instead of 4.1 s, at 60 fps or better.
 /// Still off on NVIDIA. A machine without a GPU gets WebKit's own software
 /// fallback, and its `WEBKIT_DISABLE_*` variables still win.
+///
+/// The window is a Wayland one where the session is, not under XWayland as
+/// dioxus-desktop would have it: the on-screen keyboard, GNOME's at least,
+/// only opens for a field in a Wayland client, so under XWayland no text
+/// field ever brought it up. On NVIDIA dioxus-desktop still sets
+/// `GDK_BACKEND=x11` itself.
 #[cfg(not(feature = "mobile"))]
 fn gpu_compositing() -> bool {
-    if !cfg!(target_os = "linux") || std::path::Path::new("/proc/driver/nvidia").exists() {
-        return false;
-    }
-    // The other half of what dioxus-desktop does when it turns the renderer
-    // off, kept: the window under XWayland, as it always was.
-    if std::env::var_os("GDK_BACKEND").is_none() {
-        std::env::set_var("GDK_BACKEND", "x11");
-    }
-    true
+    cfg!(target_os = "linux") && !std::path::Path::new("/proc/driver/nvidia").exists()
 }
 
 #[cfg(not(feature = "mobile"))]
