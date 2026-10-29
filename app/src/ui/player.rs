@@ -11,7 +11,7 @@ use super::screens::toggle_like;
 use super::{album_link, artist_link, icons, open_remote_track, Cover, Library, LocalIds, Selection};
 use crate::backend::{backend, Sent, SessionFeed};
 use crate::catalogue::{Quality, RemoteTrack};
-use crate::session::{Clocked, Command, Op, Output, Session, Update};
+use crate::session::{Clocked, Command, Group, GroupKind, Op, Output, Session, Update};
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy)]
 pub struct Player {
     pub queue: Signal<Vec<RemoteTrack>>,
+    /// The albums and generated lists the queue holds, each shown, moved and
+    /// dropped as one; see `Session::groups`.
+    pub groups: Signal<Vec<Group>>,
     pub index: Signal<usize>,
     pub playing: Signal<bool>,
     /// (position, duration) in seconds. From the audio element on the output,
@@ -239,6 +242,9 @@ fn receive(player: Player, update: Update) {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedSession {
     queue: Vec<RemoteTrack>,
+    /// Absent from a cache written before there were groups.
+    #[serde(default)]
+    groups: Vec<Group>,
     index: usize,
     position: f64,
 }
@@ -247,6 +253,7 @@ impl CachedSession {
     fn of(session: &Session) -> Self {
         CachedSession {
             queue: session.queue.clone(),
+            groups: session.groups.clone(),
             index: session.index,
             position: session.position,
         }
@@ -255,10 +262,11 @@ impl CachedSession {
 
 const SESSION_CACHE: &str = "session.json";
 
-/// Whether the session moved to another queue or track, which is all the
-/// cache keeps: a position report every few seconds is not worth a write.
+/// Whether the session moved to another queue, grouping or track, which is
+/// all the cache keeps: a position report every few seconds is not worth a
+/// write.
 fn moved(before: &Session, after: &Session) -> bool {
-    before.queue_version != after.queue_version || before.index != after.index
+    before.queue_version != after.queue_version || before.index != after.index || before.groups != after.groups
 }
 
 /// Fetch the whole session, after a refusal or a push that could not be
@@ -309,6 +317,7 @@ fn show(mut player: Player) {
     };
 
     set_if_changed(player.queue, session.queue.clone());
+    set_if_changed(player.groups, session.groups.clone());
     set_if_changed(player.index, session.index);
     set_if_changed(player.playing, session.playing);
     set_if_changed(player.output, session.output);
@@ -814,18 +823,49 @@ fn transport(command: &str) {
 /// Replace the queue and start at `index`, which refers to the caller's
 /// list; see `Op::Load`.
 pub fn play_list(player: Player, queue: Vec<RemoteTrack>, index: usize) {
-    commit(player, Op::Load { tracks: queue, index });
+    commit(player, Op::Load { tracks: queue, index, group: None });
 }
 
 /// Append to the queue, starting playback if nothing is going.
 pub fn enqueue(player: Player, tracks: Vec<RemoteTrack>) {
-    commit(player, Op::Append { tracks });
+    commit(player, Op::Append { tracks, group: None });
 }
 
 /// Insert directly after whatever is playing, so these come next and the rest
 /// of the queue still follows. With nothing playing this is `enqueue`.
 pub fn play_next(player: Player, tracks: Vec<RemoteTrack>) {
-    commit(player, Op::PlayNext { tracks });
+    commit(player, Op::PlayNext { tracks, group: None });
+}
+
+/// An album's tracks, the three ways in, each shown in the queue as one
+/// group under the album's header.
+pub fn play_album(player: Player, tracks: Vec<RemoteTrack>, index: usize, album: GroupKind) {
+    commit(player, Op::Load { tracks, index, group: Some(album) });
+}
+
+pub fn play_album_next(player: Player, tracks: Vec<RemoteTrack>, album: GroupKind) {
+    commit(player, Op::PlayNext { tracks, group: Some(album) });
+}
+
+pub fn enqueue_album(player: Player, tracks: Vec<RemoteTrack>, album: GroupKind) {
+    commit(player, Op::Append { tracks, group: Some(album) });
+}
+
+/// Queue a group of `kind`, in place of `replace`'s rows still to come; see
+/// `Op::Section`.
+pub fn queue_section(player: Player, tracks: Vec<RemoteTrack>, kind: GroupKind, replace: Option<u64>) {
+    commit(player, Op::Section { tracks, kind, replace });
+}
+
+/// Move a whole group to just before the row at `to`. What dragging a
+/// group's header reports; see `queue-drag.js`.
+pub fn move_group(player: Player, group: u64, to: usize) {
+    commit(player, Op::MoveGroup { group, to });
+}
+
+/// Take what is left of a group out of the queue.
+pub fn drop_group(player: Player, group: u64) {
+    commit(player, Op::DropGroup { group });
 }
 
 /// Replace what follows the current track, leaving it and what came before.
@@ -1411,6 +1451,7 @@ pub fn use_session(player: Player) {
                 let mut position = player.position;
                 set_if_changed(player.index, cached.index.min(cached.queue.len() - 1));
                 set_if_changed(player.queue, cached.queue);
+                set_if_changed(player.groups, cached.groups);
                 set_if_changed(player.playing, false);
                 position.set((cached.position, 0.0));
             }
@@ -1497,6 +1538,12 @@ mod tests {
         assert!(!moved(&before, &reported));
         assert!(moved(&before, &Session { index: 2, ..before.clone() }));
         assert!(moved(&before, &Session { queue_version: 4, ..before.clone() }));
+        let group = Group {
+            id: 1,
+            kind: GroupKind::Generated { recipe: crate::api::Recipe::Radio { seed: 1 } },
+            tracks: vec![1],
+        };
+        assert!(moved(&before, &Session { groups: vec![group], ..before.clone() }));
     }
 
     #[test]

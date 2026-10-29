@@ -12,7 +12,8 @@ use super::side::title_for;
 use super::icons;
 use super::library::{ArtistRows, Library, TracksView, View, ViewToggle};
 use super::menu::{menu_button, open_menu, ContextMenu, MenuTarget};
-use super::player::{enqueue, play_list, Player};
+use super::player::{enqueue, enqueue_album, play_album, play_list, Player};
+use crate::session::GroupKind;
 use super::window::{split_window, use_rows, MoreRows};
 use super::{
     album_link, artist_link, open_remote_track, row_keys, space_mark, Blocklist, Cover, LocalIds, MapView,
@@ -784,6 +785,8 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
 
     library.ensure_liked_loaded();
     let liked = library.is_liked("album", &album.id);
+    // What its tracks are queued as, under the album's header.
+    let group = GroupKind::album(&album);
 
     // The tempo and key of the tracks analysed for mixing, asked once the
     // tracklist is in. A server from before them answers nothing.
@@ -856,18 +859,24 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                         button {
                             class: "primary",
                             disabled: no_tracks,
-                            onclick: move |_| {
-                                let queue = library.shelf.peek().visible_tracks(&blocklist);
-                                play_list(player, queue, 0);
+                            onclick: {
+                                let group = group.clone();
+                                move |_| {
+                                    let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                    play_album(player, queue, 0, group.clone());
+                                }
                             },
                             {icons::play()}
                             "Play"
                         }
                         button {
                             disabled: no_tracks,
-                            onclick: move |_| {
-                                let queue = library.shelf.peek().visible_tracks(&blocklist);
-                                enqueue(player, queue);
+                            onclick: {
+                                let group = group.clone();
+                                move |_| {
+                                    let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                    enqueue_album(player, queue, group.clone());
+                                }
                             },
                             "Queue"
                         }
@@ -936,10 +945,13 @@ pub fn AlbumScreen(album: RemoteAlbum) -> Element {
                                     class: "icon-btn",
                                     title: "play from here",
                                     disabled: !track.streamable,
-                                    onclick: move |event: Event<MouseData>| {
-                                        event.stop_propagation();
-                                        let queue = library.shelf.peek().visible_tracks(&blocklist);
-                                        play_list(player, queue, index);
+                                    onclick: {
+                                        let group = group.clone();
+                                        move |event: Event<MouseData>| {
+                                            event.stop_propagation();
+                                            let queue = library.shelf.peek().visible_tracks(&blocklist);
+                                            play_album(player, queue, index, group.clone());
+                                        }
                                     },
                                     {icons::play()}
                                 }

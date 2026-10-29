@@ -10,7 +10,8 @@
 //! Against a server older than this, the app keeps its copy to itself and is
 //! its own output, which is how playback worked before there was a session.
 
-use crate::catalogue::{RemoteTrack, TrackIdentity};
+use crate::api::Recipe;
+use crate::catalogue::{RemoteAlbum, RemoteTrack, TrackIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::Instant;
@@ -52,6 +53,52 @@ pub struct Session {
     /// than it.
     #[serde(default)]
     pub volume: Option<f64>,
+    /// Runs of the queue that came in together and are shown, moved and
+    /// dropped as one: an album, a generated list. Last, after the queue:
+    /// the server cuts the session's JSON at the queue, and only fields
+    /// without text may come before it. Absent from servers older than it.
+    #[serde(default)]
+    pub groups: Vec<Group>,
+}
+
+/// Tracks of the queue that belong together. Rows can be dragged in and out
+/// of one, so its tracks need not be a single run; the queue holds a track
+/// once, so its id is enough to say which row is a member.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    /// Unique for as long as the session lives: the session's version when
+    /// the group was made.
+    pub id: u64,
+    pub kind: GroupKind,
+    /// The members still in the queue, in no particular order: the queue's
+    /// is theirs.
+    pub tracks: Vec<i64>,
+}
+
+/// What brought a group in, which is what its header says.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum GroupKind {
+    Album {
+        album_id: String,
+        title: String,
+        artist: String,
+        #[serde(default)]
+        image: Option<String>,
+    },
+    /// What generating made, from `recipe`, which a reroll runs again.
+    Generated { recipe: Recipe },
+}
+
+impl GroupKind {
+    pub fn album(album: &RemoteAlbum) -> Self {
+        GroupKind::Album {
+            album_id: album.id.clone(),
+            title: album.title.clone(),
+            artist: album.artist.clone(),
+            image: album.image.clone(),
+        }
+    }
 }
 
 /// One change to the session, as a device asks for it.
@@ -59,12 +106,45 @@ pub struct Session {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Op {
     /// Replace the queue and play from `index`, which points into `tracks`
-    /// as given, before duplicates are dropped.
-    Load { tracks: Vec<RemoteTrack>, index: usize },
+    /// as given, before duplicates are dropped. With a `group`, the new queue
+    /// is one, an album played whole, say. Each `group` is left out when
+    /// `None`, so a server older than groups still reads the op.
+    Load {
+        tracks: Vec<RemoteTrack>,
+        index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<GroupKind>,
+    },
     /// Add to the end, starting playback if the queue was empty.
-    Append { tracks: Vec<RemoteTrack> },
+    Append {
+        tracks: Vec<RemoteTrack>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<GroupKind>,
+    },
     /// Insert right after the current track.
-    PlayNext { tracks: Vec<RemoteTrack> },
+    PlayNext {
+        tracks: Vec<RemoteTrack>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<GroupKind>,
+    },
+    /// Queue a group in place of the upcoming rest of `replace`, a reroll,
+    /// or else after the last upcoming generated group, or after the rest of
+    /// the group playing, or right after the current track: generated lists
+    /// queue up one after the other, without cutting into an album. Tracks
+    /// it repeats from what is still to come move into it; what has played
+    /// or is playing is not queued again.
+    Section {
+        tracks: Vec<RemoteTrack>,
+        kind: GroupKind,
+        #[serde(default)]
+        replace: Option<u64>,
+    },
+    /// Move every row of a group, in their order, to just before the row now
+    /// at `to`, or to the end when `to` is the queue's length.
+    MoveGroup { group: u64, to: usize },
+    /// Take a group's rows still to come out of the queue, and forget it:
+    /// those already played, and the one playing, stay as plain rows.
+    DropGroup { group: u64 },
     /// Replace everything after the current track, the drawer's sort.
     Upcoming { tracks: Vec<RemoteTrack> },
     Clear,
@@ -100,6 +180,7 @@ impl Op {
                 | Op::Move { .. }
                 | Op::Shift { .. }
                 | Op::Jump { .. }
+                | Op::MoveGroup { .. }
         )
     }
 }
@@ -192,6 +273,10 @@ fn identities(tracks: &[RemoteTrack]) -> HashSet<TrackIdentity> {
     tracks.iter().map(|track| track.identity()).collect()
 }
 
+fn ids(tracks: &[RemoteTrack]) -> Vec<i64> {
+    tracks.iter().map(|track| track.id).collect()
+}
+
 /// Where the entry at `index` ends up once the one at `from` is taken out and
 /// put back at `to`.
 ///
@@ -225,8 +310,9 @@ impl Session {
             return Err(Stale);
         }
 
+        let queue_version = self.queue_version;
         match op {
-            Op::Load { tracks, index } => {
+            Op::Load { tracks, index, group } => {
                 let wanted = tracks.get(index).map(|track| track.identity());
                 let tracks = unduplicated(tracks, &mut HashSet::new());
                 // Clicking the third row still plays the third row, not
@@ -234,14 +320,21 @@ impl Session {
                 let start = wanted
                     .and_then(|id| tracks.iter().position(|track| track.identity() == id))
                     .unwrap_or(0);
+                self.groups.clear();
+                if let Some(kind) = group {
+                    self.group(kind, None, ids(&tracks));
+                }
                 self.queue = tracks;
                 self.queue_changed();
                 self.jump(start, from);
             }
-            Op::Append { tracks } => {
+            Op::Append { tracks, group } => {
                 let start = self.queue.len();
                 let tracks = unduplicated(tracks, &mut identities(&self.queue));
                 if !tracks.is_empty() {
+                    if let Some(kind) = group {
+                        self.group(kind, None, ids(&tracks));
+                    }
                     self.queue.extend(tracks);
                     self.queue_changed();
                     if start == 0 {
@@ -249,10 +342,13 @@ impl Session {
                     }
                 }
             }
-            Op::PlayNext { tracks } => {
+            Op::PlayNext { tracks, group } => {
                 let length = self.queue.len();
                 let tracks = unduplicated(tracks, &mut identities(&self.queue));
                 if !tracks.is_empty() {
+                    if let Some(kind) = group {
+                        self.group(kind, None, ids(&tracks));
+                    }
                     let at = if length == 0 { 0 } else { (self.index + 1).min(length) };
                     self.queue.splice(at..at, tracks);
                     self.queue_changed();
@@ -268,6 +364,9 @@ impl Session {
                 self.queue.extend(tracks);
                 self.queue_changed();
             }
+            Op::Section { tracks, kind, replace } => self.section(tracks, kind, replace, from),
+            Op::MoveGroup { group, to } => self.move_group(group, to),
+            Op::DropGroup { group } => self.drop_group(group),
             Op::Clear => {
                 self.queue.clear();
                 self.queue_changed();
@@ -359,12 +458,158 @@ impl Session {
             }
         }
 
+        if self.queue_version != queue_version {
+            self.tidy_groups();
+        }
         self.version += 1;
         Ok(())
     }
 
     fn queue_changed(&mut self) {
         self.queue_version += 1;
+    }
+
+    /// The group the track with this id is in.
+    pub fn group_of(&self, track_id: i64) -> Option<&Group> {
+        self.groups.iter().find(|group| group.tracks.contains(&track_id))
+    }
+
+    /// Make `tracks` a group of `kind`, or add them to `into` when it is
+    /// still around. A track is in one group at most, so they leave any
+    /// other.
+    fn group(&mut self, kind: GroupKind, into: Option<u64>, tracks: Vec<i64>) {
+        let joining: HashSet<i64> = tracks.iter().copied().collect();
+        for group in &mut self.groups {
+            group.tracks.retain(|id| !joining.contains(id));
+        }
+        match into.and_then(|id| self.groups.iter_mut().find(|group| group.id == id)) {
+            Some(group) => {
+                group.kind = kind;
+                group.tracks.extend(tracks);
+            }
+            None if !tracks.is_empty() => self.groups.push(Group {
+                // Bumped once per op, so no two groups share it.
+                id: self.version + 1,
+                kind,
+                tracks,
+            }),
+            None => {}
+        }
+    }
+
+    /// Forget members that left the queue, and groups left with none.
+    fn tidy_groups(&mut self) {
+        let queued: HashSet<i64> = self.queue.iter().map(|track| track.id).collect();
+        for group in &mut self.groups {
+            group.tracks.retain(|id| queued.contains(id));
+        }
+        self.groups.retain(|group| !group.tracks.is_empty());
+    }
+
+    fn members(&self, group: u64) -> HashSet<i64> {
+        self.groups
+            .iter()
+            .find(|candidate| candidate.id == group)
+            .map(|group| group.tracks.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// See `Op::Section`.
+    fn section(&mut self, tracks: Vec<RemoteTrack>, kind: GroupKind, replace: Option<u64>, from: i64) {
+        if self.queue.is_empty() {
+            let tracks = unduplicated(tracks, &mut HashSet::new());
+            if !tracks.is_empty() {
+                self.groups.clear();
+                self.group(kind, None, ids(&tracks));
+                self.queue = tracks;
+                self.queue_changed();
+                self.jump(0, from);
+            }
+            return;
+        }
+
+        let index = self.index.min(self.queue.len() - 1);
+        let new = unduplicated(tracks, &mut identities(&self.queue[..=index]));
+        let fresh = identities(&new);
+        let into = replace.filter(|group| self.groups.iter().any(|candidate| candidate.id == *group));
+        let old = into.map(|group| self.members(group)).unwrap_or_default();
+
+        let upcoming = self.queue.split_off(index + 1);
+        let at = upcoming
+            .iter()
+            .position(|track| old.contains(&track.id))
+            .unwrap_or_else(|| self.landing(&upcoming));
+        let keep = |tracks: &[RemoteTrack]| -> Vec<RemoteTrack> {
+            tracks
+                .iter()
+                .filter(|track| !old.contains(&track.id) && !fresh.contains(&track.identity()))
+                .cloned()
+                .collect()
+        };
+        let mut placed = keep(&upcoming[..at]);
+        placed.extend(new.iter().cloned());
+        placed.extend(keep(&upcoming[at..]));
+        self.queue.extend(placed);
+        // The old rows still to come have left the queue, and leave the
+        // group with it, below; the played ones stay in it.
+        self.group(kind, into, ids(&new));
+        self.queue_changed();
+    }
+
+    /// Where in `upcoming` a new generated group goes: after the last
+    /// generated one still to come, or else after the rest of the group
+    /// playing.
+    fn landing(&self, upcoming: &[RemoteTrack]) -> usize {
+        let generated: HashSet<i64> = self
+            .groups
+            .iter()
+            .filter(|group| matches!(group.kind, GroupKind::Generated { .. }))
+            .flat_map(|group| group.tracks.iter().copied())
+            .collect();
+        if let Some(last) = upcoming.iter().rposition(|track| generated.contains(&track.id)) {
+            return last + 1;
+        }
+        match self.current().and_then(|track| self.group_of(track.id)) {
+            Some(playing) => upcoming.iter().take_while(|track| playing.tracks.contains(&track.id)).count(),
+            None => 0,
+        }
+    }
+
+    /// See `Op::MoveGroup`.
+    fn move_group(&mut self, group: u64, to: usize) {
+        let members = self.members(group);
+        if members.is_empty() || to > self.queue.len() {
+            return;
+        }
+        let before = self.queue[..to].iter().filter(|track| !members.contains(&track.id)).count();
+        let current = self.current().map(|track| track.id);
+        let (moving, mut rest): (Vec<RemoteTrack>, Vec<RemoteTrack>) =
+            self.queue.iter().cloned().partition(|track| members.contains(&track.id));
+        rest.splice(before..before, moving);
+        if rest == self.queue {
+            return;
+        }
+        self.queue = rest;
+        if let Some(current) = current {
+            self.index = self.queue.iter().position(|track| track.id == current).unwrap_or(self.index);
+        }
+        self.queue_changed();
+    }
+
+    /// See `Op::DropGroup`.
+    fn drop_group(&mut self, group: u64) {
+        let members = self.members(group);
+        self.groups.retain(|candidate| candidate.id != group);
+        let keep = (self.index + 1).min(self.queue.len());
+        let length = self.queue.len();
+        let mut at = 0;
+        self.queue.retain(|track| {
+            at += 1;
+            at <= keep || !members.contains(&track.id)
+        });
+        if self.queue.len() != length {
+            self.queue_changed();
+        }
     }
 
     /// Play the entry at `index` from its start. Claims the output for `from`
@@ -509,6 +754,7 @@ mod tests {
             Op::Load {
                 tracks: tracks(ids),
                 index,
+                group: None,
             },
         );
         session
@@ -563,7 +809,7 @@ mod tests {
         let mut list = tracks(&[1, 2, 3]);
         list.insert(1, track(1));
         let mut session = Session::default();
-        apply(&mut session, Op::Load { tracks: list, index: 3 });
+        apply(&mut session, Op::Load { tracks: list, index: 3, group: None });
         assert_eq!(ids(&session), vec![1, 2, 3]);
         assert_eq!(session.current().map(|t| t.id), Some(3));
         assert!(session.playing);
@@ -573,14 +819,14 @@ mod tests {
     fn the_first_device_to_play_becomes_the_output() {
         let mut session = Session::default();
         session
-            .apply(Op::Load { tracks: tracks(&[1]), index: 0 }, 0, PHONE)
+            .apply(Op::Load { tracks: tracks(&[1]), index: 0, group: None }, 0, PHONE)
             .unwrap();
         assert_eq!(session.output, Some(PHONE));
 
         // Another device loading a queue does not take the sound away.
         let queue_version = session.queue_version;
         session
-            .apply(Op::Load { tracks: tracks(&[2]), index: 0 }, queue_version, ME)
+            .apply(Op::Load { tracks: tracks(&[2]), index: 0, group: None }, queue_version, ME)
             .unwrap();
         assert_eq!(session.output, Some(PHONE));
     }
@@ -588,18 +834,18 @@ mod tests {
     #[test]
     fn appending_to_an_empty_queue_starts_playing() {
         let mut session = Session::default();
-        apply(&mut session, Op::Append { tracks: tracks(&[1, 2]) });
+        apply(&mut session, Op::Append { tracks: tracks(&[1, 2]), group: None });
         assert!(session.playing);
         assert_eq!(session.index, 0);
 
-        apply(&mut session, Op::Append { tracks: tracks(&[2, 3]) });
+        apply(&mut session, Op::Append { tracks: tracks(&[2, 3]), group: None });
         assert_eq!(ids(&session), vec![1, 2, 3]);
     }
 
     #[test]
     fn play_next_goes_right_after_the_current_track() {
         let mut session = loaded(&[1, 2, 3], 1);
-        apply(&mut session, Op::PlayNext { tracks: tracks(&[9, 8]) });
+        apply(&mut session, Op::PlayNext { tracks: tracks(&[9, 8]), group: None });
         assert_eq!(ids(&session), vec![1, 2, 9, 8, 3]);
         assert_eq!(session.index, 1);
     }
@@ -625,7 +871,7 @@ mod tests {
     fn a_row_op_against_an_old_queue_is_refused() {
         let mut session = loaded(&[1, 2, 3], 0);
         let seen = session.queue_version;
-        apply(&mut session, Op::Append { tracks: tracks(&[4]) });
+        apply(&mut session, Op::Append { tracks: tracks(&[4]), group: None });
         assert_eq!(session.apply(Op::Remove { at: 2 }, seen, ME), Err(Stale));
         assert_eq!(ids(&session), vec![1, 2, 3, 4]);
     }
@@ -702,6 +948,7 @@ mod tests {
             "position":0.0,"cue":0,"output":null,"devices":[]}"#;
         let session: Session = serde_json::from_str(json).unwrap();
         assert_eq!(session.volume, None);
+        assert!(session.groups.is_empty());
     }
 
     #[test]
@@ -716,8 +963,11 @@ mod tests {
     #[test]
     fn a_splice_rebuilds_the_queue_after_any_op() {
         let ops = [
-            Op::Append { tracks: tracks(&[9, 1]) },
-            Op::PlayNext { tracks: tracks(&[8, 7]) },
+            Op::Append { tracks: tracks(&[9, 1]), group: None },
+            Op::PlayNext { tracks: tracks(&[8, 7]), group: Some(album("x")) },
+            Op::Section { tracks: tracks(&[9, 4]), kind: radio(1), replace: None },
+            Op::MoveGroup { group: 0, to: 0 },
+            Op::DropGroup { group: 0 },
             Op::Upcoming { tracks: tracks(&[6, 5, 4]) },
             Op::Remove { at: 0 },
             Op::Remove { at: 3 },
@@ -725,7 +975,7 @@ mod tests {
             Op::Move { from: 1, to: 4 },
             Op::Move { from: 5, to: 0 },
             Op::Shift { at: 2, delta: 1 },
-            Op::Load { tracks: tracks(&[3, 2]), index: 0 },
+            Op::Load { tracks: tracks(&[3, 2]), index: 0, group: None },
             Op::Clear,
         ];
         for op in ops {
@@ -766,6 +1016,190 @@ mod tests {
             "queue":[],"index":0,"playing":false,"position":0.0,"cue":0,"output":null,"devices":[]}}"#;
         let update: Update = serde_json::from_str(json).unwrap();
         assert_eq!(update.splice, None);
+    }
+
+    fn album(title: &str) -> GroupKind {
+        GroupKind::Album {
+            album_id: title.into(),
+            title: title.into(),
+            artist: "someone".into(),
+            image: None,
+        }
+    }
+
+    fn radio(seed: i64) -> GroupKind {
+        GroupKind::Generated {
+            recipe: Recipe::Radio { seed },
+        }
+    }
+
+    /// The groups as the rows they cover, in queue order.
+    fn runs(session: &Session) -> Vec<Vec<i64>> {
+        session
+            .groups
+            .iter()
+            .map(|group| ids(session).into_iter().filter(|id| group.tracks.contains(id)).collect())
+            .collect()
+    }
+
+    fn last_group(session: &Session) -> u64 {
+        session.groups.last().expect("a group").id
+    }
+
+    #[test]
+    fn an_album_played_whole_is_one_group() {
+        let mut session = Session::default();
+        apply(&mut session, Op::Load { tracks: tracks(&[1, 2, 3]), index: 0, group: Some(album("a")) });
+        assert_eq!(runs(&session), vec![vec![1, 2, 3]]);
+
+        // A new queue forgets the old one's groups.
+        apply(&mut session, Op::Load { tracks: tracks(&[4]), index: 0, group: None });
+        assert!(session.groups.is_empty());
+    }
+
+    #[test]
+    fn a_queued_album_groups_only_what_it_added() {
+        let mut session = loaded(&[1, 2], 0);
+        apply(&mut session, Op::Append { tracks: tracks(&[2, 3, 4]), group: Some(album("a")) });
+        assert_eq!(runs(&session), vec![vec![3, 4]]);
+    }
+
+    #[test]
+    fn generated_groups_queue_one_after_the_other() {
+        let mut session = loaded(&[1, 2, 3], 0);
+        apply(&mut session, Op::Section { tracks: tracks(&[7, 8]), kind: radio(1), replace: None });
+        assert_eq!(ids(&session), vec![1, 7, 8, 2, 3]);
+        apply(&mut session, Op::Section { tracks: tracks(&[9]), kind: radio(7), replace: None });
+        assert_eq!(ids(&session), vec![1, 7, 8, 9, 2, 3]);
+        assert_eq!(runs(&session), vec![vec![7, 8], vec![9]]);
+    }
+
+    #[test]
+    fn a_generated_group_does_not_cut_into_the_album_playing() {
+        let mut session = Session::default();
+        apply(&mut session, Op::Load { tracks: tracks(&[1, 2, 3, 4]), index: 0, group: Some(album("a")) });
+        apply(&mut session, Op::Section { tracks: tracks(&[7]), kind: radio(1), replace: None });
+        assert_eq!(ids(&session), vec![1, 2, 3, 4, 7]);
+    }
+
+    #[test]
+    fn a_generated_group_into_an_empty_queue_plays() {
+        let mut session = Session::default();
+        apply(&mut session, Op::Section { tracks: tracks(&[7, 8]), kind: radio(1), replace: None });
+        assert_eq!(ids(&session), vec![7, 8]);
+        assert!(session.playing);
+        assert_eq!(runs(&session), vec![vec![7, 8]]);
+    }
+
+    /// Playing 1, then the user's 2, the old group's 5 and 6, then the
+    /// user's 9.
+    #[test]
+    fn a_reroll_takes_the_old_groups_place_and_keeps_its_id() {
+        let mut session = loaded(&[1, 2, 9], 0);
+        apply(&mut session, Op::Section { tracks: tracks(&[5, 6]), kind: radio(1), replace: None });
+        let group = last_group(&session);
+        apply(&mut session, Op::Move { from: 3, to: 1 });
+        assert_eq!(ids(&session), vec![1, 2, 5, 6, 9]);
+
+        apply(&mut session, Op::Section { tracks: tracks(&[7, 8]), kind: radio(1), replace: Some(group) });
+        assert_eq!(ids(&session), vec![1, 2, 7, 8, 9]);
+        assert_eq!(session.groups.len(), 1);
+        assert_eq!(last_group(&session), group);
+        assert_eq!(runs(&session), vec![vec![7, 8]]);
+    }
+
+    #[test]
+    fn a_reroll_keeps_the_rows_already_played() {
+        let mut session = loaded(&[1], 0);
+        apply(&mut session, Op::Section { tracks: tracks(&[5, 6]), kind: radio(1), replace: None });
+        let group = last_group(&session);
+        apply(&mut session, Op::Jump { index: 1 });
+        apply(&mut session, Op::Section { tracks: tracks(&[7, 5]), kind: radio(1), replace: Some(group) });
+        // 5 is playing, so it is not queued again behind itself.
+        assert_eq!(ids(&session), vec![1, 5, 7]);
+        assert_eq!(runs(&session), vec![vec![5, 7]]);
+    }
+
+    #[test]
+    fn a_track_already_queued_moves_into_the_new_group() {
+        let mut session = loaded(&[1, 2, 3], 0);
+        apply(&mut session, Op::Section { tracks: tracks(&[3, 4]), kind: radio(1), replace: None });
+        assert_eq!(ids(&session), vec![1, 3, 4, 2]);
+    }
+
+    #[test]
+    fn a_track_is_in_one_group_at_most() {
+        let mut session = Session::default();
+        apply(&mut session, Op::Load { tracks: tracks(&[1, 2, 3]), index: 0, group: Some(album("a")) });
+        apply(&mut session, Op::Section { tracks: tracks(&[3, 4]), kind: radio(1), replace: None });
+        assert_eq!(runs(&session), vec![vec![1, 2], vec![3, 4]]);
+    }
+
+    #[test]
+    fn moving_a_group_moves_all_its_rows_and_keeps_the_playing_track() {
+        let mut session = loaded(&[1, 2, 3], 1);
+        apply(&mut session, Op::Append { tracks: tracks(&[4, 5]), group: Some(album("a")) });
+        let group = last_group(&session);
+        apply(&mut session, Op::MoveGroup { group, to: 0 });
+        assert_eq!(ids(&session), vec![4, 5, 1, 2, 3]);
+        assert_eq!(session.current().map(|t| t.id), Some(2));
+
+        // Back down, before the row now at 4.
+        apply(&mut session, Op::MoveGroup { group, to: 4 });
+        assert_eq!(ids(&session), vec![1, 2, 4, 5, 3]);
+        assert_eq!(session.current().map(|t| t.id), Some(2));
+
+        apply(&mut session, Op::MoveGroup { group, to: 5 });
+        assert_eq!(ids(&session), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn moving_a_group_against_an_old_queue_is_refused() {
+        let mut session = loaded(&[1], 0);
+        apply(&mut session, Op::Append { tracks: tracks(&[4, 5]), group: Some(album("a")) });
+        let group = last_group(&session);
+        let seen = session.queue_version;
+        apply(&mut session, Op::Append { tracks: tracks(&[6]), group: None });
+        assert_eq!(session.apply(Op::MoveGroup { group, to: 0 }, seen, ME), Err(Stale));
+    }
+
+    #[test]
+    fn dropping_a_group_keeps_what_has_played_and_is_playing() {
+        let mut session = Session::default();
+        apply(&mut session, Op::Load { tracks: tracks(&[1, 2, 3]), index: 1, group: Some(album("a")) });
+        apply(&mut session, Op::Append { tracks: tracks(&[4]), group: None });
+        let group = session.groups[0].id;
+        apply(&mut session, Op::DropGroup { group });
+        assert_eq!(ids(&session), vec![1, 2, 4]);
+        assert_eq!(session.current().map(|t| t.id), Some(2));
+        assert!(session.groups.is_empty());
+    }
+
+    #[test]
+    fn a_group_whose_rows_all_left_is_forgotten() {
+        let mut session = loaded(&[1], 0);
+        apply(&mut session, Op::Append { tracks: tracks(&[4, 5]), group: Some(album("a")) });
+        apply(&mut session, Op::Remove { at: 1 });
+        assert_eq!(runs(&session), vec![vec![5]]);
+        apply(&mut session, Op::Remove { at: 1 });
+        assert!(session.groups.is_empty());
+    }
+
+    #[test]
+    fn groups_outlive_a_trip_through_json() {
+        let mut session = loaded(&[1], 0);
+        apply(&mut session, Op::Section { tracks: tracks(&[5, 6]), kind: radio(1), replace: None });
+        let json = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.groups, session.groups);
+    }
+
+    #[test]
+    fn an_op_without_a_group_still_reads() {
+        let op: Op = serde_json::from_str(r#"{"op":"append","tracks":[]}"#).unwrap();
+        assert_eq!(op, Op::Append { tracks: vec![], group: None });
+        // And is sent without one, for a server older than groups.
+        assert_eq!(serde_json::to_string(&op).unwrap(), r#"{"op":"append","tracks":[]}"#);
     }
 
     #[test]

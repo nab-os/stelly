@@ -1180,8 +1180,8 @@ span.path-end {
 .queue-where { font-variant-numeric: tabular-nums; }
 .queue-drawer > p { margin: 8px 6px; }
 
-/* The generated section: a header over its rows, which carry its colour
-   down their left edge. */
+/* A group, an album or a generated list: a header over its rows, which
+   carry its colour down their left edge. The header drags the group. */
 .section-head {
   display: flex;
   align-items: center;
@@ -1201,7 +1201,16 @@ span.path-end {
 .section-actions .link { font-size: 11px; }
 .section-actions .link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
 .section-status { margin: 0; padding: 4px 10px; background: var(--bg); font-size: 11px; }
-.queue-row.generated { box-shadow: inset 2px 0 0 var(--accent); border-radius: 0 8px 8px 0; }
+.section-cover { flex: none; width: 28px; height: 28px; }
+.queue-row.grouped { box-shadow: inset 2px 0 0 var(--accent); border-radius: 0 8px 8px 0; }
+.group-head, .section-status {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: pan-y;
+  transition: transform 120ms ease;
+}
 
 /* Phone only, see the `@media` block. */
 .drawer-handle { display: none; }
@@ -1254,8 +1263,9 @@ span.path-end {
   .queue-row:hover .queue-remove { visibility: visible; }
 }
 
-/* Lifted out of the list while dragged; it follows the pointer without lag. */
-.queue-row.dragging {
+/* Lifted out of the list while dragged; it follows the pointer without lag.
+   A group's header and rows lift together. */
+.queue-row.dragging, .group-head.dragging, .section-status.dragging {
   position: relative;
   z-index: 2;
   cursor: grabbing;

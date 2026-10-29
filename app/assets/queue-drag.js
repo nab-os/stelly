@@ -1,4 +1,5 @@
-// Gestures for the queue drawer: reorder by dragging a row, remove one by
+// Gestures for the queue drawer: reorder by dragging a row, move a whole
+// group (an album, a generated list) by dragging its header, remove a row by
 // swiping it away, close the drawer by its handle.
 //
 // A mouse drags a row as soon as it moves a few pixels with the button held;
@@ -14,7 +15,8 @@
 //
 // Nothing here reorders the DOM. Rows are translated to show where the
 // dragged one would land, then `{from, to}` goes to Rust, which owns the
-// queue and re-renders it in the new order.
+// queue and re-renders it in the new order. A group goes as
+// `{group, to}`, `to` being the row it lands before.
 
 window.stellyQueueSend = (message) => dioxus.send(message);
 
@@ -38,6 +40,49 @@ if (!window.stellyQueueGesturesInstalled) {
     return row || null;
   };
 
+  // A group's header, which drags the group.
+  const headFor = (target) => {
+    if (!target.closest || target.closest("button, .clickable")) return null;
+    return target.closest(".queue-list > .group-head");
+  };
+
+  // What a press can drag: a row, or a group by its header.
+  const grabFor = (target) => rowFor(target) || headFor(target);
+
+  // The list as what a group can be dragged past: each group's run, its
+  // header, whatever follows it, and its rows, as one; each row outside a
+  // group on its own. `first` is the unit's first row among the `li`s.
+  const unitsOf = (list) => {
+    const units = [];
+    let rows = 0;
+    const children = Array.from(list.children);
+    for (let i = 0; i < children.length; i++) {
+      const node = children[i];
+      if (node.classList.contains("group-head")) {
+        const nodes = [node];
+        let j = i + 1;
+        while (j < children.length && children[j].tagName !== "LI" && !children[j].classList.contains("group-head")) {
+          nodes.push(children[j++]);
+        }
+        const count = Number(node.dataset.rows) || 0;
+        for (let k = 0; k < count && j < children.length && children[j].tagName === "LI"; k++) {
+          nodes.push(children[j++]);
+        }
+        units.push({ nodes, first: rows, head: node });
+        rows += nodes.filter((n) => n.tagName === "LI").length;
+        i = j - 1;
+      } else if (node.tagName === "LI") {
+        units.push({ nodes: [node], first: rows });
+        rows += 1;
+      } else if (units.length) {
+        units[units.length - 1].nodes.push(node);
+      }
+    }
+    return { units, rows };
+  };
+
+  const height = (nodes) => nodes.reduce((sum, node) => sum + node.getBoundingClientRect().height, 0);
+
   // A drag ends on a mouseup over the row it started on, which the webview
   // then reports as a click on that row: play it. Swallow that one click.
   let swallowClick = false;
@@ -56,36 +101,56 @@ if (!window.stellyQueueGesturesInstalled) {
 
   let drag = null;
 
-  function startDrag(row, y) {
-    const list = row.parentElement;
-    const items = rowsOf(list);
-    const from = items.indexOf(row);
+  // A row, or with a header a group, picked up at `y`. Either way the drag is
+  // of one unit among others: rows among rows, or a group among the groups
+  // and loose rows around it.
+  function startDrag(grabbed, y) {
+    const list = grabbed.parentElement;
+    let units;
+    let from;
+    let rows = 0;
+    if (grabbed.classList.contains("group-head")) {
+      const all = unitsOf(list);
+      units = all.units;
+      rows = all.rows;
+      from = units.findIndex((unit) => unit.head === grabbed);
+    } else {
+      units = rowsOf(list).map((row, i) => ({ nodes: [row], first: i }));
+      from = units.findIndex((unit) => unit.nodes[0] === grabbed);
+    }
     if (from < 0) return false;
     drag = {
-      row,
+      grabbed,
+      group: grabbed.dataset.group,
       from,
       to: from,
       startY: y,
-      items,
+      units,
+      rows,
       // Measured once: re-measuring per move would read rows this drag has
       // already translated.
-      heights: items.map((node) => node.getBoundingClientRect().height),
+      heights: units.map((unit) => height(unit.nodes)),
     };
-    row.classList.add("dragging");
+    units[from].nodes.forEach((node) => node.classList.add("dragging"));
     if (navigator.vibrate) navigator.vibrate(12);
     return true;
   }
 
+  const shift = (unit, px) =>
+    unit.nodes.forEach((node) => {
+      node.style.transform = px ? `translateY(${px}px)` : "";
+    });
+
   function moveDrag(y) {
     const offset = y - drag.startY;
-    drag.row.style.transform = `translateY(${offset}px)`;
+    shift(drag.units[drag.from], offset);
 
     // Walk outward from the original slot, consuming neighbour heights, until
-    // the pointer no longer clears the next row's midpoint.
+    // the pointer no longer clears the next unit's midpoint.
     let to = drag.from;
     if (offset > 0) {
       let edge = 0;
-      for (let i = drag.from + 1; i < drag.items.length; i++) {
+      for (let i = drag.from + 1; i < drag.units.length; i++) {
         if (offset <= edge + drag.heights[i] / 2) break;
         edge += drag.heights[i];
         to = i;
@@ -101,25 +166,33 @@ if (!window.stellyQueueGesturesInstalled) {
     drag.to = to;
 
     const gap = drag.heights[drag.from];
-    drag.items.forEach((node, i) => {
-      if (node === drag.row) return;
-      let shift = 0;
-      if (to > drag.from && i > drag.from && i <= to) shift = -gap;
-      if (to < drag.from && i >= to && i < drag.from) shift = gap;
-      node.style.transform = shift ? `translateY(${shift}px)` : "";
+    drag.units.forEach((unit, i) => {
+      if (i === drag.from) return;
+      let px = 0;
+      if (to > drag.from && i > drag.from && i <= to) px = -gap;
+      if (to < drag.from && i >= to && i < drag.from) px = gap;
+      shift(unit, px);
     });
   }
 
   function endDrag() {
-    const { from, to, items, row } = drag;
+    const { from, to, units, group, rows } = drag;
     drag = null;
     // Cleared before reporting: Rust re-renders these rows in the new order,
     // and a stale transform would offset whatever lands in that slot.
-    items.forEach((node) => {
-      node.style.transform = "";
+    units.forEach((unit) => {
+      shift(unit, 0);
+      unit.nodes.forEach((node) => node.classList.remove("dragging"));
     });
-    row.classList.remove("dragging");
-    if (from !== to) send({ type: "move", from, to });
+    if (from === to) return;
+    if (group === undefined) {
+      send({ type: "move", from, to });
+    } else {
+      // The row it lands before: the dropped-on unit's first going up, the
+      // one after it going down, or past the end.
+      const before = to < from ? units[to].first : to + 1 < units.length ? units[to + 1].first : rows;
+      send({ type: "move-group", group: Number(group), to: before });
+    }
   }
 
   // ---------------------------------------------------------------- mouse
@@ -128,7 +201,7 @@ if (!window.stellyQueueGesturesInstalled) {
 
   document.addEventListener("pointerdown", (event) => {
     if (event.pointerType !== "mouse" || event.button !== 0) return;
-    const row = rowFor(event.target);
+    const row = grabFor(event.target);
     if (!row) return;
     mouse = { row, y: event.clientY, dragging: false };
   });
@@ -173,7 +246,7 @@ if (!window.stellyQueueGesturesInstalled) {
     "touchstart",
     (event) => {
       if (event.touches.length !== 1) return;
-      const row = rowFor(event.target);
+      const row = grabFor(event.target);
       if (!row) return;
       const point = event.touches[0];
       touch = {
@@ -200,7 +273,7 @@ if (!window.stellyQueueGesturesInstalled) {
     if (touch.mode === "pending") {
       if (Math.abs(dx) < SLOP_PX && Math.abs(dy) < SLOP_PX) return;
       clearTimeout(touch.timer);
-      if (Math.abs(dx) > Math.abs(dy)) {
+      if (Math.abs(dx) > Math.abs(dy) && touch.row.tagName === "LI") {
         touch.mode = "swipe";
         touch.row.style.transition = "none";
       } else {

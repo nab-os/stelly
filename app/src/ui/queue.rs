@@ -6,17 +6,21 @@
 //! press, on a touch screen), and leave by a swipe or the red cross that
 //! shows on hover. The gestures live in `queue-drag.js`.
 //!
-//! What generating produced is a section of it, under a header that says
-//! what made it and how much of it is left, and rerolls, saves or stops it.
+//! An album, or what generating produced, is a group of it, under a header
+//! that says what it is and how much of it is left. Dragged by its header, a
+//! group moves whole; generated ones also reroll, save or stop from there.
+//! Groups are the session's, see `Session::groups`, so they outlive a reload.
 
 use super::generate::{describe, Generator, Recipe};
 use super::menu::{open_menu, ContextMenu, MenuTarget};
-use super::player::{clear_queue, move_to, play_at, remove_at, set_upcoming, Player};
-use super::side::{export_result, title_for};
+use super::player::{clear_queue, drop_group, move_group, move_to, play_at, remove_at, set_upcoming, Player};
+use super::side::{export_group, title_for};
 use super::{album_link, artist_link, icons, Cover, Library, MapView};
 use crate::api::OrderRequest;
 use crate::backend::backend;
 use crate::catalogue::RemoteTrack;
+use crate::session::{Group, GroupKind};
+use std::collections::HashMap;
 use dioxus::core::Task;
 use dioxus::prelude::*;
 
@@ -123,6 +127,12 @@ pub fn QueueView() -> Element {
                         remove_at(player, index);
                     }
                 }
+                Some("move-group") => {
+                    let group = message.get("group").and_then(|v| v.as_u64());
+                    if let (Some(group), Some(to)) = (group, at("to")) {
+                        move_group(player, group, to);
+                    }
+                }
                 Some("close") => queue_open.set(false),
                 _ => {}
             }
@@ -205,39 +215,45 @@ pub fn QueueView() -> Element {
 fn QueueRows() -> Element {
     let player = use_context::<Player>();
     let library = use_context::<Library>();
-    let generator = use_context::<Generator>();
     let mut menu = use_context::<ContextMenu>().0;
 
     let queue = player.queue.read().clone();
+    let groups = player.groups.read().clone();
     let now_playing = player.current().map(|track| track.id);
     let keys = super::row_keys(queue.iter().map(|track| track.id));
 
-    // The generated section: its header goes over the first of its rows
-    // still in the queue, and each of them is marked as its own. Not
-    // necessarily one run, since rows can be dragged out of it.
-    let section: std::collections::HashSet<i64> = generator
-        .result
-        .read()
-        .iter()
-        .map(|step| step.track.track_id)
+    // Each run of a group's rows has its header over it. Usually one run a
+    // group, but rows can be dragged in and out of it.
+    let group_of: HashMap<i64, &Group> =
+        groups.iter().flat_map(|group| group.tracks.iter().map(move |id| (*id, group))).collect();
+    let member: Vec<Option<u64>> = queue.iter().map(|track| group_of.get(&track.id).map(|group| group.id)).collect();
+    let heads: Vec<Option<(Group, usize)>> = (0..queue.len())
+        .map(|at| {
+            let id = member[at]?;
+            if at > 0 && member[at - 1] == Some(id) {
+                return None;
+            }
+            let rows = member[at..].iter().take_while(|other| **other == Some(id)).count();
+            Some(((*group_of[&queue[at].id]).clone(), rows))
+        })
         .collect();
-    let head_at = queue.iter().position(|track| section.contains(&track.id));
+    let head_after = |at: usize| heads.get(at + 1).cloned().flatten();
 
     rsx! {
-        // The header is not an `li`: queue-drag.js counts only those as rows.
-        // Drawn after the row before the section, the row being what each
+        // The headers are not `li`s: queue-drag.js counts only those as rows.
+        // Each is drawn after the row before its run, the row being what each
         // turn of the loop is keyed by.
         ol { class: "queue-list",
-            if head_at == Some(0) {
-                SectionHead {}
+            if let Some((group, rows)) = heads.first().cloned().flatten() {
+                GroupHead { group, rows }
             }
             for ((index, track), key) in queue.into_iter().enumerate().zip(keys) {
                 li {
                     key: "{key}",
-                    class: match (now_playing == Some(track.id), section.contains(&track.id)) {
-                        (true, true) => "queue-row playing generated",
+                    class: match (now_playing == Some(track.id), member[index].is_some()) {
+                        (true, true) => "queue-row playing grouped",
                         (true, false) => "queue-row playing",
-                        (false, true) => "queue-row generated",
+                        (false, true) => "queue-row grouped",
                         (false, false) => "queue-row",
                     },
                     "data-track": "{track.id}",
@@ -270,84 +286,121 @@ fn QueueRows() -> Element {
                         {icons::close()}
                     }
                 }
-                if head_at == Some(index + 1) {
-                    SectionHead {}
+                if let Some((group, rows)) = head_after(index) {
+                    GroupHead { group, rows }
                 }
             }
         }
     }
 }
 
-/// The generated section's header: what made it, how many of its tracks are
-/// still to come, and what can be done with it.
+/// A group's header: what it is, how many of its tracks are still to come,
+/// and what can be done with it. Dragged, it moves the group's `rows` below
+/// it, and any other run of it, see queue-drag.js.
 #[component]
-fn SectionHead() -> Element {
+fn GroupHead(group: Group, rows: usize) -> Element {
     let player = use_context::<Player>();
     let generator = use_context::<Generator>();
     let provider = use_context::<super::Provider>();
     let map = use_context::<MapView>();
 
-    let Some(recipe) = generator.produced_by.read().clone() else {
-        return rsx! { div { class: "section-head" } };
-    };
-    let section = generator.ids();
+    let id = group.id;
     let index = *player.index.read();
+    // In queue order, for the map and the save.
+    let tracks: Vec<i64> = player
+        .queue
+        .read()
+        .iter()
+        .map(|track| track.id)
+        .filter(|track| group.tracks.contains(track))
+        .collect();
     let left = player
         .queue
         .read()
         .iter()
         .skip(index + 1)
-        .filter(|track| section.contains(&track.id))
+        .filter(|track| group.tracks.contains(&track.id))
         .count();
-    let busy = *generator.busy.read();
-    let (icon, heading) = heading(&recipe);
+    let about = *generator.about.read() == Some(id);
+    let busy = about && *generator.busy.read();
+    let status = if about { generator.status.read().clone() } else { None };
+
+    let generated = matches!(group.kind, GroupKind::Generated { .. });
+    let remove = rsx! {
+        button {
+            class: "link",
+            title: "take what is left of it out of the queue",
+            onclick: move |_| if generated { generator.stop(id) } else { drop_group(player, id) },
+            if generated { "stop" } else { "remove" }
+        }
+    };
 
     rsx! {
-        div { class: "section-head",
-            span { class: "section-icon", {icon} }
-            div { class: "section-text",
-                span { class: "title ellipsis", title: "{describe(&recipe, label)}", "{heading}" }
-                span { class: "muted",
-                    if busy {
-                        "working…"
-                    } else if *generator.stale.read() {
-                        "{left} left · the space changed, reroll for a fresh one"
-                    } else {
-                        "{left} left"
+        div {
+            class: "section-head group-head",
+            title: "drag to move it all",
+            "data-group": "{id}",
+            "data-rows": "{rows}",
+            match &group.kind {
+                GroupKind::Album { title, artist, image, .. } => rsx! {
+                    Cover { url: image.clone(), class: "section-cover" }
+                    div { class: "section-text",
+                        span { class: "title ellipsis", title: "{title}", "{title}" }
+                        span { class: "muted ellipsis", "{artist} · {left} left" }
                     }
-                }
-            }
-            div { class: "section-actions",
-                button {
-                    class: "link",
-                    title: "make it again, in place of what is left of it",
-                    disabled: busy,
-                    onclick: move |_| generator.reroll(),
-                    "reroll"
-                }
-                button {
-                    class: "link",
-                    title: "trace it on the map",
-                    onclick: move |_| map.show_route(),
-                    "map"
-                }
-                if provider.exports() {
-                    button {
-                        class: "link",
-                        title: "save it as a playlist",
-                        onclick: move |_| export_result(generator),
-                        "save"
+                    div { class: "section-actions", {remove} }
+                },
+                GroupKind::Generated { recipe } => {
+                    let (icon, heading) = heading(recipe);
+                    let recipe = recipe.clone();
+                    let route = tracks.clone();
+                    let mut shown = generator.route;
+                    rsx! {
+                        span { class: "section-icon", {icon} }
+                        div { class: "section-text",
+                            span { class: "title ellipsis", title: "{describe(&recipe, label)}", "{heading}" }
+                            span { class: "muted",
+                                if busy {
+                                    "working…"
+                                } else if generator.stale.read().contains(&id) {
+                                    "{left} left · the space changed, reroll for a fresh one"
+                                } else {
+                                    "{left} left"
+                                }
+                            }
+                        }
+                        div { class: "section-actions",
+                            button {
+                                class: "link",
+                                title: "make it again, in place of what is left of it",
+                                disabled: *generator.busy.read(),
+                                onclick: move |_| generator.reroll(id, &recipe),
+                                "reroll"
+                            }
+                            button {
+                                class: "link",
+                                title: "trace it on the map",
+                                onclick: move |_| {
+                                    shown.set(route.clone());
+                                    map.show_route();
+                                },
+                                "map"
+                            }
+                            if provider.exports() {
+                                button {
+                                    class: "link",
+                                    title: "save it as a playlist",
+                                    onclick: move |_| export_group(generator, id, tracks.clone()),
+                                    "save"
+                                }
+                            }
+                            {remove}
+                        }
                     }
-                }
-                button {
-                    class: "link",
-                    title: "take what is left of it out of the queue",
-                    onclick: move |_| generator.stop(),
-                    "stop"
                 }
             }
         }
-        if let Some(message) = generator.status.read().clone() {
+        if let Some(message) = status {
             p { class: if *generator.failed.read() { "section-status error" } else { "section-status muted" }, "{message}" }
         }
     }
