@@ -23,6 +23,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential pkg-config clang libclang-dev \
  && rm -rf /var/lib/apt/lists/*
 
+# Built as it ships, fat LTO and stripped, unless told otherwise: CI's dev
+# images build thin, see Cargo.toml.
+ARG CARGO_PROFILE_RELEASE_LTO=fat
+ARG CARGO_PROFILE_RELEASE_STRIP=true
+
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core

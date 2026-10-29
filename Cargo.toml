@@ -43,7 +43,13 @@ tokio = "1.53.1"
 
 [profile.release]
 opt-level = 3
-lto = true
+# Thin: a release rebuild of the server takes 15 s rather than fat's 86 s,
+# for a binary ~10% larger. What ships is still fat: a tag's build in CI sets
+# CARGO_PROFILE_RELEASE_LTO=fat, as does the Dockerfile by default. Only the
+# final crate is redone when it changes, the dependencies are the same build.
+# Not stripped here, a profile of a local release build wants its symbols;
+# CI strips what it packages.
+lto = "thin"
 
 # The server optimised even under plain `cargo run`. The analyser's
 # resampling, mel spectrogram and descriptors are tight loops that run ~7x
@@ -52,6 +58,10 @@ lto = true
 # share one build of them; only the app's own code stays debug.
 [profile.dev.package."*"]
 opt-level = 3
+# Optimised code makes little of full debug info, and it was most of a debug
+# build: the app's binary is 433 MB with it, 181 MB without any. Stelly's own
+# crates keep theirs, for a debugger; backtraces still name file and line.
+debug = "line-tables-only"
 
 [profile.dev.package.stelly-core]
 opt-level = 3

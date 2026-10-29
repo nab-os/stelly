@@ -21,6 +21,14 @@ env:
   RUST_VERSION: "1.96.0"
   DX_VERSION: "0.7.10"
   MAINTAINER: "nab-os <9805355+nab-os@users.noreply.github.com>"
+  # What gets packaged goes without its symbol table: the server 53 MB to
+  # 45, the app 21 to 16, the APK's library its debug info as well. A panic
+  # still says where, only a RUST_BACKTRACE loses its function names.
+  #
+  # Which LTO is set on each build step instead, fat for a tag and thin
+  # otherwise, see Cargo.toml. Not here: rust-cache puts every CARGO_ variable
+  # in its key, and one that differs on a tag would keep it from main's cache.
+  CARGO_PROFILE_RELEASE_STRIP: "true"
 
 jobs:
   # ---------------------------------------------------------------- linux
@@ -89,6 +97,8 @@ jobs:
       # the next flag otherwise.
       - name: Bundle the desktop app
         working-directory: app
+        env:
+          CARGO_PROFILE_RELEASE_LTO: ${{ github.ref_type == 'tag' && 'fat' || 'thin' }}
         run: |
           dx bundle --release --platform linux \
             --package-types deb --package-types appimage \
@@ -100,6 +110,8 @@ jobs:
       # It depends on stelly-core, not the app crate, which is what keeps
       # dioxus, wry and GTK out of this build entirely.
       - name: Build the server
+        env:
+          CARGO_PROFILE_RELEASE_LTO: ${{ github.ref_type == 'tag' && 'fat' || 'thin' }}
         run: cargo build --release --locked -p stelly-server
 
       - name: Test the server and the shared crate
@@ -231,6 +243,8 @@ jobs:
 
       - name: Bundle the desktop app
         working-directory: app
+        env:
+          CARGO_PROFILE_RELEASE_LTO: ${{ github.ref_type == 'tag' && 'fat' || 'thin' }}
         run: |
           dx bundle --release --platform windows \
             --package-types nsis --package-types msi \
@@ -353,6 +367,8 @@ jobs:
       # on a phone.
       - name: Build the APK
         working-directory: app
+        env:
+          CARGO_PROFILE_RELEASE_LTO: ${{ github.ref_type == 'tag' && 'fat' || 'thin' }}
         run: |
           . ./android-env.sh
           dx bundle --release --platform android \
@@ -511,6 +527,8 @@ jobs:
           context: .
           target: server
           platforms: linux/amd64
+          # Fat for the image a tag publishes, thin for a dev one.
+          build-args: CARGO_PROFILE_RELEASE_LTO=${{ github.ref_type == 'tag' && 'fat' || 'thin' }}
           # A second arch here would only build under emulation, which for
           # ort and the bundled SQLite is most of an hour.
           # A dev build is loaded as well as pushed, so the smoke test runs
