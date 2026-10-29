@@ -48,8 +48,21 @@ opt-level = 3
 # CARGO_PROFILE_RELEASE_LTO=fat, as does the Dockerfile by default. Only the
 # final crate is redone when it changes, the dependencies are the same build.
 # Not stripped here, a profile of a local release build wants its symbols;
-# CI strips what it packages.
+# what is packaged is, see below and CARGO_PROFILE_RELEASE_STRIP in CI.
 lto = "thin"
+
+# What `dx bundle --release` builds with, `release` otherwise. dx makes these
+# up when they are missing, and strips the binary itself, after its assets are
+# read out of it, only when the manifest asks: the environment is not
+# consulted. The app 21 MB to 16, and the APK's library loses its debug info.
+# A panic still says where, only a RUST_BACKTRACE loses its function names.
+[profile.desktop-release]
+inherits = "release"
+strip = true
+
+[profile.android-release]
+inherits = "release"
+strip = true
 
 # The server optimised even under plain `cargo run`. The analyser's
 # resampling, mel spectrogram and descriptors are tight loops that run ~7x

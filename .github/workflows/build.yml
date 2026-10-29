@@ -21,9 +21,9 @@ env:
   RUST_VERSION: "1.96.0"
   DX_VERSION: "0.7.10"
   MAINTAINER: "nab-os <9805355+nab-os@users.noreply.github.com>"
-  # What gets packaged goes without its symbol table: the server 53 MB to
-  # 45, the app 21 to 16, the APK's library its debug info as well. A panic
-  # still says where, only a RUST_BACKTRACE loses its function names.
+  # The server packaged without its symbol table, 53 MB to 45. A panic still
+  # says where, only a RUST_BACKTRACE loses its function names. dx ignores
+  # this and strips the app and the APK by the profiles in Cargo.toml.
   #
   # Which LTO is set on each build step instead, fat for a tag and thin
   # otherwise, see Cargo.toml. Not here: rust-cache puts every CARGO_ variable
