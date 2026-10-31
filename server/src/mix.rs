@@ -527,7 +527,11 @@ struct Loaded {
 struct Reading {
     db_path: std::path::PathBuf,
     loaded: tokio::sync::watch::Sender<Loaded>,
-    /// Analyses were recorded since the library was last read.
+    /// Analysed since the library was loaded, and not in it yet: the next
+    /// ask adds them to it, sharing the rest, rather than the table being
+    /// read again.
+    added: Mutex<Vec<(i64, Track)>>,
+    /// The library must be read again: a dedupe moved analyses about.
     stale: AtomicBool,
     /// A task is reading it.
     reading: AtomicBool,
@@ -536,32 +540,72 @@ struct Reading {
 
 impl Reading {
     fn new(db_path: std::path::PathBuf, log: Arc<LogBuffer>) -> Self {
-        Self { db_path, loaded: tokio::sync::watch::channel(Loaded::default()).0, stale: AtomicBool::new(false), reading: AtomicBool::new(false), log }
+        Self {
+            db_path,
+            loaded: tokio::sync::watch::channel(Loaded::default()).0,
+            added: Mutex::default(),
+            stale: AtomicBool::new(false),
+            reading: AtomicBool::new(false),
+            log,
+        }
     }
 
-    /// The library, read from the database the first time. Stale, it is
-    /// still what is answered, while it is read again behind the ask: a
-    /// read is the whole table, minutes on a large library, and a sync's
-    /// hundreds of asks would each wait on one every few analyses.
+    /// The library, read from the database the first time, with what was
+    /// analysed since added to it. Stale, it is still what is answered,
+    /// while it is read again behind the ask: a read is the whole table,
+    /// minutes on a large library.
     async fn mix(self: &Arc<Self>) -> Result<Arc<Mix>> {
         let mut loaded = self.loaded.subscribe();
-        if let Some(mix) = loaded.borrow_and_update().mix.clone() {
+        if loaded.borrow_and_update().mix.is_some() {
             if self.stale.load(Ordering::SeqCst) {
                 self.refresh();
             }
-            return Ok(mix);
+            return Ok(self.with_added(None));
         }
         self.refresh();
         loop {
             loaded.changed().await.map_err(|_| anyhow::anyhow!("the mix library is gone"))?;
             let now = loaded.borrow_and_update();
-            if let Some(mix) = now.mix.clone() {
-                return Ok(mix);
+            if now.mix.is_some() {
+                drop(now);
+                return Ok(self.with_added(None));
             }
             if let Some(why) = &now.failed {
                 bail!("reading the mix library: {why}");
             }
         }
+    }
+
+    /// A track analysed, for the library on the next ask.
+    fn add(&self, id: i64, track: Track) {
+        self.added.lock().unwrap_or_else(|e| e.into_inner()).push((id, track));
+    }
+
+    /// The library with what was added since: `fresh` just read in place of
+    /// what is loaded, or the loaded one grown. Under the lock on `added`
+    /// through the publishing, so a read landing and an ask growing the
+    /// library at once neither lose nor double an entry.
+    fn with_added(&self, fresh: Option<Mix>) -> Arc<Mix> {
+        let mut added = self.added.lock().unwrap_or_else(|e| e.into_inner());
+        let entries = std::mem::take(&mut *added);
+        let mut grown = None;
+        self.loaded.send_if_modified(|loaded| {
+            let read = fresh.is_some();
+            let base = match fresh {
+                Some(fresh) => Arc::new(fresh),
+                None => loaded.mix.clone().expect("asked of a loaded library"),
+            };
+            let mix = if entries.is_empty() { base } else { Arc::new(base.with(entries)) };
+            let changed = read || !matches!(&loaded.mix, Some(was) if Arc::ptr_eq(was, &mix));
+            if read {
+                loaded.reads += 1;
+                loaded.failed = None;
+            }
+            loaded.mix = Some(mix.clone());
+            grown = Some(mix);
+            changed
+        });
+        grown.expect("set just above")
     }
 
     /// Read the library on a task of its own, unless one already is. The
@@ -583,20 +627,19 @@ impl Reading {
                     // another ask can start a read.
                     reading.reading.store(false, Ordering::SeqCst);
                 }
-                reading.loaded.send_modify(|loaded| {
-                    loaded.reads += 1;
-                    match read {
-                        Ok(mix) => {
-                            loaded.mix = Some(Arc::new(mix));
-                            loaded.failed = None;
-                        }
-                        Err(err) => {
-                            reading.log.push(format!("mix: reading the library: {err:#}"));
-                            loaded.failed = Some(format!("{err:#}"));
-                            reading.stale.store(true, Ordering::SeqCst);
-                        }
+                match read {
+                    Ok(mix) => {
+                        reading.with_added(Some(mix));
                     }
-                });
+                    Err(err) => {
+                        reading.log.push(format!("mix: reading the library: {err:#}"));
+                        reading.stale.store(true, Ordering::SeqCst);
+                        reading.loaded.send_modify(|loaded| {
+                            loaded.reads += 1;
+                            loaded.failed = Some(format!("{err:#}"));
+                        });
+                    }
+                }
                 if !again {
                     return;
                 }
@@ -844,15 +887,8 @@ impl MixService {
         self.library.mix().await
     }
 
-    /// What was added is read in after the next ask, which still gets what
-    /// was loaded.
-    fn forget_loaded(&self) {
-        self.library.stale.store(true, Ordering::SeqCst);
-    }
-
     /// Read the library again now, if it was loaded: after a dedupe, which
-    /// moves analyses from the tracks it merges to the ones it keeps, and a
-    /// track asked for, which `next` and `set` should know at once. Asks
+    /// moves analyses from the tracks it merges to the ones it keeps. Asks
     /// meanwhile get what was loaded.
     pub async fn reread(&self) {
         self.library.reread().await
@@ -1019,8 +1055,8 @@ impl MixService {
             Err(_) => Asked::Waiting,
             Ok(Err(why)) => Asked::Failed(why),
             Ok(Ok(())) => {
-                // So `next` and `set` know it at once.
-                self.reread().await;
+                // In the library already, for `next` and `set`: the queue
+                // adds what it records before it tells.
                 match tokio::task::spawn_blocking(read).await?? {
                     Some(track) => Asked::Analysed(track),
                     None => Asked::Failed("analysed, then gone: merged into another track?".into()),
@@ -1176,7 +1212,6 @@ impl MixService {
         let (report, results) = mpsc::channel();
         let handles = start_workers(&self.paths, workers, &feed, report, &job)?;
         let mut taken = HashSet::new();
-        let mut unread = 0;
         let mut spaced = 0;
         // Whether to start again with other workers, once what they have is done.
         let mut again = false;
@@ -1228,15 +1263,14 @@ impl MixService {
                     stalled = outcome.mix.err();
                     continue;
                 }
-                let recorded = record(&mut conn, id, &name, outcome, &job)?;
+                let mut recorded = record(&mut conn, id, &name, outcome, &job)?;
                 spaced += recorded.spaced as usize;
                 dequeue(&mut conn, id)?;
-                self.tell(id, &recorded);
-                unread += 1;
-                if unread >= RELOAD_EVERY {
-                    self.forget_loaded();
-                    unread = 0;
+                // Into the library before anyone waiting on it is told.
+                if let Some(track) = recorded.track.take() {
+                    self.library.add(id, track);
                 }
+                self.tell(id, &recorded);
             }
         })();
         feed.close();
@@ -1244,7 +1278,6 @@ impl MixService {
             let _ = handle.join();
         }
         self.analysing.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.forget_loaded();
         if spaced > 0 {
             self.spaced.fetch_add(spaced, Ordering::SeqCst);
             self.settled.notify_one();
@@ -1359,8 +1392,6 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How often the worker looks at the queue unasked, for what was queued by
 /// another process, the command line's.
 const LOOK_EVERY: Duration = Duration::from_secs(5 * 60);
-/// The library is read in again after this many new tracks, and at the end.
-const RELOAD_EVERY: usize = 25;
 
 // --------------------------------------------------------------- analysing
 
@@ -1549,6 +1580,8 @@ struct Recorded {
     line: String,
     /// Its excerpt went into `features` too.
     spaced: bool,
+    /// The analysis, for the loaded library.
+    track: Option<Track>,
 }
 
 fn record(conn: &mut SqliteConnection, id: i64, name: &str, outcome: Outcome, job: &Job) -> Result<Recorded> {
@@ -1571,11 +1604,12 @@ fn record(conn: &mut SqliteConnection, id: i64, name: &str, outcome: Outcome, jo
             store(conn, id, &track)?;
             let joined = if spaced { ", and its excerpt for the space" } else { "" };
             let drops = track.analysis.drops.as_ref().map_or(0, |d| d.at.len());
-            Recorded { ok: true, line: format!("{name}: {} phrases, {drops} drops{joined}", track.segments.len()), spaced }
+            let line = format!("{name}: {} phrases, {drops} drops{joined}", track.segments.len());
+            Recorded { ok: true, line, spaced, track: Some(track) }
         }
         Err(error) => {
             record_failure(conn, id, &error)?;
-            Recorded { ok: false, line: format!("{name}: {error}"), spaced }
+            Recorded { ok: false, line: format!("{name}: {error}"), spaced, track: None }
         }
     })
 }
@@ -1662,29 +1696,38 @@ mod tests {
         conn
     }
 
+    /// An analysis with nothing in it, as the queue would hand over.
+    fn bare_track() -> Track {
+        serde_json::from_str(
+            r#"{"path": "a", "size": 0, "modified": 0, "version": 1, "segments": [],
+                "analysis": {"seconds": 0.0, "grid": null, "key": null, "loudness": null, "beats": [], "downbeats": [],
+                             "downbeat_confidence": 0.0, "phrases": [], "sections": []}}"#,
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn a_stale_library_is_answered_while_it_is_read_again() {
-        let dir = std::env::temp_dir().join(format!("stelly-mix-stale-{}", std::process::id()));
+    async fn what_is_analysed_joins_the_loaded_library_without_a_read() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-added-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let paths = Paths::under(&dir);
         std::fs::create_dir_all(&paths.data_dir).unwrap();
         let space = Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone()));
         let service = MixService::new(paths, space, Default::default());
 
-        let first = service.mix().await.unwrap();
-        service.forget_loaded();
-        assert!(Arc::ptr_eq(&first, &service.mix().await.unwrap()), "the ask waited on the read");
-        let read_again = async {
-            while Arc::ptr_eq(&first, &service.mix().await.unwrap()) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(10), read_again).await.expect("never read again");
+        let empty = service.mix().await.unwrap();
+        assert_eq!(empty.len(), 0);
+        service.library.add(7, bare_track());
+        let grown = service.mix().await.unwrap();
+        assert_eq!(grown.len(), 1);
+        assert!(grown.track(7).is_some());
+        assert!(Arc::ptr_eq(&grown, &service.mix().await.unwrap()), "nothing more added, nothing more made");
+        assert_eq!(service.library.loaded.borrow().reads, 1, "added without reading the table");
 
-        let second = service.mix().await.unwrap();
+        // Read again, as after a dedupe: the table has no such row.
         service.reread().await;
-        assert!(!Arc::ptr_eq(&second, &service.mix().await.unwrap()), "reread kept what was loaded");
-        assert_eq!(service.library.loaded.borrow().reads, 3, "a read for the first ask, the stale one and the reread");
+        assert_eq!(service.mix().await.unwrap().len(), 0);
+        assert_eq!(service.library.loaded.borrow().reads, 2);
     }
 
     #[tokio::test]
