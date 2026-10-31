@@ -504,6 +504,21 @@ pub fn load(db_path: &std::path::Path) -> Result<Mix> {
     Ok(Mix::new(entries))
 }
 
+/// `load` into `loaded`, by whoever holds `MixService::loading`. Fresh from
+/// before the read, so an analysis recorded during it has it read again.
+async fn load_into(db_path: std::path::PathBuf, loaded: &tokio::sync::RwLock<Option<Arc<Mix>>>, stale: &AtomicBool) -> Result<Arc<Mix>> {
+    stale.store(false, Ordering::SeqCst);
+    let mix = match tokio::task::spawn_blocking(move || load(&db_path)).await.map_err(anyhow::Error::from).and_then(|read| read) {
+        Ok(mix) => Arc::new(mix),
+        Err(err) => {
+            stale.store(true, Ordering::SeqCst);
+            return Err(err);
+        }
+    };
+    *loaded.write().await = Some(mix.clone());
+    Ok(mix)
+}
+
 // ------------------------------------------------------------------- queue
 
 /// Why a track is in the queue, most urgent first, which is the order it is
@@ -666,6 +681,10 @@ pub struct MixService {
     /// The server's space, which a selection made from it walks.
     space: Arc<SpaceService>,
     loaded: Arc<tokio::sync::RwLock<Option<Arc<Mix>>>>,
+    /// Analyses were recorded since `loaded` was read.
+    stale: Arc<AtomicBool>,
+    /// Held while the library is read, so it is by one at a time.
+    loading: Arc<tokio::sync::Mutex<()>>,
     batch: Arc<Mutex<Batch>>,
     /// Calls off the selection being chosen.
     cancel: Arc<AtomicBool>,
@@ -704,6 +723,8 @@ impl MixService {
             paths,
             space,
             loaded: Default::default(),
+            stale: Default::default(),
+            loading: Default::default(),
             batch: Default::default(),
             cancel: Default::default(),
             bell: Default::default(),
@@ -718,30 +739,60 @@ impl MixService {
         }
     }
 
-    /// The library, read from the database the first time.
+    /// The library, read from the database the first time. Stale, it is
+    /// still what is answered, while it is read again behind the ask: a
+    /// read is the whole table, minutes on a large library, and a sync's
+    /// hundreds of asks would each wait on one every few analyses.
     pub async fn mix(&self) -> Result<Arc<Mix>> {
+        if let Some(mix) = self.loaded.read().await.clone() {
+            if self.stale.load(Ordering::SeqCst) {
+                self.refresh();
+            }
+            return Ok(mix);
+        }
+        let _loading = self.loading.lock().await;
         if let Some(mix) = self.loaded.read().await.clone() {
             return Ok(mix);
         }
-        let mut slot = self.loaded.write().await;
-        if let Some(mix) = slot.clone() {
-            return Ok(mix);
-        }
-        let db_path = self.paths.db_path.clone();
-        let mix = Arc::new(tokio::task::spawn_blocking(move || load(&db_path)).await??);
-        *slot = Some(mix.clone());
-        Ok(mix)
+        load_into(self.paths.db_path.clone(), &self.loaded, &self.stale).await
     }
 
-    /// What was added is read in on the next ask.
+    /// Read the library again on a task of its own, unless it already is.
+    fn refresh(&self) {
+        let Ok(loading) = self.loading.clone().try_lock_owned() else {
+            return;
+        };
+        let (db_path, loaded, stale, log) = (self.paths.db_path.clone(), self.loaded.clone(), self.stale.clone(), self.log.clone());
+        tokio::spawn(async move {
+            let _loading = loading;
+            // Read in by the one that held it before.
+            if !stale.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Err(err) = load_into(db_path, &loaded, &stale).await {
+                log.push(format!("mix: reading the library again: {err:#}"));
+            }
+        });
+    }
+
+    /// What was added is read in after the next ask, which still gets what
+    /// was loaded.
     fn forget_loaded(&self) {
-        *self.loaded.blocking_write() = None;
+        self.stale.store(true, Ordering::SeqCst);
     }
 
-    /// The same, from async code: after a dedupe, which moves analyses
-    /// from the tracks it merges to the ones it keeps.
+    /// Read the library again now, if it was loaded: after a dedupe, which
+    /// moves analyses from the tracks it merges to the ones it keeps, and a
+    /// track asked for, which `next` and `set` should know at once. Asks
+    /// meanwhile get what was loaded.
     pub async fn reread(&self) {
-        *self.loaded.write().await = None;
+        let _loading = self.loading.lock().await;
+        if self.loaded.read().await.is_none() {
+            return;
+        }
+        if let Err(err) = load_into(self.paths.db_path.clone(), &self.loaded, &self.stale).await {
+            self.log.push(format!("mix: reading the library again: {err:#}"));
+        }
     }
 
     pub fn status(&self) -> JobStatus {
@@ -1546,6 +1597,30 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[tokio::test]
+    async fn a_stale_library_is_answered_while_it_is_read_again() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = Paths::under(&dir);
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let space = Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone()));
+        let service = MixService::new(paths, space, Default::default());
+
+        let first = service.mix().await.unwrap();
+        service.forget_loaded();
+        assert!(Arc::ptr_eq(&first, &service.mix().await.unwrap()), "the ask waited on the read");
+        let read_again = async {
+            while Arc::ptr_eq(&first, &service.mix().await.unwrap()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), read_again).await.expect("never read again");
+
+        let second = service.mix().await.unwrap();
+        service.reread().await;
+        assert!(!Arc::ptr_eq(&second, &service.mix().await.unwrap()), "reread kept what was loaded");
     }
 
     fn order(conn: &mut SqliteConnection, taken: &[i64]) -> Vec<(i64, Reason)> {
