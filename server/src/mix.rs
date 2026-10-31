@@ -496,27 +496,132 @@ pub fn load(db_path: &std::path::Path) -> Result<Mix> {
     // Through the writer's connection, which brings the schema up to date: the
     // first read of a database from before mixing makes its tables.
     let conn = &mut crate::db::open_for_write(db_path)?;
-    let rows: Vec<Row> = diesel::sql_query(format!("SELECT track_id, entry_json FROM mix WHERE version = {VERSION}")).load(conn)?;
-    let entries = rows
-        .into_iter()
-        .filter_map(|row| Some((row.track_id, serde_json::from_str::<Track>(&row.entry_json).ok()?)))
-        .collect();
+    // Row by row: the table is gigabytes of JSON on a large library, and
+    // all of it as strings beside the parsed entries would be twice that.
+    let rows = diesel::sql_query(format!("SELECT track_id, entry_json FROM mix WHERE version = {VERSION}"))
+        .load_iter::<Row, diesel::connection::DefaultLoadingMode>(conn)?;
+    let mut entries = Vec::new();
+    for row in rows {
+        let row = row?;
+        if let Ok(track) = serde_json::from_str::<Track>(&row.entry_json) {
+            entries.push((row.track_id, track));
+        }
+    }
     Ok(Mix::new(entries))
 }
 
-/// `load` into `loaded`, by whoever holds `MixService::loading`. Fresh from
-/// before the read, so an analysis recorded during it has it read again.
-async fn load_into(db_path: std::path::PathBuf, loaded: &tokio::sync::RwLock<Option<Arc<Mix>>>, stale: &AtomicBool) -> Result<Arc<Mix>> {
-    stale.store(false, Ordering::SeqCst);
-    let mix = match tokio::task::spawn_blocking(move || load(&db_path)).await.map_err(anyhow::Error::from).and_then(|read| read) {
-        Ok(mix) => Arc::new(mix),
-        Err(err) => {
-            stale.store(true, Ordering::SeqCst);
-            return Err(err);
+/// The library as `MixService` holds it: what was last read, and how the
+/// reads are going, for whoever waits on one.
+#[derive(Clone, Default)]
+struct Loaded {
+    mix: Option<Arc<Mix>>,
+    /// Why the last read failed, until one succeeds.
+    failed: Option<String>,
+    /// Reads ended, well or not: a change for the watchers to wake on.
+    reads: u64,
+}
+
+/// The reading of the library: on a task of its own, never a request's, so
+/// a client giving up on its ask cannot leave a read running unwatched and
+/// the next ask start another, each minutes and gigabytes.
+struct Reading {
+    db_path: std::path::PathBuf,
+    loaded: tokio::sync::watch::Sender<Loaded>,
+    /// Analyses were recorded since the library was last read.
+    stale: AtomicBool,
+    /// A task is reading it.
+    reading: AtomicBool,
+    log: Arc<LogBuffer>,
+}
+
+impl Reading {
+    fn new(db_path: std::path::PathBuf, log: Arc<LogBuffer>) -> Self {
+        Self { db_path, loaded: tokio::sync::watch::channel(Loaded::default()).0, stale: AtomicBool::new(false), reading: AtomicBool::new(false), log }
+    }
+
+    /// The library, read from the database the first time. Stale, it is
+    /// still what is answered, while it is read again behind the ask: a
+    /// read is the whole table, minutes on a large library, and a sync's
+    /// hundreds of asks would each wait on one every few analyses.
+    async fn mix(self: &Arc<Self>) -> Result<Arc<Mix>> {
+        let mut loaded = self.loaded.subscribe();
+        if let Some(mix) = loaded.borrow_and_update().mix.clone() {
+            if self.stale.load(Ordering::SeqCst) {
+                self.refresh();
+            }
+            return Ok(mix);
         }
-    };
-    *loaded.write().await = Some(mix.clone());
-    Ok(mix)
+        self.refresh();
+        loop {
+            loaded.changed().await.map_err(|_| anyhow::anyhow!("the mix library is gone"))?;
+            let now = loaded.borrow_and_update();
+            if let Some(mix) = now.mix.clone() {
+                return Ok(mix);
+            }
+            if let Some(why) = &now.failed {
+                bail!("reading the mix library: {why}");
+            }
+        }
+    }
+
+    /// Read the library on a task of its own, unless one already is. The
+    /// task reads again while analyses come in during a read, and stops at
+    /// a failure, which the next ask tries again.
+    fn refresh(self: &Arc<Self>) {
+        if self.reading.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let reading = self.clone();
+        tokio::spawn(async move {
+            loop {
+                reading.stale.store(false, Ordering::SeqCst);
+                let db_path = reading.db_path.clone();
+                let read = tokio::task::spawn_blocking(move || load(&db_path)).await.map_err(anyhow::Error::from).and_then(|read| read);
+                let again = read.is_ok() && reading.stale.load(Ordering::SeqCst);
+                if !again {
+                    // Before the watchers wake: done, they can see, or
+                    // another ask can start a read.
+                    reading.reading.store(false, Ordering::SeqCst);
+                }
+                reading.loaded.send_modify(|loaded| {
+                    loaded.reads += 1;
+                    match read {
+                        Ok(mix) => {
+                            loaded.mix = Some(Arc::new(mix));
+                            loaded.failed = None;
+                        }
+                        Err(err) => {
+                            reading.log.push(format!("mix: reading the library: {err:#}"));
+                            loaded.failed = Some(format!("{err:#}"));
+                            reading.stale.store(true, Ordering::SeqCst);
+                        }
+                    }
+                });
+                if !again {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Read the library again now, if it was loaded: until a read begun
+    /// after this ends. Asks meanwhile get what was loaded.
+    async fn reread(self: &Arc<Self>) {
+        let mut loaded = self.loaded.subscribe();
+        if loaded.borrow_and_update().mix.is_none() {
+            return;
+        }
+        self.stale.store(true, Ordering::SeqCst);
+        self.refresh();
+        // A read under way when this was called goes on to another, which
+        // sees what this was called for; the task says when it is done.
+        while loaded.changed().await.is_ok() {
+            loaded.borrow_and_update();
+            if !self.reading.load(Ordering::SeqCst) {
+                return;
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------- queue
@@ -680,11 +785,7 @@ pub struct MixService {
     paths: Paths,
     /// The server's space, which a selection made from it walks.
     space: Arc<SpaceService>,
-    loaded: Arc<tokio::sync::RwLock<Option<Arc<Mix>>>>,
-    /// Analyses were recorded since `loaded` was read.
-    stale: Arc<AtomicBool>,
-    /// Held while the library is read, so it is by one at a time.
-    loading: Arc<tokio::sync::Mutex<()>>,
+    library: Arc<Reading>,
     batch: Arc<Mutex<Batch>>,
     /// Calls off the selection being chosen.
     cancel: Arc<AtomicBool>,
@@ -720,11 +821,9 @@ pub enum Asked {
 impl MixService {
     pub fn new(paths: Paths, space: Arc<SpaceService>, log: Arc<LogBuffer>) -> Self {
         Self {
+            library: Arc::new(Reading::new(paths.db_path.clone(), log.clone())),
             paths,
             space,
-            loaded: Default::default(),
-            stale: Default::default(),
-            loading: Default::default(),
             batch: Default::default(),
             cancel: Default::default(),
             bell: Default::default(),
@@ -739,46 +838,16 @@ impl MixService {
         }
     }
 
-    /// The library, read from the database the first time. Stale, it is
-    /// still what is answered, while it is read again behind the ask: a
-    /// read is the whole table, minutes on a large library, and a sync's
-    /// hundreds of asks would each wait on one every few analyses.
+    /// The library, read from the database the first time, and still what
+    /// is answered while it is read again after analyses: see `Reading`.
     pub async fn mix(&self) -> Result<Arc<Mix>> {
-        if let Some(mix) = self.loaded.read().await.clone() {
-            if self.stale.load(Ordering::SeqCst) {
-                self.refresh();
-            }
-            return Ok(mix);
-        }
-        let _loading = self.loading.lock().await;
-        if let Some(mix) = self.loaded.read().await.clone() {
-            return Ok(mix);
-        }
-        load_into(self.paths.db_path.clone(), &self.loaded, &self.stale).await
-    }
-
-    /// Read the library again on a task of its own, unless it already is.
-    fn refresh(&self) {
-        let Ok(loading) = self.loading.clone().try_lock_owned() else {
-            return;
-        };
-        let (db_path, loaded, stale, log) = (self.paths.db_path.clone(), self.loaded.clone(), self.stale.clone(), self.log.clone());
-        tokio::spawn(async move {
-            let _loading = loading;
-            // Read in by the one that held it before.
-            if !stale.load(Ordering::SeqCst) {
-                return;
-            }
-            if let Err(err) = load_into(db_path, &loaded, &stale).await {
-                log.push(format!("mix: reading the library again: {err:#}"));
-            }
-        });
+        self.library.mix().await
     }
 
     /// What was added is read in after the next ask, which still gets what
     /// was loaded.
     fn forget_loaded(&self) {
-        self.stale.store(true, Ordering::SeqCst);
+        self.library.stale.store(true, Ordering::SeqCst);
     }
 
     /// Read the library again now, if it was loaded: after a dedupe, which
@@ -786,13 +855,7 @@ impl MixService {
     /// track asked for, which `next` and `set` should know at once. Asks
     /// meanwhile get what was loaded.
     pub async fn reread(&self) {
-        let _loading = self.loading.lock().await;
-        if self.loaded.read().await.is_none() {
-            return;
-        }
-        if let Err(err) = load_into(self.paths.db_path.clone(), &self.loaded, &self.stale).await {
-            self.log.push(format!("mix: reading the library again: {err:#}"));
-        }
+        self.library.reread().await
     }
 
     pub fn status(&self) -> JobStatus {
@@ -1621,6 +1684,22 @@ mod tests {
         let second = service.mix().await.unwrap();
         service.reread().await;
         assert!(!Arc::ptr_eq(&second, &service.mix().await.unwrap()), "reread kept what was loaded");
+        assert_eq!(service.library.loaded.borrow().reads, 3, "a read for the first ask, the stale one and the reread");
+    }
+
+    #[tokio::test]
+    async fn an_ask_given_up_on_leaves_one_read_for_the_next() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-given-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = Paths::under(&dir);
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let space = Arc::new(SpaceService::new(paths.data_dir.clone(), paths.db_path.clone()));
+        let service = MixService::new(paths, space, Default::default());
+
+        // Dropped at once, as a request is when its client goes.
+        drop(tokio::time::timeout(Duration::ZERO, service.mix()).await.ok());
+        service.mix().await.unwrap();
+        assert_eq!(service.library.loaded.borrow().reads, 1);
     }
 
     fn order(conn: &mut SqliteConnection, taken: &[i64]) -> Vec<(i64, Reason)> {
